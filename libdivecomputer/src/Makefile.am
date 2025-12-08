@@ -77,11 +77,13 @@ libdivecomputer_la_SOURCES = \
 	liquivision_lynx.h liquivision_lynx.c liquivision_lynx_parser.c \
 	sporasub_sp2.h sporasub_sp2.c sporasub_sp2_parser.c \
 	deepsix_excursion.h deepsix_excursion.c deepsix_excursion_parser.c \
+	seac_screen_common.h seac_screen_common.c \
 	seac_screen.h seac_screen.c seac_screen_parser.c \
 	deepblu_cosmiq.h deepblu_cosmiq.c deepblu_cosmiq_parser.c \
 	oceans_s1_common.h oceans_s1_common.c \
 	oceans_s1.h oceans_s1.c oceans_s1_parser.c \
 	divesoft_freedom.h divesoft_freedom.c divesoft_freedom_parser.c \
+	halcyon_symbios.h halcyon_symbios.c halcyon_symbios_parser.c \
 	hdlc.h hdlc.c \
 	packet.h packet.c \
 	socket.h socket.c \

@@ -317,8 +317,11 @@ static const dc_descriptor_t g_descriptors[] = {
 	{"Mares", "Puck Air 2",        DC_FAMILY_MARES_ICONHD , 0x2D, DC_TRANSPORT_BLE, dc_filter_mares},
 	{"Mares", "Sirius",            DC_FAMILY_MARES_ICONHD , 0x2F, DC_TRANSPORT_BLE, dc_filter_mares},
 	{"Mares", "Quad Ci",           DC_FAMILY_MARES_ICONHD , 0x31, DC_TRANSPORT_BLE, dc_filter_mares},
+	{"Mares", "Quad 2",            DC_FAMILY_MARES_ICONHD , 0x32, DC_TRANSPORT_BLE, dc_filter_mares},
 	{"Mares", "Puck 4",            DC_FAMILY_MARES_ICONHD , 0x35, DC_TRANSPORT_BLE, dc_filter_mares},
 	{"Mares", "Puck Lite",         DC_FAMILY_MARES_ICONHD , 0x35, DC_TRANSPORT_BLE, dc_filter_mares},
+	{"Mares", "Puck Pro EZ",       DC_FAMILY_MARES_ICONHD , 0x35, DC_TRANSPORT_BLE, dc_filter_mares},
+	{"Mares", "Puck Pro Ultra",    DC_FAMILY_MARES_ICONHD , 0x35, DC_TRANSPORT_BLE, dc_filter_mares},
 	/* Heinrichs Weikamp */
 	{"Heinrichs Weikamp", "OSTC",     DC_FAMILY_HW_OSTC, 0, DC_TRANSPORT_SERIAL, NULL},
 	{"Heinrichs Weikamp", "OSTC Mk2", DC_FAMILY_HW_OSTC, 1, DC_TRANSPORT_SERIAL, NULL},
@@ -477,8 +480,9 @@ static const dc_descriptor_t g_descriptors[] = {
 	{"Genesis",  "Centauri",  DC_FAMILY_DEEPSIX_EXCURSION, 0, DC_TRANSPORT_BLE, dc_filter_deepsix},
 	{"Scorpena", "Alpha",     DC_FAMILY_DEEPSIX_EXCURSION, 0, DC_TRANSPORT_BLE, dc_filter_deepsix},
 	/* Seac Screen */
-	{"Seac", "Screen", DC_FAMILY_SEAC_SCREEN, 0, DC_TRANSPORT_SERIAL, NULL},
-	{"Seac", "Action", DC_FAMILY_SEAC_SCREEN, 0, DC_TRANSPORT_SERIAL, NULL},
+	{"Seac", "Action", DC_FAMILY_SEAC_SCREEN, 0x01, DC_TRANSPORT_SERIAL, NULL},
+	{"Seac", "Screen", DC_FAMILY_SEAC_SCREEN, 0x02, DC_TRANSPORT_SERIAL, NULL},
+	{"Seac", "Tablet", DC_FAMILY_SEAC_SCREEN, 0x10, DC_TRANSPORT_SERIAL, NULL},
 	/* Deepblu Cosmiq */
 	{"Deepblu", "Cosmiq+", DC_FAMILY_DEEPBLU_COSMIQ, 0, DC_TRANSPORT_BLE, dc_filter_deepblu},
 	/* Oceans S1 */
@@ -490,24 +494,6 @@ static const dc_descriptor_t g_descriptors[] = {
 	{"Halcyon", "Symbios HUD",     DC_FAMILY_HALCYON_SYMBIOS, 1, DC_TRANSPORT_BLE, dc_filter_halcyon},
 	{"Halcyon", "Symbios Handset", DC_FAMILY_HALCYON_SYMBIOS, 7, DC_TRANSPORT_BLE, dc_filter_halcyon},
 };
-
-static int
-dc_match_name (const void *key, const void *value)
-{
-	const char *k = (const char *) key;
-	const char *v = *(const char * const *) value;
-
-	return strcasecmp (k, v) == 0;
-}
-
-static int
-dc_match_prefix (const void *key, const void *value)
-{
-	const char *k = (const char *) key;
-	const char *v = *(const char * const *) value;
-
-	return strncasecmp (k, v, strlen (v)) == 0;
-}
 
 static int
 dc_match_usb (const void *key, const void *value)
@@ -528,14 +514,32 @@ dc_match_usbhid (const void *key, const void *value)
 }
 
 static int
-dc_match_number_with_prefix (const void *key, const void *value)
+dc_match_name (const void *key, const void *value)
+{
+	const char *k = (const char *) key;
+	const char *v = *(const char * const *) value;
+
+	return strcasecmp (k, v) == 0;
+}
+
+static int
+dc_match_prefix (const void *key, const void *value)
+{
+	const char *k = (const char *) key;
+	const char *v = *(const char * const *) value;
+
+	return strncasecmp (k, v, strlen (v)) == 0;
+}
+
+static int
+dc_match_prefix_with_number (const void *key, const void *value)
 {
 	const char *str = (const char *) key;
 	const char *prefix = *(const char * const *) value;
 
 	size_t n = strlen (prefix);
 
-	if (strncmp (str, prefix, n) != 0) {
+	if (strncasecmp (str, prefix, n) != 0) {
 		return 0;
 	}
 
@@ -551,14 +555,14 @@ dc_match_number_with_prefix (const void *key, const void *value)
 }
 
 static int
-dc_match_hex_with_prefix (const void *key, const void *value)
+dc_match_prefix_with_hex (const void *key, const void *value)
 {
 	const char *str = (const char *) key;
 	const char *prefix = *(const char * const *) value;
 
 	size_t n = strlen (prefix);
 
-	if (strncmp (str, prefix, n) != 0) {
+	if (strncasecmp (str, prefix, n) != 0) {
 		return 0;
 	}
 
@@ -588,7 +592,7 @@ dc_match_oceanic (const void *key, const void *value)
 
 	const char *p = prefix;
 
-	return dc_match_number_with_prefix (key, &p);
+	return dc_match_prefix_with_number (key, &p);
 }
 
 static int
@@ -598,11 +602,40 @@ dc_match_cressi (const void *key, const void *value)
 
 	char prefix[16] = {0};
 
-	dc_platform_snprintf(prefix, sizeof(prefix), "%u_", model);
+	dc_platform_snprintf(prefix, sizeof(prefix), "%x_", model);
 
 	const char *p = prefix;
 
-	return dc_match_hex_with_prefix (key, &p);
+	return dc_match_prefix_with_hex (key, &p);
+}
+
+static int
+dc_match_halcyon (const void *key, const void *value)
+{
+	const char *str = (const char *) key;
+	unsigned int model = *(const unsigned int *) value;
+
+	char prefix[16] = {0};
+	dc_platform_snprintf(prefix, sizeof(prefix), "H%02u", model);
+
+	if (strncasecmp (str, prefix, 3) == 0) {
+		return 1;
+	}
+
+	size_t n = 0;
+	while (str[n] != 0) {
+		const char c = str[n];
+		if (c < '0' || c > '9') {
+			return 0;
+		}
+		n++;
+	}
+
+	if (n < 10) {
+		return 0;
+	}
+
+	return strncasecmp (str + 4, prefix + 1, 2) == 0;
 }
 
 static int
@@ -747,8 +780,11 @@ dc_filter_mares (const dc_descriptor_t *descriptor, dc_transport_t transport, co
 		"Mares Genius",
 		"Sirius",
 		"Quad Ci",
+		"Quad2",
 		"Puck4",
 		"Puck Lite",
+		"Puck",
+		"Puck Pro U",
 	};
 
 	if (transport == DC_TRANSPORT_BLE) {
@@ -768,7 +804,7 @@ dc_filter_divesystem (const dc_descriptor_t *descriptor, dc_transport_t transpor
 	};
 
 	if (transport == DC_TRANSPORT_BLUETOOTH || transport == DC_TRANSPORT_BLE) {
-		return DC_FILTER_INTERNAL (userdata, bluetooth, 0, dc_match_number_with_prefix);
+		return DC_FILTER_INTERNAL (userdata, bluetooth, 0, dc_match_prefix_with_number);
 	}
 
 	return 1;
@@ -916,13 +952,13 @@ dc_filter_cressi (const dc_descriptor_t *descriptor, dc_transport_t transport, c
 static int
 dc_filter_halcyon (const dc_descriptor_t *descriptor, dc_transport_t transport, const void *userdata)
 {
-	static const char * const bluetooth[] = {
-		"H01", // Symbios HUD
-		"H07", // Symbios Handset
+	static const unsigned int model[] = {
+		1, // Symbios HUD
+		7, // Symbios Handset
 	};
 
 	if (transport == DC_TRANSPORT_BLE) {
-		return DC_FILTER_INTERNAL (userdata, bluetooth, 0, dc_match_prefix);
+		return DC_FILTER_INTERNAL (userdata, model, 0, dc_match_halcyon);
 	}
 
 	return 1;

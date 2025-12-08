@@ -1,7 +1,7 @@
 /*
  * libdivecomputer
  *
- * Copyright (C) 2025 Jef Driesen
+ * Copyright (C) 2023 Jef Driesen
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,27 +19,25 @@
  * MA 02110-1301 USA
  */
 
-#ifndef SEAC_SCREEN_COMMON_H
-#define SEAC_SCREEN_COMMON_H
+#ifndef HALCYON_SYMBIOS_H
+#define HALCYON_SYMBIOS_H
 
 #include <libdivecomputer/context.h>
+#include <libdivecomputer/iostream.h>
+#include <libdivecomputer/device.h>
+#include <libdivecomputer/parser.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
 
-#define HEADER1 0xCF
-#define HEADER2 0xC0
-#define SAMPLE  0xAA
+dc_status_t
+halcyon_symbios_device_open (dc_device_t **device, dc_context_t *context, dc_iostream_t *iostream);
 
-#define SZ_RECORD  64
-#define SZ_HEADER  (SZ_RECORD * 2)
-#define SZ_SAMPLE  SZ_RECORD
-
-int
-seac_screen_record_isvalid (dc_context_t *context, const unsigned char data[], unsigned int size, unsigned int type, unsigned int id);
+dc_status_t
+halcyon_symbios_parser_create (dc_parser_t **parser, dc_context_t *context, const unsigned char data[], size_t size);
 
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
-#endif /* SEAC_SCREEN_COMMON_H */
+#endif /* HALCYON_SYMBIOS_H */

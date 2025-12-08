@@ -27,6 +27,7 @@
 #include "halcyon_symbios.h"
 #include "context-private.h"
 #include "parser-private.h"
+#include "platform.h"
 #include "array.h"
 
 #define ID_HEADER          0x01
@@ -46,11 +47,17 @@
 #define ID_LOG_VERSION     0x0F
 #define ID_TRIM            0x10
 #define ID_GAS_CONFIG      0x11
+#define ID_TANK_TRANSMITTER 0x12
+#define ID_GF_INFO          0x13
 
 #define ISCONFIG(type) ( \
 	(type) == ID_LOG_VERSION || \
 	(type) == ID_HEADER || \
 	(type) == ID_FOOTER)
+
+#define LOGVERSION(major,minor) ( \
+		(((major) & 0xFF) << 8) | \
+		((minor) & 0xFF))
 
 #define UNDEFINED 0xFFFFFFFF
 
@@ -64,6 +71,8 @@
 #define NGASMIXES 10
 #define NTANKS    10
 
+#define TRANSMITTER_ID (1u << 16)
+
 typedef struct halcyon_symbios_gasmix_t {
 	unsigned int id;
 	unsigned int oxygen;
@@ -74,6 +83,7 @@ typedef struct halcyon_symbios_tank_t {
 	unsigned int id;
 	unsigned int beginpressure;
 	unsigned int endpressure;
+	unsigned int gasmix;
 	dc_usage_t usage;
 } halcyon_symbios_tank_t;
 
@@ -81,7 +91,9 @@ typedef struct halcyon_symbios_parser_t {
 	dc_parser_t base;
 	// Cached fields.
 	unsigned int cached;
+	unsigned int logversion;
 	unsigned int datetime;
+	int timezone;
 	unsigned int divetime;
 	unsigned int maxdepth;
 	unsigned int divemode;
@@ -129,7 +141,9 @@ halcyon_symbios_parser_create (dc_parser_t **out, dc_context_t *context, const u
 
 	// Set the default values.
 	parser->cached = 0;
+	parser->logversion = 0;
 	parser->datetime = UNDEFINED;
+	parser->timezone = 0;
 	parser->divetime = 0;
 	parser->maxdepth = 0;
 	parser->divemode = UNDEFINED;
@@ -149,6 +163,7 @@ halcyon_symbios_parser_create (dc_parser_t **out, dc_context_t *context, const u
 		parser->tank[i].id = 0;
 		parser->tank[i].beginpressure = 0;
 		parser->tank[i].endpressure = 0;
+		parser->tank[i].gasmix = DC_GASMIX_UNKNOWN;
 		parser->tank[i].usage = DC_USAGE_NONE;
 	}
 
@@ -175,10 +190,23 @@ halcyon_symbios_parser_get_datetime (dc_parser_t *abstract, dc_datetime_t *datet
 
 	dc_ticks_t ticks = (dc_ticks_t) parser->datetime + EPOCH;
 
-	if (!dc_datetime_gmtime (datetime, ticks))
-		return DC_STATUS_DATAFORMAT;
+	if (parser->logversion >= LOGVERSION(1,9)) {
+		// For firmware versions with timezone support, the UTC offset of the
+		// device is used.
+		int timezone = parser->timezone * 3600;
 
-	datetime->timezone = DC_TIMEZONE_NONE;
+		ticks += timezone;
+
+		if (!dc_datetime_gmtime (datetime, ticks))
+			return DC_STATUS_DATAFORMAT;
+
+		datetime->timezone = timezone;
+	} else {
+		// For firmware versions without timezone support, the current timezone
+		// of the host system is used.
+		if (!dc_datetime_localtime (datetime, ticks))
+			return DC_STATUS_DATAFORMAT;
+	}
 
 	return DC_STATUS_SUCCESS;
 }
@@ -250,8 +278,8 @@ halcyon_symbios_parser_get_field (dc_parser_t *abstract, dc_field_type_t type, u
 			tank->workpressure = 0.0;
 			tank->beginpressure = parser->tank[flags].beginpressure / 10.0;
 			tank->endpressure   = parser->tank[flags].endpressure   / 10.0;
+			tank->gasmix        = parser->tank[flags].gasmix;
 			tank->usage         = parser->tank[flags].usage;
-			tank->gasmix = DC_GASMIX_UNKNOWN;
 			break;
 		case DC_FIELD_DECOMODEL:
 			if (parser->gf_lo == UNDEFINED || parser->gf_hi == UNDEFINED)
@@ -302,9 +330,13 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 		4,  /* ID_LOG_VERSION */
 		4,  /* ID_TRIM */
 		8,  /* ID_GAS_CONFIG */
+		8,  /* ID_TANK_TRANSMITTER */
+		6,  /* ID_GF_INFO */
 	};
 
+	unsigned int logversion = 0;
 	unsigned int time_start = UNDEFINED, time_end = UNDEFINED;
+	int timezone = 0;
 	unsigned int maxdepth = 0;
 	unsigned int divemode = UNDEFINED;
 	unsigned int atmospheric = UNDEFINED;
@@ -317,6 +349,7 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 	halcyon_symbios_gasmix_t gasmix[NGASMIXES] = {0};
 	halcyon_symbios_tank_t tank[NTANKS] = {0};
 	unsigned int gasmix_id_previous = UNDEFINED;
+	unsigned int gasmix_idx = DC_GASMIX_UNKNOWN;
 	unsigned int tank_id_previous = UNDEFINED;
 	unsigned int tank_usage_previous = UNDEFINED;
 	unsigned int tank_idx = UNDEFINED;
@@ -359,6 +392,7 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 		}
 
 		if (type == ID_LOG_VERSION) {
+			logversion = array_uint16_be (data + offset + 2);
 			unsigned int version_major = data[offset + 2];
 			unsigned int version_minor = data[offset + 3];
 			DEBUG (abstract->context, "Version: %u.%u",
@@ -373,12 +407,13 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 			unsigned int deco_major = data[offset + 8];
 			unsigned int deco_minor = data[offset + 9];
 			interval = data[offset + 10];
-			unsigned int detection = data[offset + 11];
-			unsigned int noflytime = data[offset + 12];
+			unsigned int DC_ATTR_UNUSED detection = data[offset + 11];
+			unsigned int DC_ATTR_UNUSED noflytime = data[offset + 12];
 			divemode = data[offset + 13];
+			timezone = (signed char) data[offset + 14];
 			atmospheric = array_uint16_le(data + offset + 16);
-			unsigned int number = array_uint16_le(data + offset + 18);
-			unsigned int battery = array_uint16_le(data + offset + 20);
+			unsigned int DC_ATTR_UNUSED number = array_uint16_le(data + offset + 18);
+			unsigned int DC_ATTR_UNUSED battery = array_uint16_le(data + offset + 20);
 			time_start = array_uint32_le(data + offset + 24);
 			unsigned int serial = array_uint32_le(data + offset + 28);
 			DEBUG (abstract->context, "Device: model=%u, hw=%u.%u, fw=%u.%u.%u, deco=%u.%u, serial=%u",
@@ -424,10 +459,10 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 			sample.depth = temperature / 10.0;
 			if (callback) callback (DC_SAMPLE_TEMPERATURE, &sample, userdata);
 		} else if (type == ID_OC_CC_SWITCH) {
-			unsigned int ccr = data[offset + 2];
+			unsigned int DC_ATTR_UNUSED ccr = data[offset + 2];
 		} else if (type == ID_GAS_TRANSMITTER) {
 			unsigned int gas_id = data[offset + 2];
-			unsigned int battery = array_uint16_le (data + offset + 4);
+			unsigned int DC_ATTR_UNUSED battery = array_uint16_le (data + offset + 4);
 			unsigned int pressure = array_uint16_le (data + offset + 6);
 			unsigned int transmitter = array_uint16_le (data + offset + 8);
 			dc_usage_t usage = DC_USAGE_NONE;
@@ -446,6 +481,7 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 				sample.gasmix = idx;
 				if (callback) callback(DC_SAMPLE_GASMIX, &sample, userdata);
 				gasmix_id_previous = gas_id;
+				gasmix_idx = idx;
 			}
 
 			if (tank_id_previous != transmitter ||
@@ -468,6 +504,7 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 					tank[ntanks].id = transmitter;
 					tank[ntanks].beginpressure = pressure;
 					tank[ntanks].endpressure = pressure;
+					tank[ntanks].gasmix = gasmix_idx;
 					tank[ntanks].usage = usage;
 					ntanks++;
 				}
@@ -483,8 +520,8 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 			if (callback) callback(DC_SAMPLE_PRESSURE, &sample, userdata);
 		} else if (type == ID_COMPARTMENTS) {
 			for (unsigned int i = 0; i < 16; ++i) {
-				unsigned int n2 = array_uint16_le (data + offset +  4 + i * 2);
-				unsigned int he = array_uint16_le (data + offset + 36 + i * 2);
+				unsigned int DC_ATTR_UNUSED n2 = array_uint16_le (data + offset +  4 + i * 2);
+				unsigned int DC_ATTR_UNUSED he = array_uint16_le (data + offset + 36 + i * 2);
 			}
 		} else if (type == ID_GPS) {
 			if (!have_location) {
@@ -495,21 +532,21 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 				WARNING (abstract->context, "Multiple GPS locations present.");
 			}
 		} else if (type == ID_PO2_BOARD) {
-			unsigned int serial = array_uint16_le (data + offset + 6);
+			unsigned int DC_ATTR_UNUSED serial = array_uint16_le (data + offset + 6);
 			for (unsigned int i = 0; i < 3; ++i) {
 				unsigned int ppo2 = data[offset + 2 + i];
 				sample.ppo2.sensor = i;
-				sample.ppo2.value = ppo2 / 10.0;
+				sample.ppo2.value = ppo2 / 100.0;
 				if (callback) callback(DC_SAMPLE_PPO2, &sample, userdata);
 			}
 		} else if (type == ID_DECO) {
 			unsigned int ndt = data[offset + 2];
 			unsigned int ceiling = data[offset + 3];
 			unsigned int cns = data[offset + 4];
-			unsigned int safetystop = data[offset + 5];
-			unsigned int ceiling_max = array_uint16_le (data + offset + 6);
+			unsigned int DC_ATTR_UNUSED safetystop = data[offset + 5];
+			unsigned int DC_ATTR_UNUSED ceiling_max = array_uint16_le (data + offset + 6);
 			unsigned int tts = array_uint16_le (data + offset + 8);
-			unsigned int otu = array_uint16_le (data + offset + 10);
+			unsigned int DC_ATTR_UNUSED otu = array_uint16_le (data + offset + 10);
 
 			// Deco / NDL
 			if (ceiling) {
@@ -534,17 +571,17 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 				WARNING (abstract->context, "Multiple GF values present.");
 			}
 		} else if (type == ID_FOOTER) {
-			unsigned int cns = data[offset + 2];
-			unsigned int violations = data[offset + 3];
-			unsigned int otu = array_uint16_le (data + offset + 4);
-			unsigned int battery = array_uint16_le (data + offset + 6);
+			unsigned int DC_ATTR_UNUSED cns = data[offset + 2];
+			unsigned int DC_ATTR_UNUSED violations = data[offset + 3];
+			unsigned int DC_ATTR_UNUSED otu = array_uint16_le (data + offset + 4);
+			unsigned int DC_ATTR_UNUSED battery = array_uint16_le (data + offset + 6);
 			time_end = array_uint32_le(data + offset + 8);
-			unsigned int desaturation = array_uint32_le (data + offset + 12);
+			unsigned int DC_ATTR_UNUSED desaturation = array_uint32_le (data + offset + 12);
 		} else if (type == ID_PO2_REBREATHER) {
 			for (unsigned int i = 0; i < 3; ++i) {
 				unsigned int ppo2 = data[offset + 2 + i];
 				sample.ppo2.sensor = i;
-				sample.ppo2.value = ppo2 / 10.0;
+				sample.ppo2.value = ppo2 / 100.0;
 				if (callback) callback(DC_SAMPLE_PPO2, &sample, userdata);
 			}
 			unsigned int pressure = array_uint16_le (data + offset + 8);
@@ -571,6 +608,7 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 					tank[ntanks].id = serial;
 					tank[ntanks].beginpressure = pressure;
 					tank[ntanks].endpressure = pressure;
+					tank[ntanks].gasmix = DC_GASMIX_UNKNOWN;
 					tank[ntanks].usage = usage;
 					ntanks++;
 				}
@@ -589,7 +627,7 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 			sample.bearing = heading;
 			if (callback) callback(DC_SAMPLE_BEARING, &sample, userdata);
 		} else if (type == ID_TRIM) {
-			int trim = (signed int) data[offset + 2];
+			int DC_ATTR_UNUSED trim = (signed int) data[offset + 2];
 		} else if (type == ID_GAS_CONFIG) {
 			unsigned int id = data[offset + 2];
 			unsigned int o2 = data[offset + 3];
@@ -625,6 +663,49 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 					if (callback) callback(DC_SAMPLE_GASMIX, &sample, userdata);
 				}
 			}
+		} else if (type == ID_TANK_TRANSMITTER) {
+			unsigned int id = data[offset + 2] | TRANSMITTER_ID;
+			unsigned int DC_ATTR_UNUSED battery = array_uint16_le (data + offset + 4);
+			unsigned int pressure = array_uint16_le (data + offset + 6) / 10;
+			dc_usage_t usage = DC_USAGE_NONE;
+
+			if (tank_id_previous != id ||
+				tank_usage_previous != usage) {
+				// Find the tank in the list.
+				unsigned int idx = 0;
+				while (idx < ntanks) {
+					if (tank[idx].id == id &&
+						tank[idx].usage == usage)
+						break;
+					idx++;
+				}
+
+				// Add a new tank if necessary.
+				if (idx >= ntanks) {
+					if (ngasmixes >= NTANKS) {
+						ERROR (abstract->context, "Maximum number of tanks reached.");
+						return DC_STATUS_NOMEMORY;
+					}
+					tank[ntanks].id = id;
+					tank[ntanks].beginpressure = pressure;
+					tank[ntanks].endpressure = pressure;
+					tank[ntanks].gasmix = DC_GASMIX_UNKNOWN;
+					tank[ntanks].usage = usage;
+					ntanks++;
+				}
+
+				tank_id_previous = id;
+				tank_usage_previous = usage;
+				tank_idx = idx;
+			}
+			tank[tank_idx].endpressure = pressure;
+
+			sample.pressure.tank = tank_idx;
+			sample.pressure.value = pressure / 10.0;
+			if (callback) callback(DC_SAMPLE_PRESSURE, &sample, userdata);
+		} else if (type == ID_GF_INFO) {
+			unsigned int DC_ATTR_UNUSED gf_now  = array_uint16_le (data + offset + 2);
+			unsigned int DC_ATTR_UNUSED gf_surface  = array_uint16_le (data + offset + 4);
 		} else {
 			WARNING (abstract->context, "Unknown record (type=%u, size=%u", type, length);
 		}
@@ -633,7 +714,9 @@ halcyon_symbios_parser_samples_foreach (dc_parser_t *abstract, dc_sample_callbac
 	}
 
 	parser->cached = 1;
+	parser->logversion = logversion;
 	parser->datetime = time_start;
+	parser->timezone = timezone;
 	if (time_start != UNDEFINED && time_end != UNDEFINED) {
 		parser->divetime = time_end - time_start;
 	} else {

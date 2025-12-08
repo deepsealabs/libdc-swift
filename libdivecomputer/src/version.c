@@ -1,7 +1,7 @@
 /*
  * libdivecomputer
  *
- * Copyright (C) 2025 Jef Driesen
+ * Copyright (C) 2010 Jef Driesen
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,27 +19,34 @@
  * MA 02110-1301 USA
  */
 
-#ifndef SEAC_SCREEN_COMMON_H
-#define SEAC_SCREEN_COMMON_H
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
-#include <libdivecomputer/context.h>
+#include <libdivecomputer/version.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif /* __cplusplus */
+#ifdef HAVE_VERSION_SUFFIX
+#include "revision.h"
+#endif
 
-#define HEADER1 0xCF
-#define HEADER2 0xC0
-#define SAMPLE  0xAA
+const char *
+dc_version (dc_version_t *version)
+{
+	if (version) {
+		version->major = DC_VERSION_MAJOR;
+		version->minor = DC_VERSION_MINOR;
+		version->micro = DC_VERSION_MICRO;
+	}
 
-#define SZ_RECORD  64
-#define SZ_HEADER  (SZ_RECORD * 2)
-#define SZ_SAMPLE  SZ_RECORD
+#ifdef HAVE_VERSION_SUFFIX
+	return DC_VERSION " (" DC_VERSION_REVISION ")";
+#else
+	return DC_VERSION;
+#endif
+}
 
 int
-seac_screen_record_isvalid (dc_context_t *context, const unsigned char data[], unsigned int size, unsigned int type, unsigned int id);
-
-#ifdef __cplusplus
+dc_version_check (unsigned int major, unsigned int minor, unsigned int micro)
+{
+	return DC_VERSION_CHECK (major,minor,micro);
 }
-#endif /* __cplusplus */
-#endif /* SEAC_SCREEN_COMMON_H */

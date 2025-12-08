@@ -25,13 +25,13 @@
 
 #include <stdlib.h>
 #include <string.h>
-
+#ifdef HAVE_PTHREAD_H
+#include <pthread.h>
+#endif
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOGDI
 #include <windows.h>
-#else
-#include <pthread.h>
 #endif
 
 #if defined(HAVE_HIDAPI)

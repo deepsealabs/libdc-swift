@@ -26,6 +26,7 @@
 #include "mares_iconhd.h"
 #include "context-private.h"
 #include "parser-private.h"
+#include "platform.h"
 #include "array.h"
 #include "checksum.h"
 
@@ -48,6 +49,7 @@
 #define PUCKAIR2  0x2D
 #define SIRIUS    0x2F
 #define QUADCI    0x31
+#define QUAD2     0x32
 #define PUCK4     0x35
 
 #define ISSMART(model) ( \
@@ -61,6 +63,7 @@
 	(model) == PUCKAIR2 || \
 	(model) == SIRIUS || \
 	(model) == QUADCI || \
+	(model) == QUAD2 || \
 	(model) == PUCK4)
 
 #define NGASMIXES_ICONHD 3
@@ -575,7 +578,7 @@ mares_genius_cache (mares_iconhd_parser_t *parser)
 		unsigned int n2      = (gasmixparams >>  7) & 0x7F;
 		unsigned int he      = (gasmixparams >> 14) & 0x7F;
 		unsigned int state   = (gasmixparams >> 21) & 0x03;
-		unsigned int changed = (gasmixparams >> 23) & 0x01;
+		unsigned int DC_ATTR_UNUSED changed = (gasmixparams >> 23) & 0x01;
 
 		if (o2 + n2 + he != 100) {
 			WARNING (abstract->context, "Invalid gas mix (%u%% He, %u%% O2, %u%% N2).", he, o2, n2);
@@ -920,7 +923,7 @@ mares_iconhd_foreach (dc_parser_t *abstract, dc_sample_callback_t callback, void
 		dc_sample_value_t sample = {0};
 
 		if (parser->model == SMARTAPNEA) {
-			unsigned int maxdepth = array_uint16_le (data + offset + 0);
+			unsigned int DC_ATTR_UNUSED maxdepth = array_uint16_le (data + offset + 0);
 			unsigned int divetime = array_uint16_le (data + offset + 2);
 			unsigned int surftime = array_uint16_le (data + offset + 4);
 
