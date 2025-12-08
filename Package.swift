@@ -24,7 +24,8 @@ let package = Package(
             path: "libdivecomputer",
             exclude: [
                 "doc",
-                "m4"
+                "m4",
+                "src/serial_win32.c"
             ],
             publicHeadersPath: "include",
             cSettings: [
