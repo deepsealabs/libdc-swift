@@ -4,6 +4,26 @@ All notable changes to LibDCSwift will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-07-03
+### Added
+- Cressi BLE support (characteristic read ioctl, vendor service preference, synchronous characteristic reads)
+- Halcyon Symbios and Seac serial service registration
+- `onLog` sink (`LogEvent`) so host apps can forward library diagnostics
+- Selectable computer model IDs
+- Peripheral-ready state exposed to callers
+
+### Fixed
+- Auto-reconnect no longer blocks the main thread (`openBLEDevice` was hanging the UI for 2+ seconds)
+- BLE I/O robustness for uwatec_smart/Scubapro Aladin downloads (per-characteristic write type, working read-timeout wiring, write flow-control)
+- Double-free in `ble_stream_close` (#17)
+- Time-weighted average depth calculation
+- Shearwater Peregrine tx import, device fingerprint, and GPS handling
+- Fingerprint handling across device models
+
+### Changed
+- Synced libdivecomputer to upstream HEAD: adopted `DC_SAMPLE_LOCATION` (replaces `DC_FIELD_LOCATION`) for multi-point GPS during a dive; picked up descriptor/parser updates for mares_iconhd, halcyon_symbios, hw_ostc, seac, suunto, divesoft, deepsix, usb/usbhid
+- Shearwater model detection now reads via `ID_MODEL` with GNSS-status GPS detection
+
 ## [1.4.1] - 2025-12-08
 ### Added
 - Shearwater Avelo support (log parsing and device handling)
