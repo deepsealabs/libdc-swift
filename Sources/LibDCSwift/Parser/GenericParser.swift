@@ -279,6 +279,8 @@ public class GenericParser {
                     events.append(.safetyStop(mandatory: true))
                 case SAMPLE_EVENT_CEILING.rawValue:
                     events.append(.ceiling)
+                case SAMPLE_EVENT_PO2.rawValue:
+                    events.append(.po2)
                 case SAMPLE_EVENT_DEEPSTOP.rawValue:
                     events.append(.deepStop)
                 default:
@@ -341,7 +343,52 @@ public class GenericParser {
                 )
                 
             case DC_SAMPLE_GASMIX:
-                wrapper.data.gasmix = Int(value.gasmix)
+                let gasMixUnknown = Int(UInt32.max)
+                let newGasMix = Int(value.gasmix)
+                // Synthesize a gasChange event when the active gas mix changes.
+                // Skip DC_GASMIX_UNKNOWN (0xFFFFFFFF), which Shearwater sends for tanks
+                // without AI transmitters — treating it as a real mix would poison the
+                // current-gas tracker and mislabel subsequent profile points.
+                if newGasMix != gasMixUnknown,
+                   let previousGas = wrapper.data.gasmix,
+                   newGasMix != previousGas {
+                    // Dedup: some computers emit both SAMPLE_EVENT_GASCHANGE and
+                    // DC_SAMPLE_GASMIX at the same timestamp. If the most recent profile
+                    // point already carries a .gasChange event at this time, skip.
+                    let alreadyHasGasChangeAtThisTime =
+                        wrapper.data.profile.last?.time == wrapper.data.time &&
+                        wrapper.data.profile.last?.events.contains(.gasChange) == true
+                    if !alreadyHasGasChangeAtThisTime {
+                        let ndl = wrapper.data.deco?.type == DC_DECO_NDL ? wrapper.data.deco?.time : nil
+                        let decoStop = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.depth : nil
+                        let decoTime = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.time : nil
+                        let tts = wrapper.data.deco?.tts
+                        let point = DiveProfilePoint(
+                            time: wrapper.data.time,
+                            depth: wrapper.data.depth,
+                            temperature: wrapper.data.temperature,
+                            pressure: wrapper.data.pressure.last?.value,
+                            po2: wrapper.data.ppo2.last?.value,
+                            events: [.gasChange],
+                            ndl: ndl,
+                            decoStop: decoStop,
+                            decoTime: decoTime,
+                            tts: tts,
+                            currentGas: newGasMix,
+                            cns: wrapper.data.cns,
+                            rbt: wrapper.data.rbt,
+                            heartbeat: wrapper.data.heartbeat,
+                            bearing: wrapper.data.bearing,
+                            setpoint: wrapper.data.setpoint
+                        )
+                        wrapper.data.profile.append(point)
+                    }
+                }
+                // Only update the previous-gas tracker when the new mix is real —
+                // don't poison it with DC_GASMIX_UNKNOWN.
+                if newGasMix != gasMixUnknown {
+                    wrapper.data.gasmix = newGasMix
+                }
 
             case DC_SAMPLE_LOCATION:
                 if wrapper.data.location == nil {
@@ -413,7 +460,12 @@ public class GenericParser {
 
         // Get environmental data fields
         if let salinity: dc_salinity_t = getField(parser, type: DC_FIELD_SALINITY) {
-            wrapper.data.salinity = salinity.type == DC_WATER_SALT ? 1.025 : 1.000
+            // salinity.density (kg/m^3) carries the actual measured value on devices that
+            // report it (e.g. brackish or high-salinity water); fall back to the generic
+            // constant only when density isn't reported.
+            wrapper.data.salinity = salinity.density > 0
+                ? salinity.density / 1000.0
+                : (salinity.type == DC_WATER_SALT ? 1.025 : 1.000)
         }
 
         if let atmospheric: Double = getField(parser, type: DC_FIELD_ATMOSPHERIC) {

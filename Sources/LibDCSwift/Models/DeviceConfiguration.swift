@@ -33,6 +33,11 @@ import LibDCBridge
         ComputerModel(name: "Shearwater Perdix", family: .shearwaterPetrel, modelID: 5),
         ComputerModel(name: "Shearwater Perdix AI", family: .shearwaterPetrel, modelID: 6),
         ComputerModel(name: "Shearwater Perdix 2", family: .shearwaterPetrel, modelID: 11),
+        // TODO: the vendored libdivecomputer doesn't have a descriptor table entry for
+        // model 14 yet (Perdix 3 support is still in progress upstream), so
+        // find_descriptor_by_model will fail and device open/parsing won't work until
+        // libdivecomputer/src/descriptor.c picks up a "Shearwater"/"Perdix 3" entry.
+        ComputerModel(name: "Shearwater Perdix 3", family: .shearwaterPetrel, modelID: 14),
         ComputerModel(name: "Shearwater Teric", family: .shearwaterPetrel, modelID: 8),
         ComputerModel(name: "Shearwater Tern", family: .shearwaterPetrel, modelID: 12),
         ComputerModel(name: "Shearwater NERD 2", family: .shearwaterPetrel, modelID: 7),
@@ -122,6 +127,13 @@ import LibDCBridge
         ComputerModel(name: "Ratio iDive Color Easy", family: .diveSystem, modelID: 0x52),
         ComputerModel(name: "Ratio iDive Color Free", family: .diveSystem, modelID: 0x50),
         ComputerModel(name: "Ratio iDive Color Deep", family: .diveSystem, modelID: 0x54),
+
+        // Seac computers
+        ComputerModel(name: "Seac Tablet", family: .seacScreen, modelID: 0x10),
+
+        // Halcyon computers
+        ComputerModel(name: "Halcyon Symbios HUD",     family: .halcyonSymbios, modelID: 1),
+        ComputerModel(name: "Halcyon Symbios Handset", family: .halcyonSymbios, modelID: 7),
     ]
 
     /// Represents the family of dive computers that support BLE communication.
@@ -140,7 +152,9 @@ import LibDCBridge
         case divesoftFreedom
         case cressiGoa
         case diveSystem
-        
+        case seacScreen
+        case halcyonSymbios
+
         /// Converts the Swift enum to libdivecomputer's dc_family_t type
         public var asDCFamily: dc_family_t {
             switch self {
@@ -158,9 +172,11 @@ import LibDCBridge
             case .divesoftFreedom: return DC_FAMILY_DIVESOFT_FREEDOM
             case .cressiGoa: return DC_FAMILY_CRESSI_GOA
             case .diveSystem: return DC_FAMILY_DIVESYSTEM_IDIVE
+            case .seacScreen: return DC_FAMILY_SEAC_SCREEN
+            case .halcyonSymbios: return DC_FAMILY_HALCYON_SYMBIOS
             }
         }
-        
+
         /// Creates a DeviceFamily instance from libdivecomputer's dc_family_t type
         init?(dcFamily: dc_family_t) {
             switch dcFamily {
@@ -178,6 +194,8 @@ import LibDCBridge
             case DC_FAMILY_DIVESOFT_FREEDOM: self = .divesoftFreedom
             case DC_FAMILY_CRESSI_GOA: self = .cressiGoa
             case DC_FAMILY_DIVESYSTEM_IDIVE: self = .diveSystem
+            case DC_FAMILY_SEAC_SCREEN: self = .seacScreen
+            case DC_FAMILY_HALCYON_SYMBIOS: self = .halcyonSymbios
             default: return nil
             }
         }
@@ -194,7 +212,10 @@ import LibDCBridge
         CBUUID(string: "ca7b0001-f785-4c38-b599-c7c5fbadb034"), // Pelagic i330R/DSX
         CBUUID(string: "fdcdeaaa-295d-470e-bf15-04217b7aa0a0"), // ScubaPro G2/G3
         CBUUID(string: "fe25c237-0ece-443c-b0aa-e02033e7029d"), // Shearwater Perdix/Teric
-        CBUUID(string: "0000fcef-0000-1000-8000-00805f9b34fb")  // Divesoft Freedom
+        CBUUID(string: "1aa44039-1667-4b29-87cc-dfecaaf31d97"), // Shearwater Perdix 3 (TODO: no libdivecomputer descriptor entry yet, see supportedModels)
+        CBUUID(string: "0000fcef-0000-1000-8000-00805f9b34fb"), // Divesoft Freedom
+        CBUUID(string: "00000001-8c3b-4f2c-a59e-8c08224f3253"), // Halcyon Symbios
+        CBUUID(string: "84968ffe-d26d-478a-b953-5010bcf58bca")  // Seac Screen
     ]
     
     public static func getKnownServiceUUIDs() -> [CBUUID] {
@@ -393,6 +414,13 @@ import LibDCBridge
     }
     
     public static func fromName(_ name: String) -> (family: DeviceFamily, model: UInt32)? {
+        // Oceanic/Aqualung/Sherwood devices advertise their serial number as the BLE name
+        // (e.g. "FH020399"), which find_descriptor_by_name can't match against a product
+        // name. Try the serial-derived model code first.
+        if let result = resolveOceanicBLEName(name) {
+            return result
+        }
+
         var descriptor: OpaquePointer?
         let rc = find_descriptor_by_name(&descriptor, name)
         if rc == DC_STATUS_SUCCESS, let desc = descriptor {
@@ -405,6 +433,27 @@ import LibDCBridge
             dc_descriptor_free(desc)
         }
         return nil
+    }
+
+    /// Resolves an Oceanic/Aqualung/Sherwood BLE advertisement name (the device's serial
+    /// number, e.g. "FH020399") to a model. The first two characters are ASCII and encode
+    /// the model ID as (hi << 8) | lo; the remaining characters are decimal digits.
+    private static func resolveOceanicBLEName(_ name: String) -> (family: DeviceFamily, model: UInt32)? {
+        let scalars = Array(name.unicodeScalars)
+        guard scalars.count >= 2 else { return nil }
+
+        let hi = scalars[0].value
+        let lo = scalars[1].value
+        guard (0x20...0x7E).contains(hi), (0x20...0x7E).contains(lo) else { return nil }
+
+        for i in 2..<scalars.count {
+            guard (0x30...0x39).contains(scalars[i].value) else { return nil }
+        }
+
+        let modelID = UInt32((hi << 8) | lo)
+        return supportedModels.first(where: {
+            ($0.family == .oceanicAtom2 || $0.family == .pelagicI330R) && $0.modelID == modelID
+        }).map { (family: $0.family, model: $0.modelID) }
     }
     
     public static func getDeviceDisplayName(from name: String) -> String {
