@@ -188,7 +188,11 @@ public class DiveLogRetriever {
                 }
 
                 size.pointee = fingerprint.count
-                let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: fingerprint.count)
+                // Allocate with malloc, not Swift's allocator: close_device_data() on the C
+                // side calls free() on this pointer, and mixing Swift's UnsafeMutablePointer
+                // allocator with C free() is not a guaranteed-safe pairing.
+                guard let raw = malloc(fingerprint.count) else { return nil }
+                let buffer = raw.assumingMemoryBound(to: UInt8.self)
                 fingerprint.copyBytes(to: buffer, count: fingerprint.count)
                 return buffer
             } else {
@@ -197,7 +201,8 @@ public class DiveLogRetriever {
                 // which could accidentally match a dive with fingerprint 0x00000000 and stop enumeration
                 let sentinelFingerprint: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF]
                 size.pointee = sentinelFingerprint.count
-                let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: sentinelFingerprint.count)
+                guard let raw = malloc(sentinelFingerprint.count) else { return nil }
+                let buffer = raw.assumingMemoryBound(to: UInt8.self)
                 buffer.initialize(from: sentinelFingerprint, count: sentinelFingerprint.count)
                 return buffer
             }
@@ -261,11 +266,18 @@ public class DiveLogRetriever {
                 
                 let contextPtr = UnsafeMutableRawPointer(Unmanaged.passRetained(context).toOpaque())
                 
-                let progressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { _ in
+                // Timer requires an active RunLoop on the current thread to fire, and
+                // retrievalQueue is a plain DispatchQueue with no RunLoop pumping while
+                // blocked in dc_device_foreach below, so Timer.scheduledTimer would never
+                // fire here. DispatchSourceTimer works on any queue.
+                let progressTimer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+                progressTimer.schedule(deadline: .now(), repeating: 0.25)
+                progressTimer.setEventHandler {
                     if devicePtr.pointee.have_progress != 0 {
                         onProgress?(Int(devicePtr.pointee.progress.current), Int(devicePtr.pointee.progress.maximum))
                     }
                 }
+                progressTimer.resume()
                 
                 devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
                 devicePtr.pointee.lookup_fingerprint = fingerprintLookup
@@ -290,7 +302,7 @@ public class DiveLogRetriever {
                     logError("❌ Download failed: DC_STATUS_\(errorName)")
                 }
 
-                progressTimer.invalidate()
+                progressTimer.cancel()
 
                 DispatchQueue.main.async {
                     // Determine the outcome of the download

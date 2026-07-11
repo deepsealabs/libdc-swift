@@ -541,12 +541,22 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 // openBLEDevice is a blocking C call — dispatch off
                 // the main thread to avoid hanging the UI.
                 if let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) {
-                    logInfo("Attempting to reconnect to stored device")
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        _ = DeviceConfiguration.openBLEDevice(
-                            name: storedDevice.name,
-                            deviceAddress: storedDevice.uuid
-                        )
+                    logInfo("Attempting to reconnect to stored device after brief delay")
+                    // Gate immediately so a second disconnect within the delay window
+                    // can't also pass the !isConnecting guard above and start a second,
+                    // parallel openBLEDevice call racing on the shared device_data_t.
+                    self.isConnecting = true
+                    // 500ms delay gives CoreBluetooth and the dive computer time to tear
+                    // down the previous connection before we reconnect. Without it, sleepy
+                    // devices (e.g. Aqualung i300C) can fail the next connect() with a
+                    // peripheral-ready timeout.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            _ = DeviceConfiguration.openBLEDevice(
+                                name: storedDevice.name,
+                                deviceAddress: storedDevice.uuid
+                            )
+                        }
                     }
                 }
             } else if self.isRetrievingLogs {
@@ -582,6 +592,16 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             return
         }
         
+        // Reset stale state unconditionally, before scanning services. If a reconnect's
+        // service discovery finds no recognized service (e.g. a failed retry before the
+        // device is advertising), leaving the previous connection's characteristics in
+        // place would let a later write/subscribe use a characteristic object that
+        // belongs to a dead peripheral.
+        preferredService = nil
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        queue.sync { characteristicsByUUID.removeAll() }
+
         // Choose the preferred service across all matches before binding characteristics.
         // A vendor-specific service always wins over the generic Nordic UART service:
         // Cressi advertises both Nordic UART (…CA9E) and its own service (…10B8), and
@@ -605,9 +625,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
         if let chosen = chosen {
             preferredService = chosen
-            writeCharacteristic = nil
-            notifyCharacteristic = nil
-            queue.sync { characteristicsByUUID.removeAll() }
         }
     }
 
