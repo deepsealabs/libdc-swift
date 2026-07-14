@@ -13,7 +13,7 @@ extern "C" {
 #endif /* __cplusplus */
 
 /* Project version */
-#define DC_VERSION "0.9.0-devel"
+#define DC_VERSION "0.9.0-74-g8e564eb"
 #define DC_VERSION_MAJOR 0
 #define DC_VERSION_MINOR 9
 #define DC_VERSION_MICRO 0

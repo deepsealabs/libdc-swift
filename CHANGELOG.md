@@ -4,6 +4,14 @@ All notable changes to LibDCSwift will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-07-14
+### Changed
+- Synced vendored libdivecomputer to upstream HEAD (`8e564eb`, `v0.9.0-74-g8e564eb`):
+  - Full Shearwater Perdix 3 descriptor support (`b924092`) — closes out the discovery-only registration added in 1.6.0, so Perdix 3 devices can now actually be opened and downloaded from, not just identified over BLE
+  - `dc_device_open` now passes the model number through to `shearwater_petrel_device_open`, needed to distinguish Perdix 3 behavior from earlier Petrel-family devices
+  - Wider Shearwater BLE support: variable-sized packet handling, updated min/max BLE packet size limits, and the model number read directly from the device instead of inferred from the hardware descriptor
+- Removed a stale duplicate `include/libdivecomputer/halcyon_symbios.h` public header left over from an earlier partial vendor of that driver; the canonical header has lived alongside the rest of the driver in `src/` since 1.6.0, this just removes the unused leftover copy
+
 ## [1.6.0] - 2026-07-11
 ### Added
 - Seac Tablet and Halcyon Symbios HUD/Handset device support (DeviceFamily + ComputerModel entries; BLE service UUIDs were registered previously but the family/model plumbing was missing so the devices couldn't be identified or opened)
