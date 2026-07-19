@@ -26,6 +26,32 @@ public struct LogEvent {
     public let timestamp: Date
 }
 
+public enum PacketDirection: String {
+    case inbound
+    case outbound
+}
+
+/// A single raw BLE packet, forwarded to `Logger.onPacket` when `shouldShowRawData` is enabled.
+/// Distinct from `LogEvent` (human-readable log lines) — this carries the actual bytes so a host
+/// app can build real packet-level diagnostics (e.g. attach a capture to a bug report) rather than
+/// scraping byte counts out of a formatted message string.
+public struct PacketEvent {
+    public let direction: PacketDirection
+    public let data: Data
+    public let characteristicUUID: String
+    public let timestamp: Date
+
+    /// Uppercase hex, space-separated, wrapped to 16 bytes per line.
+    public var hexDump: String {
+        let bytes = [UInt8](data)
+        return stride(from: 0, to: bytes.count, by: 16).map { start in
+            bytes[start..<min(start + 16, bytes.count)]
+                .map { String(format: "%02X", $0) }
+                .joined(separator: " ")
+        }.joined(separator: "\n")
+    }
+}
+
 public class Logger {
     public static let shared = Logger()
     private var isEnabled = true
@@ -35,7 +61,12 @@ public class Logger {
     /// to forward diagnostics to Sentry. The closure may be called from background threads, so the
     /// handler must be thread-safe. libdc-swift performs no network/telemetry of its own.
     public var onLog: ((LogEvent) -> Void)?
-    public var shouldShowRawData = false  // Toggle for full hex dumps
+    /// Optional sink invoked for every raw BLE packet, but only while `shouldShowRawData` is true —
+    /// packet capture is opt-in so the byte-level path costs nothing when a host app isn't actively
+    /// diagnosing a device. Set this from the host app to build a local packet-trace buffer for a
+    /// "send diagnostics" action. May be called from background threads.
+    public var onPacket: ((PacketEvent) -> Void)?
+    public var shouldShowRawData = false  // Toggle for full hex dumps / onPacket callbacks
     private var dataCounter = 0  // Track number of data packets
     private var totalBytesReceived = 0  // Track total bytes
     
@@ -71,43 +102,17 @@ public class Logger {
         onLog?(LogEvent(level: level, message: message, category: fileName, function: function, timestamp: now))
     }
     
-    private func handleBLEDataLog(_ message: String, _ timestamp: String) {
+    /// Called from `CoreBluetoothManager` for every inbound (`didUpdateValueFor`) and outbound
+    /// (`write`) BLE transfer. Byte-count bookkeeping always happens; the `onPacket` callback only
+    /// fires while `shouldShowRawData` is on, so a host app pays nothing for this path until it
+    /// explicitly opts in (e.g. right before a user taps "send diagnostic logs").
+    public func logPacket(direction: PacketDirection, data: Data, characteristicUUID: String) {
         dataCounter += 1
-        
-        // Extract byte count from message
-        if let bytesStart = message.range(of: "("),
-           let bytesEnd = message.range(of: " bytes)") {
-            let bytesStr = message[bytesStart.upperBound..<bytesEnd.lowerBound]
-            if let bytes = Int(bytesStr) {
-                totalBytesReceived += bytes
-                
-                // Only print summary at the end or for significant events
-                if message.contains("completed") || message.contains("error") {
-                    print("📱 [\(timestamp)] BLE: Total received: \(totalBytesReceived) bytes in \(dataCounter) packets")
-                }
-            }
-        }
+        totalBytesReceived += data.count
+        guard shouldShowRawData else { return }
+        onPacket?(PacketEvent(direction: direction, data: data, characteristicUUID: characteristicUUID, timestamp: Date()))
     }
-    
-    private func formatHexData(_ hexString: String) -> String {
-        // Format hex data in chunks of 8 bytes (16 characters)
-        var formatted = ""
-        var index = hexString.startIndex
-        let chunkSize = 16
-        
-        while index < hexString.endIndex {
-            let endIndex = hexString.index(index, offsetBy: chunkSize, limitedBy: hexString.endIndex) ?? hexString.endIndex
-            let chunk = hexString[index..<endIndex]
-            formatted += chunk
-            if endIndex != hexString.endIndex {
-                formatted += "\n\t\t\t"  // Indent continuation lines
-            }
-            index = endIndex
-        }
-        
-        return formatted
-    }
-    
+
     public func setShowRawData(_ show: Bool) {
         shouldShowRawData = show
     }
