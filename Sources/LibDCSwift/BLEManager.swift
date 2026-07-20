@@ -247,6 +247,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         let writeType: CBCharacteristicWriteType =
             characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
 
+        Logger.shared.logPacket(direction: .outbound, data: data, characteristicUUID: characteristic.uuid.uuidString)
+
         // Per-write deadline from the backend-requested timeout (falls back to 3s).
         let timeoutMs = self.timeout > 0 ? self.timeout : 3000
 
@@ -702,7 +704,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         guard let data = characteristic.value else {
             return
         }
-        
+
+        Logger.shared.logPacket(direction: .inbound, data: data, characteristicUUID: characteristic.uuid.uuidString)
+
         var handledAsIoctlRead = false
         queue.sync {
             // Route the value of an explicitly requested characteristic read (e.g. the Cressi
