@@ -328,14 +328,18 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     // MARK: - Device Management
     @objc public func close(clearDevicePtr: Bool = false) {
         isDisconnecting = true
-        // isPeripheralReady/connectedDevice are published further down, right
-        // when cancelPeripheralConnection is actually called — not here. They
-        // used to fire immediately regardless, but cancelPeripheralConnection
-        // itself can now be deferred up to 500ms (see needsShutdownSettleDelay
-        // below), and callers observing these properties (e.g.
-        // SyncFlowView.beginScan's onReceive($connectedDevice)) would see
-        // "disconnected" and start a new connection attempt while CoreBluetooth
-        // still considered the old peripheral connection live.
+        // isPeripheralReady/connectedDevice are NOT published here when there's
+        // an actual peripheral to disconnect — didDisconnectPeripheral is the
+        // only truthful confirmation that CoreBluetooth has actually torn the
+        // link down (cancelPeripheralConnection just requests it; the callback
+        // fires later, asynchronously). Publishing "disconnected" eagerly here
+        // — even at the same moment cancelPeripheralConnection is called, which
+        // was this file's own previous attempt at this fix — let callers (e.g.
+        // SyncFlowView.beginScan's onReceive($connectedDevice)) start a new
+        // connection attempt while CoreBluetooth still considered the old one
+        // live. Confirmed on device: still raced. The only case this function
+        // publishes directly is "there was no peripheral to disconnect", where
+        // no didDisconnectPeripheral callback will ever arrive.
         queue.sync {
             if !receivedData.isEmpty {
                 receivedData.removeAll()
@@ -379,17 +383,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 // from a SwiftUI action), so this can't be a blocking sleep here.
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
                     self.centralManager.cancelPeripheralConnection(peripheral)
-                    DispatchQueue.main.async {
-                        self.isPeripheralReady = false
-                        self.connectedDevice = nil
-                    }
+                    // didDisconnectPeripheral publishes isPeripheralReady/connectedDevice
+                    // once CoreBluetooth actually confirms the teardown.
                 }
             } else {
                 centralManager.cancelPeripheralConnection(peripheral)
-                DispatchQueue.main.async {
-                    self.isPeripheralReady = false
-                    self.connectedDevice = nil
-                }
+                // didDisconnectPeripheral publishes isPeripheralReady/connectedDevice
+                // once CoreBluetooth actually confirms the teardown.
             }
         } else {
             // Nothing to disconnect, but observers waiting on these properties
