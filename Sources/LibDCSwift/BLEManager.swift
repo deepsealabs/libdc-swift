@@ -328,10 +328,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     // MARK: - Device Management
     @objc public func close(clearDevicePtr: Bool = false) {
         isDisconnecting = true
-        DispatchQueue.main.async {
-            self.isPeripheralReady = false
-            self.connectedDevice = nil
-        }
+        // isPeripheralReady/connectedDevice are published further down, right
+        // when cancelPeripheralConnection is actually called — not here. They
+        // used to fire immediately regardless, but cancelPeripheralConnection
+        // itself can now be deferred up to 500ms (see needsShutdownSettleDelay
+        // below), and callers observing these properties (e.g.
+        // SyncFlowView.beginScan's onReceive($connectedDevice)) would see
+        // "disconnected" and start a new connection attempt while CoreBluetooth
+        // still considered the old peripheral connection live.
         queue.sync {
             if !receivedData.isEmpty {
                 receivedData.removeAll()
@@ -375,12 +379,27 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 // from a SwiftUI action), so this can't be a blocking sleep here.
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
                     self.centralManager.cancelPeripheralConnection(peripheral)
+                    DispatchQueue.main.async {
+                        self.isPeripheralReady = false
+                        self.connectedDevice = nil
+                    }
                 }
             } else {
                 centralManager.cancelPeripheralConnection(peripheral)
+                DispatchQueue.main.async {
+                    self.isPeripheralReady = false
+                    self.connectedDevice = nil
+                }
+            }
+        } else {
+            // Nothing to disconnect, but observers waiting on these properties
+            // (e.g. beginScan's onReceive($connectedDevice)) still need the signal.
+            DispatchQueue.main.async {
+                self.isPeripheralReady = false
+                self.connectedDevice = nil
             }
         }
-        
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.isDisconnecting = false
         }
