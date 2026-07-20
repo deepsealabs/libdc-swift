@@ -564,38 +564,24 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         DispatchQueue.main.async {
             self.isPeripheralReady = false
             self.connectedDevice = nil
-            
-            // Don't attempt to reconnect if:
-            // 1. We initiated the disconnect
-            // 2. A download is currently in progress (will cause race conditions)
-            // 3. A connection attempt is already in progress
+
+            // No auto-reconnect: a mid-session disconnect just surfaces as a
+            // failure and the caller (DiveLogRetriever's IO/protocol error
+            // path, or SyncFlowView's connect timeout) drives the UI to a
+            // clean retry state. This used to silently reopen the device
+            // here, but that raced against the host app's own connection
+            // flow — two independent callers (SyncFlowView.directConnect/
+            // connect, and this handler) could both call openBLEDevice for
+            // the same peripheral within milliseconds of each other, each
+            // allocating/writing to the shared device_data_t. No amount of
+            // flag-gating closed that window cleanly. Both Subsurface and
+            // Submersion (other libdivecomputer-based dive-log apps) take
+            // the same approach: fail cleanly on disconnect, let the user
+            // (or the host app's own retry UI) initiate the next attempt —
+            // Shearwater's BLE stack in particular won't reliably accept a
+            // second connection attempt within one "session" anyway.
             if !self.isDisconnecting && !self.isRetrievingLogs && !self.isConnecting {
-                // Attempt to reconnect if this was a stored device.
-                // openBLEDevice is a blocking C call — dispatch off
-                // the main thread to avoid hanging the UI.
-                if let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) {
-                    logInfo("Attempting to reconnect to stored device after brief delay")
-                    // Gate immediately so a second disconnect within the delay window
-                    // can't also pass the !isConnecting guard above and start a second,
-                    // parallel openBLEDevice call racing on the shared device_data_t.
-                    self.isConnecting = true
-                    // 500ms delay gives CoreBluetooth and the dive computer time to tear
-                    // down the previous connection before we reconnect. Without it, sleepy
-                    // devices (e.g. Aqualung i300C) can fail the next connect() with a
-                    // peripheral-ready timeout.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            _ = DeviceConfiguration.openBLEDevice(
-                                name: storedDevice.name,
-                                deviceAddress: storedDevice.uuid
-                            )
-                        }
-                    }
-                }
-            } else if self.isRetrievingLogs {
-                logWarning("⚠️ Disconnected during download - NOT auto-reconnecting to avoid race condition")
-            } else if self.isConnecting {
-                logWarning("⚠️ Disconnected during connection attempt - NOT auto-reconnecting")
+                logInfo("Unexpected disconnect from \(peripheral.name ?? "device") — not auto-reconnecting")
             }
         }
     }
