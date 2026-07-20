@@ -71,13 +71,25 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     @objc private var timeout: Int = -1 // default to no timeout
     private var writeCharacteristic: CBCharacteristic?
     private var notifyCharacteristic: CBCharacteristic?
-    private var receivedData: Data = Data()
+    // Queue of raw BLE notification payloads, one entry per didUpdateValueFor
+    // call. shearwater_common_slip_read (libdivecomputer) strips a fixed
+    // 2-byte header from every dc_iostream_read() call on the assumption
+    // that each call returns exactly one physical BLE notification. This
+    // used to be a flat `Data` buffer that readDataPartial drained by byte
+    // count regardless of where notification boundaries actually fell —
+    // when two notifications arrived close together, both landed in the
+    // buffer before being drained and got coalesced into one returned
+    // chunk, so only 2 header bytes were stripped instead of 2-per-
+    // notification. The stray header bytes then got counted as SLIP
+    // payload, corrupting the declared-length-vs-actual-length check and
+    // producing "Invalid packet header" (shearwater_common.c:428) on any
+    // manifest/dive-data response that spans more than one BLE notification.
+    private var receivedPackets: [Data] = []
     private let queue = DispatchQueue(label: "com.blemanager.queue")
     private let dataAvailableSemaphore = DispatchSemaphore(value: 0) // Signals when new data arrives
     private let writeReadySemaphore = DispatchSemaphore(value: 0) // Signals when peripheral can accept a no-response write
     private let writeConfirmSemaphore = DispatchSemaphore(value: 0) // Signals when a with-response write completes
     private var lastWriteError: Error? // Result of the most recent with-response write
-    private let frameMarker: UInt8 = 0x7E
     private var _deviceDataPtr: UnsafeMutablePointer<device_data_t>?
     private var connectionCompletion: ((Bool) -> Void)?
     private var totalBytesReceived: Int = 0
@@ -211,31 +223,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return notifyCharacteristic.isNotifying
     }
     
-    // MARK: - Data Handling
-    private func findNextCompleteFrame() -> Data? {
-        var frameToReturn: Data? = nil
-        
-        queue.sync {
-            guard let startIndex = receivedData.firstIndex(of: frameMarker) else {
-                return
-            }
-            
-            let afterStart = receivedData.index(after: startIndex)
-            guard afterStart < receivedData.count,
-                  let endIndex = receivedData[afterStart...].firstIndex(of: frameMarker) else {
-                return
-            }
-            
-            let frameEndIndex = receivedData.index(after: endIndex)
-            let frame = receivedData[startIndex..<frameEndIndex]
-            
-            receivedData.removeSubrange(startIndex..<frameEndIndex)
-            frameToReturn = Data(frame)
-        }
-        
-        return frameToReturn
-    }
-    
     @objc public func write(_ data: Data!) -> Bool {
         guard let peripheral = self.peripheral,
               let characteristic = self.writeCharacteristic else { return false }
@@ -303,10 +290,20 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             var outData: Data?
 
             queue.sync {
-                if !receivedData.isEmpty {
-                    let amount = min(requestedInt, receivedData.count)
-                    outData = receivedData.prefix(amount)
-                    receivedData.removeSubrange(0..<amount)
+                // One queued notification per call, never merged — see the
+                // receivedPackets declaration for why this matters. A packet
+                // larger than requested (shouldn't happen in practice; real
+                // notifications are far smaller than the BLE_MTU_MAX request
+                // size) is split, with the remainder pushed back to the
+                // front of the queue rather than dropped.
+                if !receivedPackets.isEmpty {
+                    let packet = receivedPackets.removeFirst()
+                    if packet.count > requestedInt {
+                        outData = packet.prefix(requestedInt)
+                        receivedPackets.insert(packet.suffix(from: requestedInt), at: 0)
+                    } else {
+                        outData = packet
+                    }
                 }
             }
 
@@ -341,8 +338,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // publishes directly is "there was no peripheral to disconnect", where
         // no didDisconnectPeripheral callback will ever arrive.
         queue.sync {
-            if !receivedData.isEmpty {
-                receivedData.removeAll()
+            if !receivedPackets.isEmpty {
+                receivedPackets.removeAll()
             }
             characteristicsByUUID.removeAll()
             ioctlReadValue = nil
@@ -721,8 +718,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 ioctlReadValue = data
                 handledAsIoctlRead = true
             } else {
-                // Append new data to our buffer immediately
-                receivedData.append(data)
+                // Queue as its own entry — see receivedPackets' declaration for why
+                // this must not be merged with any other pending notification.
+                receivedPackets.append(data)
             }
         }
 
