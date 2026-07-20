@@ -57,8 +57,8 @@ public class Logger {
     private var isEnabled = true
     private var minLevel: LogLevel = .debug
 
-    /// Optional sink invoked for every log event. Set this once from the host app (e.g. Currents)
-    /// to forward diagnostics to Sentry. The closure may be called from background threads, so the
+    /// Optional sink invoked for every log event. Set this once from the host app to forward
+    /// diagnostics to its own telemetry. The closure may be called from background threads, so the
     /// handler must be thread-safe. libdc-swift performs no network/telemetry of its own.
     public var onLog: ((LogEvent) -> Void)?
     /// Optional sink invoked for every raw BLE packet, but only while `shouldShowRawData` is true —

@@ -230,7 +230,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // .withoutResponse. A characteristic that only supports Write (with response) silently
         // drops .withoutResponse writes on CoreBluetooth. Prefer .withoutResponse when available
         // (preserves behavior for devices that work today), else fall back to .withResponse.
-        // Matches Subsurface (qt-ble.cpp) and submersion (BleIoStream.swift).
         let writeType: CBCharacteristicWriteType =
             characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
 
@@ -329,14 +328,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // an actual peripheral to disconnect — didDisconnectPeripheral is the
         // only truthful confirmation that CoreBluetooth has actually torn the
         // link down (cancelPeripheralConnection just requests it; the callback
-        // fires later, asynchronously). Publishing "disconnected" eagerly here
-        // — even at the same moment cancelPeripheralConnection is called, which
-        // was this file's own previous attempt at this fix — let callers (e.g.
-        // SyncFlowView.beginScan's onReceive($connectedDevice)) start a new
-        // connection attempt while CoreBluetooth still considered the old one
-        // live. Confirmed on device: still raced. The only case this function
-        // publishes directly is "there was no peripheral to disconnect", where
-        // no didDisconnectPeripheral callback will ever arrive.
+        // fires later, asynchronously). Publishing "disconnected" eagerly —
+        // even at the same moment cancelPeripheralConnection is called — let a
+        // caller observing connectedDevice start a new connection attempt
+        // while CoreBluetooth still considered the old one live (confirmed on
+        // device: still raced). The only case this function publishes
+        // directly is "there was no peripheral to disconnect", where no
+        // didDisconnectPeripheral callback will ever arrive.
         queue.sync {
             if !receivedPackets.isEmpty {
                 receivedPackets.removeAll()
@@ -376,8 +374,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 // that write flushes, and the dive computer never sees the
                 // shutdown — it stays stuck on "Sending Dive" / "WAIT CMD" until
                 // it times out on its own. close() isn't guaranteed to run off
-                // the main thread (e.g. SyncFlowView.beginScan calls it directly
-                // from a SwiftUI action), so this can't be a blocking sleep here.
+                // the main thread (a caller may invoke it directly from a
+                // SwiftUI action), so this can't be a blocking sleep here.
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
                     self.centralManager.cancelPeripheralConnection(peripheral)
                     // didDisconnectPeripheral publishes isPeripheralReady/connectedDevice
@@ -390,7 +388,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             }
         } else {
             // Nothing to disconnect, but observers waiting on these properties
-            // (e.g. beginScan's onReceive($connectedDevice)) still need the signal.
+            // still need the signal.
             DispatchQueue.main.async {
                 self.isPeripheralReady = false
                 self.connectedDevice = nil
@@ -582,20 +580,18 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             self.connectedDevice = nil
 
             // No auto-reconnect: a mid-session disconnect just surfaces as a
-            // failure and the caller (DiveLogRetriever's IO/protocol error
-            // path, or SyncFlowView's connect timeout) drives the UI to a
-            // clean retry state. This used to silently reopen the device
-            // here, but that raced against the host app's own connection
-            // flow — two independent callers (SyncFlowView.directConnect/
-            // connect, and this handler) could both call openBLEDevice for
-            // the same peripheral within milliseconds of each other, each
-            // allocating/writing to the shared device_data_t. No amount of
-            // flag-gating closed that window cleanly. Both Subsurface and
-            // Submersion (other libdivecomputer-based dive-log apps) take
-            // the same approach: fail cleanly on disconnect, let the user
-            // (or the host app's own retry UI) initiate the next attempt —
-            // Shearwater's BLE stack in particular won't reliably accept a
-            // second connection attempt within one "session" anyway.
+            // failure (via DiveLogRetriever's IO/protocol error path, or the
+            // host app's own connect timeout) and drives the UI to a clean
+            // retry state. This used to silently reopen the device here, but
+            // that raced against the host app's own connection flow — two
+            // independent callers (the host app's connect path, and this
+            // handler) could both call openBLEDevice for the same peripheral
+            // within milliseconds of each other, each allocating/writing to
+            // the shared device_data_t. No amount of flag-gating closed that
+            // window cleanly. Fail cleanly on disconnect instead, and let the
+            // user (or the host app's own retry UI) initiate the next
+            // attempt — Shearwater's BLE stack in particular won't reliably
+            // accept a second connection attempt within one "session" anyway.
             if !self.isDisconnecting && !self.isRetrievingLogs && !self.isConnecting {
                 logInfo("Unexpected disconnect from \(peripheral.name ?? "device") — not auto-reconnecting")
             }

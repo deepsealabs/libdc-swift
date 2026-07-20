@@ -7,15 +7,12 @@ import LibDCBridge
 
     // openBLEDevice is already a fully blocking call (open_ble_device_with_
     // identification polls internally until success/failure/timeout), but
-    // nothing previously stopped two independent callers — e.g.
-    // SyncFlowView's own connect path and a reactive re-trigger elsewhere —
-    // from entering it concurrently and racing on the same underlying
-    // CoreBluetooth/libdivecomputer connection state. Guard queue entry with
-    // a hard lock so at most one connection attempt is ever in flight,
-    // regardless of who calls it or from which thread. This is the
-    // equivalent guarantee Submersion (another libdivecomputer-based
-    // dive-log app) gets structurally, from having only one code path that
-    // can drive a connection attempt at all.
+    // nothing previously stopped two independent callers — e.g. a host app's
+    // own connect path and a reactive re-trigger elsewhere — from entering
+    // it concurrently and racing on the same underlying CoreBluetooth/
+    // libdivecomputer connection state. Guard entry with a hard lock so at
+    // most one connection attempt is ever in flight, regardless of who calls
+    // it or from which thread.
     private static let connectionLock = NSLock()
 
     // Helper struct for UI Selection
