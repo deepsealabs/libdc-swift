@@ -22,16 +22,21 @@ public class DiveLogRetriever {
         var storedFingerprint: Data?
         var isCompleted: Bool = false
         var fingerprintMatched: Bool = false  // Track if we stopped due to fingerprint match
-        
+        /// When false, a "download only new" toggle-off — skip loading/comparing
+        /// against the stored fingerprint entirely so a full history re-download
+        /// isn't cut short by the fingerprint match early-return below.
+        let useFingerprint: Bool
+
         var detectedFamily: dc_family_t = DC_FAMILY_NULL
         var detectedModel: UInt32 = 0
-        
-        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, bluetoothManager: CoreBluetoothManager) {
+
+        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, bluetoothManager: CoreBluetoothManager, useFingerprint: Bool = true) {
             self.viewModel = viewModel
             self.deviceName = deviceName
             self.deviceUUID = deviceUUID
             self.storedFingerprint = storedFingerprint
             self.bluetoothManager = bluetoothManager
+            self.useFingerprint = useFingerprint
         }
     }
 
@@ -77,7 +82,8 @@ public class DiveLogRetriever {
             }
 
             // Now that we have device info, load the stored fingerprint if we don't have it yet
-            if context.storedFingerprint == nil,
+            if context.useFingerprint,
+               context.storedFingerprint == nil,
                let deviceType = context.deviceTypeFromLibDC,
                let serial = context.deviceSerial {
                 context.storedFingerprint = context.viewModel.getFingerprint(forDeviceType: deviceType, serial: serial)
@@ -220,6 +226,7 @@ public class DiveLogRetriever {
             viewModel: DiveDataViewModel,
             bluetoothManager: CoreBluetoothManager,
             syncClock: Bool = false,
+            useFingerprint: Bool = true,
             onProgress: ((Int, Int) -> Void)? = nil,
             completion: @escaping (Bool) -> Void
         ) {
@@ -253,7 +260,9 @@ public class DiveLogRetriever {
                 if devicePtr.pointee.have_devinfo != 0 {
                     let serial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
                     DeviceStorage.shared.updateDeviceSerial(uuid: device.identifier.uuidString, serial: serial)
-                    storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceTypeForFingerprint, serial: serial)
+                    if useFingerprint {
+                        storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceTypeForFingerprint, serial: serial)
+                    }
                 }
 
                 let context = CallbackContext(
@@ -261,7 +270,8 @@ public class DiveLogRetriever {
                     deviceName: deviceName,
                     deviceUUID: device.identifier.uuidString,
                     storedFingerprint: storedFingerprint,
-                    bluetoothManager: bluetoothManager
+                    bluetoothManager: bluetoothManager,
+                    useFingerprint: useFingerprint
                 )
                 context.devicePtr = devicePtr
                 
@@ -280,8 +290,10 @@ public class DiveLogRetriever {
                 }
                 progressTimer.resume()
                 
-                devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
-                devicePtr.pointee.lookup_fingerprint = fingerprintLookup
+                if useFingerprint {
+                    devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
+                    devicePtr.pointee.lookup_fingerprint = fingerprintLookup
+                }
                 
                 let enumStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
 
