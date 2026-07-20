@@ -4,7 +4,20 @@ import Clibdivecomputer
 import LibDCBridge
 
 @objc public class DeviceConfiguration: NSObject {
-    
+
+    // openBLEDevice is already a fully blocking call (open_ble_device_with_
+    // identification polls internally until success/failure/timeout), but
+    // nothing previously stopped two independent callers — e.g.
+    // SyncFlowView's own connect path and a reactive re-trigger elsewhere —
+    // from entering it concurrently and racing on the same underlying
+    // CoreBluetooth/libdivecomputer connection state. Guard queue entry with
+    // a hard lock so at most one connection attempt is ever in flight,
+    // regardless of who calls it or from which thread. This is the
+    // equivalent guarantee Submersion (another libdivecomputer-based
+    // dive-log app) gets structurally, from having only one code path that
+    // can drive a connection attempt at all.
+    private static let connectionLock = NSLock()
+
     // Helper struct for UI Selection
     public struct ComputerModel: Identifiable, Hashable {
         public let id = UUID()
@@ -222,11 +235,22 @@ import LibDCBridge
         return knownServiceUUIDs
     }
 
-    /// Attempts to open a BLE connection to a dive computer.
+    /// Attempts to open a BLE connection to a dive computer. Serialized via
+    /// connectionLock — see its declaration for why.
     public static func openBLEDevice(
         name: String,
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)? = nil
+    ) -> Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        return openBLEDeviceLocked(name: name, deviceAddress: deviceAddress, forcedModel: forcedModel)
+    }
+
+    private static func openBLEDeviceLocked(
+        name: String,
+        deviceAddress: String,
+        forcedModel: (family: DeviceFamily, model: UInt32)?
     ) -> Bool {
         logDebug("Attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
