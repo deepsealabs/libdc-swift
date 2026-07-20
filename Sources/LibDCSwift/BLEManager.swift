@@ -345,21 +345,38 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         dataAvailableSemaphore.signal() // Signal once to unblock any waiting read
 
+        var needsShutdownSettleDelay = false
         if clearDevicePtr {
             if let devicePtr = self.openedDeviceDataPtr {
                 if devicePtr.pointee.device != nil {
                     dc_device_close(devicePtr.pointee.device)
+                    needsShutdownSettleDelay = true
                 }
                 devicePtr.deallocate()
                 self.openedDeviceDataPtr = nil
             }
         }
-        
+
         if let peripheral = self.peripheral {
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
             self.peripheral = nil
-            centralManager.cancelPeripheralConnection(peripheral)
+            if needsShutdownSettleDelay {
+                // dc_device_close (above) sends a protocol-level shutdown command
+                // (e.g. Shearwater's "exit command mode" packet) over a writeValue
+                // that completes asynchronously on the BLE stack. Without a settle
+                // delay, cancelPeripheralConnection tears down the link before
+                // that write flushes, and the dive computer never sees the
+                // shutdown — it stays stuck on "Sending Dive" / "WAIT CMD" until
+                // it times out on its own. close() isn't guaranteed to run off
+                // the main thread (e.g. SyncFlowView.beginScan calls it directly
+                // from a SwiftUI action), so this can't be a blocking sleep here.
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
+                    self.centralManager.cancelPeripheralConnection(peripheral)
+                }
+            } else {
+                centralManager.cancelPeripheralConnection(peripheral)
+            }
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -385,7 +402,18 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             return false
         }
         
-        self.peripheral = peripheral
+        // connect(toDevice:) is called from openBLEDevice, which every call site
+        // dispatches off the main thread (it's a blocking call awaiting CB
+        // callbacks). `peripheral` is @Published, so assigning it here directly
+        // triggers "Updating ObservedObject from background threads" — hop to
+        // main for the mutation, everything else can stay off-thread.
+        if Thread.isMainThread {
+            self.peripheral = peripheral
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.peripheral = peripheral
+            }
+        }
         peripheral.delegate = self
         centralManager.connect(peripheral, options: nil)
         return true  // Return immediately, connection status will be handled by delegate
