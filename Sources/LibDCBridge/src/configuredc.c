@@ -307,6 +307,24 @@ static void close_device_data(device_data_t *data) {
 /*--------------------------------------------------------------------
  * Opens a BLE device using a provided descriptor
  *------------------------------------------------------------------*/
+// Forwards libdivecomputer's internal ERROR/WARNING/INFO/DEBUG logging
+// (context-private.h, only compiled in with ENABLE_LOGGING — see Package.swift)
+// to the console with printf, matching the existing "[C] ..." print pattern
+// elsewhere in this file. Without this, a protocol-level validation failure
+// in e.g. shearwater_common.c only ever surfaces as a bare DC_STATUS_PROTOCOL,
+// with no indication of which specific check failed or why.
+static void dc_log_callback(dc_context_t *context, dc_loglevel_t loglevel, const char *file, unsigned int line, const char *function, const char *message, void *userdata) {
+    const char *level = "?";
+    switch (loglevel) {
+        case DC_LOGLEVEL_ERROR:   level = "ERROR"; break;
+        case DC_LOGLEVEL_WARNING: level = "WARN"; break;
+        case DC_LOGLEVEL_INFO:    level = "INFO"; break;
+        case DC_LOGLEVEL_DEBUG:   level = "DEBUG"; break;
+        default: break;
+    }
+    printf("[C][libdc:%s] %s:%d %s(): %s\n", level, file, line, function, message);
+}
+
 dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_t family, unsigned int model) {
     dc_status_t rc;
     dc_descriptor_t *descriptor = NULL;
@@ -317,13 +335,14 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
 
     // Initialize all pointers to NULL
     memset(data, 0, sizeof(device_data_t));
-    
+
     // Create context
     rc = dc_context_new(&data->context);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to create context, rc=%d\n", rc);
         return rc;
     }
+    dc_context_set_logfunc(data->context, dc_log_callback, NULL);
 
     // Get descriptor for the device
     rc = find_descriptor_by_model(&descriptor, family, model);

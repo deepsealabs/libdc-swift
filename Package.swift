@@ -31,7 +31,14 @@ let package = Package(
             cSettings: [
                 .headerSearchPath("include/libdivecomputer"),
                 .headerSearchPath("src"),
-                .define("HAVE_PTHREAD_H")
+                .define("HAVE_PTHREAD_H"),
+                // Without this, ERROR/WARNING/INFO/DEBUG in context-private.h
+                // compile to no-ops (see the #ifdef ENABLE_LOGGING there) and
+                // dc_context_log is never called — every protocol-level
+                // validation failure (e.g. in shearwater_common.c) surfaces
+                // to callers as a bare DC_STATUS_PROTOCOL with zero detail
+                // about which check actually failed.
+                .define("ENABLE_LOGGING")
             ]
         ),
         .target(
