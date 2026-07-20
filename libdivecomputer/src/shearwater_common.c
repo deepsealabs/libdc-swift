@@ -43,6 +43,18 @@
 // for future expansions.
 #define SZ_PACKET_V1  254
 #define SZ_PACKET_V2  4096
+
+// Sanity ceiling on decompressed buffer growth. The LRE run-length code can
+// expand a single 9-bit code into up to 255 zero bytes — a ~226x worst-case
+// expansion ratio — so a corrupted/misaligned compressed stream (e.g. from a
+// BLE transport bug upstream of this decoder) can silently balloon dc_buffer_t
+// to hundreds of MB or more before ever hitting a real termination condition,
+// getting the whole process killed by the OS for exceeding its memory
+// watermark with zero diagnostics. No real dive profile is anywhere close to
+// this size (even a multi-hour CCR dive at 1s sampling is well under 1 MB) —
+// this exists purely to turn a silent OOM kill into a clean, logged
+// DC_STATUS_PROTOCOL failure that the host app can actually see and report.
+#define SZ_DECOMPRESS_MAX (20 * 1024 * 1024)
 #define SZ_PACKET_MAX SZ_PACKET_V2
 
 // SLIP special character codes
@@ -134,7 +146,14 @@ shearwater_common_decompress_lre (unsigned char *data, unsigned int size, dc_buf
 			break;
 		} else {
 			// Expand the run with zero bytes.
-			if (!dc_buffer_resize (buffer, dc_buffer_get_size (buffer) + value))
+			unsigned int newsize = dc_buffer_get_size (buffer) + value;
+			if (newsize > SZ_DECOMPRESS_MAX) {
+				// See SZ_DECOMPRESS_MAX's definition — this is a sanity
+				// backstop, not a real dive profile ever needing this much
+				// space. Bail cleanly instead of growing further.
+				return -1;
+			}
+			if (!dc_buffer_resize (buffer, newsize))
 				return -1;
 		}
 
