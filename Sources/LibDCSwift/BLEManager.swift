@@ -155,9 +155,21 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     ]
     
     // MARK: - Initialization
+    /// A stable restore identifier lets iOS relaunch the host app into the
+    /// background to receive `centralManager(_:willRestoreState:)` after
+    /// the app is suspended (or, best-effort and not guaranteed, after
+    /// it's been terminated by the system — never after a user force-quit).
+    /// This is a library-level identifier, not app-specific, since a
+    /// process can only have one `CoreBluetoothManager` singleton either way.
+    private static let restoreIdentifier = "libdc-swift.CoreBluetoothManager.central"
+
     private override init() {
         super.init()
-        centralManager = CBCentralManager(delegate: self, queue: nil)
+        centralManager = CBCentralManager(
+            delegate: self,
+            queue: nil,
+            options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier]
+        )
     }
     
     // MARK: - Service Discovery
@@ -454,44 +466,11 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
     }
     
-    public func setBackgroundMode(_ enabled: Bool) {
-        if enabled {
-            // Set connection parameters for background operation
-            if let peripheral = peripheral {
-                // For iOS/macOS, we can only ensure the connection stays alive
-                // by maintaining the peripheral reference and keeping the central manager active
-                
-                #if os(iOS)
-                // On iOS, we can request background execution time
-                var backgroundTask: UIBackgroundTaskIdentifier = .invalid
-                backgroundTask = UIApplication.shared.beginBackgroundTask { [backgroundTask] in
-                    // Cleanup callback
-                    if backgroundTask != .invalid {
-                        UIApplication.shared.endBackgroundTask(backgroundTask)
-                    }
-                }
-                
-                // Store the task identifier for later cleanup
-                currentBackgroundTask = backgroundTask
-                #endif
-            }
-        } else {
-            #if os(iOS)
-            // Clean up any background tasks when disabling background mode
-            if let peripheral = peripheral {
-                if let task = currentBackgroundTask, task != .invalid {
-                    UIApplication.shared.endBackgroundTask(task)
-                    currentBackgroundTask = nil
-                }
-            }
-            #endif
-        }
-    }
-
-    // track background tasks
-    #if os(iOS)
-    private var currentBackgroundTask: UIBackgroundTaskIdentifier?
-    #endif
+    // Background execution time is the host app's concern, not this
+    // library's — this method used to request it directly via a bare
+    // `beginBackgroundTask` call with no renewal and no expiration
+    // handling, duplicating (worse) what a host app's own background-task
+    // manager should own. Removed rather than left as an unused dead path.
 
     public func systemDisconnect(_ peripheral: CBPeripheral) {
         logInfo("Performing system-level disconnect for \(peripheral.name ?? "Unknown Device")")
@@ -528,6 +507,32 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     // MARK: - CBCentralManagerDelegate Methods
+
+    /// Called by CoreBluetooth when the system relaunches the app to
+    /// restore a central manager that had a connection or pending
+    /// operation in flight when the app was suspended (or, best-effort,
+    /// terminated by the system — not after a user force-quit; iOS
+    /// disables restoration in that case). Re-adopts whatever peripheral
+    /// is still associated with this identifier so a state check right
+    /// after restoration sees the same connection rather than nil,
+    /// instead of forcing every restoration through a full teardown and
+    /// rescan. This does not, by itself, resume an in-progress dive-log
+    /// download — see `SyncFlowView`'s pending-session handling for what
+    /// happens with a restored connection.
+    public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        guard let restoredPeripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
+              let restored = restoredPeripherals.first else {
+            logInfo("CBCentralManager restored with no associated peripheral")
+            return
+        }
+        logInfo("CBCentralManager restoring state for \(restored.name ?? restored.identifier.uuidString)")
+        peripheral = restored
+        restored.delegate = self
+        if restored.state == .connected {
+            connectedDevice = restored
+        }
+    }
+
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:

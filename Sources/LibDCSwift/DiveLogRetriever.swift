@@ -167,10 +167,6 @@ public class DiveLogRetriever {
         }
     }
     
-    #if os(iOS)
-    private static var backgroundTask: UIBackgroundTaskIdentifier = .invalid
-    #endif
-    
     private static let fingerprintLookup: @convention(c) (
         UnsafeMutableRawPointer?, 
         UnsafePointer<CChar>?, 
@@ -423,25 +419,12 @@ public class DiveLogRetriever {
                     
                     context.isCompleted = true
                     Unmanaged<CallbackContext>.fromOpaque(contextPtr).release()
-                    
-                    #if os(iOS)
-                    endBackgroundTask()
-                    #endif
                 }
-                
+
                 currentContext = context
             }
         }
-    
-    #if os(iOS)
-    private static func endBackgroundTask() {
-        if backgroundTask != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTask)
-            backgroundTask = .invalid
-        }
-    }
-    #endif
-    
+
     public static func getCurrentContext() -> CallbackContext? {
         return currentContext
     }
