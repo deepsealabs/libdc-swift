@@ -240,7 +240,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// backgrounds) rather than a genuinely broken link — retrying a
     /// couple of times before giving up avoids failing an entire
     /// multi-hundred-dive download over one momentary blip.
-    private static let maxWriteAttempts = 3
+    /// Total patience budget for a stuck writeWithoutResponse queue. Background BLE
+    /// operation lengthens the connection interval significantly -- 9s (the old
+    /// 3-attempt budget) proved too short in the field; nothing has been sent yet
+    /// while waiting, so it's always safe to keep waiting longer. Bailing out is
+    /// driven by a genuine disconnect (`isPeripheralReady`), not this ceiling --
+    /// this just bounds how long a truly wedged wait can run before giving up.
+    private static let writeReadyBudgetSeconds: TimeInterval = 45
 
     /// 0 = success, 1 = timed out (transient — see `maxWriteAttempts`),
     /// 2 = genuine failure. Not a `Bool`: the ObjC bridge (`ble_write` in
@@ -267,21 +273,25 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         if writeType == .withoutResponse {
             // Don't overrun CoreBluetooth's transmit queue: wait until it can accept a
             // no-response write, otherwise the write is silently dropped during bursts.
-            for attempt in 1...Self.maxWriteAttempts {
+            let deadline = Date().addingTimeInterval(Self.writeReadyBudgetSeconds)
+            var attempt = 0
+            while Date() < deadline {
+                attempt += 1
                 if !peripheral.canSendWriteWithoutResponse {
+                    guard self.isPeripheralReady else {
+                        logWarning("Write blocked and peripheral no longer ready -- treating as a real disconnect")
+                        return 2
+                    }
                     drainSemaphore(writeReadySemaphore)
                     if writeReadySemaphore.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
-                        if attempt < Self.maxWriteAttempts {
-                            logWarning("Write blocked waiting for canSendWriteWithoutResponse (attempt \(attempt)/\(Self.maxWriteAttempts)), retrying")
-                            continue
-                        }
-                        logWarning("Write blocked waiting for canSendWriteWithoutResponse")
-                        return 1
+                        logWarning("Write blocked waiting for canSendWriteWithoutResponse (attempt \(attempt)), retrying")
+                        continue
                     }
                 }
                 peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
                 return 0
             }
+            logWarning("Write blocked waiting for canSendWriteWithoutResponse after \(Self.writeReadyBudgetSeconds)s, giving up")
             return 1
         } else {
             // With-response write: wait for the didWriteValueFor confirmation.
