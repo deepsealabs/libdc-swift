@@ -156,6 +156,15 @@ dc_status_t ble_read(ble_object_t *io, void *buffer, size_t requested, size_t *a
 
     if (!partialData || partialData.length == 0) {
         *actual = 0;
+        // No notification arrived within the read window. Under background BLE
+        // conditions iOS lengthens the connection interval, so this is routinely
+        // just "not yet" rather than a broken link -- confirm via the peripheral's
+        // ready state before deciding. A real drop fires didDisconnectPeripheral
+        // separately; this only distinguishes "still connected, still waiting"
+        // (recoverable) from "no longer connected" (fatal), mirroring ble_write.
+        if ([manager getPeripheralReadyState]) {
+            return DC_STATUS_TIMEOUT;
+        }
         return DC_STATUS_IO;
     }
     memcpy(buffer, partialData.bytes, partialData.length);
