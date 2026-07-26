@@ -10,7 +10,11 @@
 - (BOOL)getPeripheralReadyState;
 - (BOOL)discoverServices;
 - (BOOL)enableNotifications;
-- (BOOL)writeData:(NSData *)data;
+// Returns 0 on success, 1 if the write timed out waiting for CoreBluetooth
+// to be ready to send (transient -- e.g. a brief connection-interval
+// renegotiation right as the app backgrounds; libdc-swift retries this
+// internally a few times before giving up), 2 for a genuine write failure.
+- (NSInteger)writeData:(NSData *)data;
 - (NSData *)readDataPartial:(int)requested;
 - (NSData *)readCharacteristicByUUID:(NSString *)uuid timeout:(double)seconds;
 - (void)setReadTimeout:(int)milliseconds;

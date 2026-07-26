@@ -235,9 +235,23 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return notifyCharacteristic.isNotifying
     }
     
-    @objc public func write(_ data: Data!) -> Bool {
+    /// A single readiness/confirmation timeout is often transient (e.g. a
+    /// brief connection-interval renegotiation right as the app
+    /// backgrounds) rather than a genuinely broken link — retrying a
+    /// couple of times before giving up avoids failing an entire
+    /// multi-hundred-dive download over one momentary blip.
+    private static let maxWriteAttempts = 3
+
+    /// 0 = success, 1 = timed out (transient — see `maxWriteAttempts`),
+    /// 2 = genuine failure. Not a `Bool`: the ObjC bridge (`ble_write` in
+    /// BLEBridge.m) needs to tell libdivecomputer whether this was a
+    /// retryable timeout (`DC_STATUS_TIMEOUT`) or a hard failure
+    /// (`DC_STATUS_IO`) — collapsing both into one boolean previously
+    /// meant every transient readiness timeout was reported as an
+    /// unrecoverable I/O error.
+    @objc public func write(_ data: Data!) -> Int {
         guard let peripheral = self.peripheral,
-              let characteristic = self.writeCharacteristic else { return false }
+              let characteristic = self.writeCharacteristic else { return 2 }
         // Choose the write type from the characteristic's properties rather than always using
         // .withoutResponse. A characteristic that only supports Write (with response) silently
         // drops .withoutResponse writes on CoreBluetooth. Prefer .withoutResponse when available
@@ -253,29 +267,43 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         if writeType == .withoutResponse {
             // Don't overrun CoreBluetooth's transmit queue: wait until it can accept a
             // no-response write, otherwise the write is silently dropped during bursts.
-            if !peripheral.canSendWriteWithoutResponse {
-                drainSemaphore(writeReadySemaphore)
-                if writeReadySemaphore.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
-                    logWarning("Write blocked waiting for canSendWriteWithoutResponse")
-                    return false
+            for attempt in 1...Self.maxWriteAttempts {
+                if !peripheral.canSendWriteWithoutResponse {
+                    drainSemaphore(writeReadySemaphore)
+                    if writeReadySemaphore.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
+                        if attempt < Self.maxWriteAttempts {
+                            logWarning("Write blocked waiting for canSendWriteWithoutResponse (attempt \(attempt)/\(Self.maxWriteAttempts)), retrying")
+                            continue
+                        }
+                        logWarning("Write blocked waiting for canSendWriteWithoutResponse")
+                        return 1
+                    }
                 }
+                peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+                return 0
             }
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-            return true
+            return 1
         } else {
             // With-response write: wait for the didWriteValueFor confirmation.
+            // Deliberately not retried like the .withoutResponse branch above —
+            // unlike waiting-to-send (which can safely retry the *wait*
+            // without having sent anything yet), a confirmation timeout here
+            // can't tell whether the write actually landed before the ack was
+            // lost; resending would risk the peripheral seeing the same
+            // packet twice, which for a stateful read/request protocol like
+            // this could corrupt the exchange rather than recover it.
             drainSemaphore(writeConfirmSemaphore)
             lastWriteError = nil
             peripheral.writeValue(data, for: characteristic, type: .withResponse)
             if writeConfirmSemaphore.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
                 logWarning("Write withResponse timed out")
-                return false
+                return 1
             }
             if let error = lastWriteError {
                 logError("Write withResponse failed: \(error.localizedDescription)")
-                return false
+                return 2
             }
-            return true
+            return 0
         }
     }
 

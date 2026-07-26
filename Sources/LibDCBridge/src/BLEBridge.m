@@ -167,13 +167,22 @@ dc_status_t ble_write(ble_object_t *io, const void *data, size_t size, size_t *a
     Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
     id<CoreBluetoothManagerProtocol> manager = [CoreBluetoothManagerClass shared];
     NSData *nsData = [NSData dataWithBytes:data length:size];
-    
-    if ([manager writeData:nsData]) {
-        *actual = size;
-        return DC_STATUS_SUCCESS;
-    } else {
-        *actual = 0;
-        return DC_STATUS_IO;
+
+    NSInteger result = [manager writeData:nsData];
+    switch (result) {
+        case 0:
+            *actual = size;
+            return DC_STATUS_SUCCESS;
+        case 1:
+            // Transient -- CoreBluetooth wasn't ready to accept the write in
+            // time (already retried a few times internally; see writeData:).
+            // DC_STATUS_TIMEOUT (vs DC_STATUS_IO) reports this as recoverable
+            // rather than a broken connection.
+            *actual = 0;
+            return DC_STATUS_TIMEOUT;
+        default:
+            *actual = 0;
+            return DC_STATUS_IO;
     }
 }
 
