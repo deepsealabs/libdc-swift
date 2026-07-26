@@ -109,30 +109,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// but libdivecomputer requires the vendor service, so this must never win preferred-service selection.
     private let nordicUARTServiceUUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 
-    // MARK: - Background write gating (Apple DTS-confirmed)
-
-    /// Per Apple DTS (forums.developer.apple.com/forums/thread/765444):
-    /// "The system will not wake up an app in order to deliver
-    /// peripheralIsReady(toSendWriteWithoutResponse:) ... in most cases the
-    /// app will be in a suspended state, and this call will not reach it."
-    /// `write(_:)`'s `.withoutResponse` path normally waits for that exact
-    /// callback before sending -- while backgrounded, that wait is for a
-    /// signal that may simply never arrive, no matter how long the budget
-    /// is. Confirmed against real device logs: write stalls cluster
-    /// precisely at backgrounding and never recover even across a widened
-    /// 45s retry budget, while the same writes succeed instantly in the
-    /// foreground. The documented workaround (independently confirmed by
-    /// multiple developers on Apple's forums) is to ignore
-    /// `canSendWriteWithoutResponse` while backgrounded and write directly
-    /// -- CoreBluetooth still has buffer headroom for a write even when it
-    /// stops reporting readiness accurately.
-    private let backgroundStateLock = NSLock()
-    private var _isAppBackgrounded = false
-    private var isAppBackgrounded: Bool {
-        get { backgroundStateLock.lock(); defer { backgroundStateLock.unlock() }; return _isAppBackgrounded }
-        set { backgroundStateLock.lock(); _isAppBackgrounded = newValue; backgroundStateLock.unlock() }
-    }
-
     // MARK: - Public Properties
     public var openedDeviceDataPtr: UnsafeMutablePointer<device_data_t>? { // Public access to device data pointer with change notification
         get {
@@ -194,14 +170,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             queue: nil,
             options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier]
         )
-        #if canImport(UIKit)
-        NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { [weak self] _ in
-            self?.isAppBackgrounded = true
-        }
-        NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil) { [weak self] _ in
-            self?.isAppBackgrounded = false
-        }
-        #endif
     }
     
     // MARK: - Service Discovery
@@ -267,26 +235,34 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return notifyCharacteristic.isNotifying
     }
     
-    /// A single readiness/confirmation timeout is often transient (e.g. a
-    /// brief connection-interval renegotiation right as the app
-    /// backgrounds) rather than a genuinely broken link — retrying a
-    /// couple of times before giving up avoids failing an entire
-    /// multi-hundred-dive download over one momentary blip.
-    /// Total patience budget for a stuck writeWithoutResponse queue. Background BLE
-    /// operation lengthens the connection interval significantly -- 9s (the old
-    /// 3-attempt budget) proved too short in the field; nothing has been sent yet
-    /// while waiting, so it's always safe to keep waiting longer. Bailing out is
-    /// driven by a genuine disconnect (`isPeripheralReady`), not this ceiling --
-    /// this just bounds how long a truly wedged wait can run before giving up.
-    private static let writeReadyBudgetSeconds: TimeInterval = 45
+    /// `canSendWriteWithoutResponse` (and the `peripheralIsReady(
+    /// toSendWriteWithoutResponse:)` callback it depends on) getting stuck
+    /// false is common and not always a real problem -- brief connection-
+    /// interval renegotiation, general BLE-stack flakiness, and (per Apple
+    /// DTS, forums.developer.apple.com/forums/thread/765444) app
+    /// backgrounding can all cause it, and a suspended app is never woken
+    /// to deliver that callback at all. Waiting on it indefinitely means
+    /// waiting on a signal that may simply never arrive -- a wide budget
+    /// (this used to be 45s, up from an even more conservative 9s) just
+    /// delays the same eventual failure. A short grace period still gives
+    /// a healthy connection a moment to report readiness normally, but
+    /// past that, write anyway: CoreBluetooth still has buffer headroom to
+    /// accept it even when it's stopped reporting readiness accurately
+    /// (independently confirmed by multiple developers building similar
+    /// BLE dive-computer apps).
+    /// Bailing out early is still driven by a genuine disconnect
+    /// (`isPeripheralReady`), never by this grace period.
+    private static let writeReadyGraceSeconds: TimeInterval = 0.5
 
-    /// 0 = success, 1 = timed out (transient — see `maxWriteAttempts`),
-    /// 2 = genuine failure. Not a `Bool`: the ObjC bridge (`ble_write` in
-    /// BLEBridge.m) needs to tell libdivecomputer whether this was a
-    /// retryable timeout (`DC_STATUS_TIMEOUT`) or a hard failure
-    /// (`DC_STATUS_IO`) — collapsing both into one boolean previously
-    /// meant every transient readiness timeout was reported as an
-    /// unrecoverable I/O error.
+    /// 0 = success, 1 = timed out waiting for a with-response write's
+    /// confirmation (transient — the without-response path never returns
+    /// this, since it writes anyway past its grace period rather than
+    /// giving up), 2 = genuine failure. Not a `Bool`: the ObjC bridge
+    /// (`ble_write` in BLEBridge.m) needs to tell libdivecomputer whether
+    /// this was a retryable timeout (`DC_STATUS_TIMEOUT`) or a hard
+    /// failure (`DC_STATUS_IO`) — collapsing both into one boolean
+    /// previously meant every transient readiness timeout was reported as
+    /// an unrecoverable I/O error.
     @objc public func write(_ data: Data!) -> Int {
         guard let peripheral = self.peripheral,
               let characteristic = self.writeCharacteristic else { return 2 }
@@ -303,36 +279,19 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         let timeoutMs = self.timeout > 0 ? self.timeout : 3000
 
         if writeType == .withoutResponse {
-            if isAppBackgrounded {
-                // See isAppBackgrounded's doc comment: canSendWriteWithoutResponse
-                // and its ready callback are not reliable once suspended, so
-                // waiting on either here would be waiting on a signal that may
-                // never come. Write straight through instead.
-                peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-                return 0
-            }
-            // Don't overrun CoreBluetooth's transmit queue: wait until it can accept a
-            // no-response write, otherwise the write is silently dropped during bursts.
-            let deadline = Date().addingTimeInterval(Self.writeReadyBudgetSeconds)
-            var attempt = 0
-            while Date() < deadline {
-                attempt += 1
-                if !peripheral.canSendWriteWithoutResponse {
-                    guard self.isPeripheralReady else {
-                        logWarning("Write blocked and peripheral no longer ready -- treating as a real disconnect")
-                        return 2
-                    }
-                    drainSemaphore(writeReadySemaphore)
-                    if writeReadySemaphore.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
-                        logWarning("Write blocked waiting for canSendWriteWithoutResponse (attempt \(attempt)), retrying")
-                        continue
-                    }
+            if !peripheral.canSendWriteWithoutResponse {
+                guard self.isPeripheralReady else {
+                    logWarning("Write blocked and peripheral no longer ready -- treating as a real disconnect")
+                    return 2
                 }
-                peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
-                return 0
+                drainSemaphore(writeReadySemaphore)
+                let graceMs = Int(Self.writeReadyGraceSeconds * 1000)
+                if writeReadySemaphore.wait(timeout: .now() + .milliseconds(graceMs)) == .timedOut {
+                    logWarning("canSendWriteWithoutResponse still false after \(Self.writeReadyGraceSeconds)s, writing anyway")
+                }
             }
-            logWarning("Write blocked waiting for canSendWriteWithoutResponse after \(Self.writeReadyBudgetSeconds)s, giving up")
-            return 1
+            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            return 0
         } else {
             // With-response write: wait for the didWriteValueFor confirmation.
             // Deliberately not retried like the .withoutResponse branch above —
