@@ -327,6 +327,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         self.timeout = Int(milliseconds)
     }
 
+    /// The peripheral's advertised BLE name, needed by DC_IOCTL_BLE_GET_NAME
+    /// during the READMEMORY command. Returning an empty string causes the
+    /// dive computer to answer with NAK (0xA5) instead of ACK + data.
+    @objc public func getDeviceName() -> String {
+        return peripheral?.name ?? ""
+    }
+
     @objc public func readDataPartial(_ requested: Int32) -> Data? {
         let requestedInt = Int(requested)
         let startTime = Date()

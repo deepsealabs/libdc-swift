@@ -128,9 +128,30 @@ dc_status_t ble_ioctl(ble_object_t *io, unsigned int request, void *data, size_t
         return DC_STATUS_SUCCESS;
     }
 
-    case DC_IOCTL_BLE_GET_NAME:
-        // Not required by currently supported computers; implement if a backend needs it.
-        return DC_STATUS_UNSUPPORTED;
+    case DC_IOCTL_BLE_GET_NAME: {
+        // oceanic_atom2_device_open() issues this ioctl during the handshake
+        // for Aqualung/Oceanic/Sherwood models so it can embed the
+        // peripheral's advertised name (e.g. "FH020399") into the READMEMORY
+        // request. Without it the device answers with NAK (0xA5) and the
+        // download fails before any dive data is read.
+        if (!data || size == 0) {
+            return DC_STATUS_INVALIDARGS;
+        }
+
+        NSString *name = [manager getDeviceName];
+        if (!name || name.length == 0) {
+            return DC_STATUS_UNSUPPORTED;
+        }
+
+        // libdivecomputer expects a NUL-terminated C string.
+        const char *cname = [name UTF8String];
+        size_t needed = strlen(cname) + 1;
+        if (needed > size) {
+            return DC_STATUS_NOMEMORY;
+        }
+        memcpy(data, cname, needed);
+        return DC_STATUS_SUCCESS;
+    }
 
     default:
         return DC_STATUS_UNSUPPORTED;
