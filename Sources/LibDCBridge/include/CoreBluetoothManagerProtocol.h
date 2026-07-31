@@ -19,6 +19,7 @@
 - (NSData *)readCharacteristicByUUID:(NSString *)uuid timeout:(double)seconds;
 - (void)setReadTimeout:(int)milliseconds;
 - (void)close;
+- (NSString *)getDeviceName;
 @end
 
 #else

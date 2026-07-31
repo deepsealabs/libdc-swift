@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 /*--------------------------------------------------------------------
  * BLE stream structures
@@ -301,7 +302,10 @@ static void close_device_data(device_data_t *data) {
         dc_context_free(data->context);
         data->context = NULL;
     }
-    data->descriptor = NULL;
+    if (data->descriptor) {
+        dc_descriptor_free(data->descriptor);
+        data->descriptor = NULL;
+    }
 }
 
 /*--------------------------------------------------------------------
@@ -356,14 +360,34 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     rc = ble_packet_open(&data->iostream, data->context, devaddr, data);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to open BLE connection, rc=%d\n", rc);
+        dc_descriptor_free(descriptor);
         close_device_data(data);
         return rc;
     }
 
-    // Use dc_device_open to handle device-specific opening
-    rc = dc_device_open(&data->device, data->context, descriptor, data->iostream);
+    // Retry dc_device_open on the same BLE link. Some devices (notably
+    // Aqualung i300C and other Pelagic OEMs) ignore protocol commands for
+    // several seconds after a fresh BLE link is established -- the initial
+    // handshake gets no answer (oceanic_atom2_packet: "Failed to receive
+    // the answer"). Retrying on the same link gives the device's Bluetooth
+    // module time to initialize without the expensive (and fragile)
+    // disconnect + reconnect cycle that leaves CoreBluetooth in a bad state.
+    #define MAX_PROTOCOL_RETRIES 5
+    for (int attempt = 1; attempt <= MAX_PROTOCOL_RETRIES; attempt++) {
+        if (attempt > 1) {
+            printf("[PROTOCOL RETRY] dc_device_open attempt %d/%d, waiting 3s...\n",
+                   attempt, MAX_PROTOCOL_RETRIES);
+            usleep(3000000);
+        }
+        rc = dc_device_open(&data->device, data->context, descriptor, data->iostream);
+        if (rc == DC_STATUS_SUCCESS) {
+            break;
+        }
+        data->device = NULL;
+    }
     if (rc != DC_STATUS_SUCCESS) {
-        printf("Failed to open device, rc=%d\n", rc);
+        printf("Failed to open device after %d attempts, rc=%d\n", MAX_PROTOCOL_RETRIES, rc);
+        dc_descriptor_free(descriptor);
         close_device_data(data);
         return rc;
     }
@@ -374,6 +398,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     rc = dc_device_set_events(data->device, events, ble_device_event_cb, data);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to set event handler, rc=%d\n", rc);
+        dc_descriptor_free(descriptor);
         close_device_data(data);
         return rc;
     }
@@ -684,7 +709,16 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
         free(data);
         return rc;
     }
-    
+
+    // Skip if name-based detection resolves to the same device family we
+    // already tried -- retrying the same protocol family with a slightly
+    // different model number can't help (same wire protocol, same
+    // handshake) and creates BLE races.
+    if (stored_family != DC_FAMILY_NULL && family == stored_family) {
+        free(data);
+        return DC_STATUS_IO;
+    }
+
     rc = open_ble_device(data, address, family, model);
     if (rc != DC_STATUS_SUCCESS) {
         free(data);

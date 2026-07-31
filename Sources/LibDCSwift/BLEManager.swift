@@ -327,6 +327,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         self.timeout = Int(milliseconds)
     }
 
+    /// The peripheral's advertised BLE name, needed by DC_IOCTL_BLE_GET_NAME
+    /// during the READMEMORY command. Returning an empty string causes the
+    /// dive computer to answer with NAK (0xA5) instead of ACK + data.
+    @objc public func getDeviceName() -> String {
+        return peripheral?.name ?? ""
+    }
+
     @objc public func readDataPartial(_ requested: Int32) -> Data? {
         let requestedInt = Int(requested)
         let startTime = Date()
@@ -466,7 +473,24 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
               let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
             return false
         }
-        
+
+        // Wait for the peripheral to reach .disconnected before issuing a new
+        // connect. CoreBluetooth reuses CBPeripheral instances, and if the
+        // previous connection is still tearing down internally, connecting
+        // again triggers "cannot add handler" state-machine errors that delay
+        // or prevent the second connection. Critical for devices needing a
+        // connect-fail-reconnect cycle (e.g. Aqualung i300C's slow wake-up).
+        if peripheral.state != .disconnected {
+            logWarning("[BLE CONNECT] Peripheral state is \(peripheral.state.rawValue), waiting for .disconnected")
+            let deadline = Date(timeIntervalSinceNow: 5.0)
+            while peripheral.state != .disconnected && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if peripheral.state != .disconnected {
+                logWarning("[BLE CONNECT] Peripheral still in state \(peripheral.state.rawValue) after 5s -- proceeding anyway")
+            }
+        }
+
         // connect(toDevice:) is called from openBLEDevice, which every call site
         // dispatches off the main thread (it's a blocking call awaiting CB
         // callbacks). `peripheral` is @Published, so assigning it here directly
@@ -715,22 +739,45 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // When a known serial service was identified, only bind streaming characteristics
         // from that preferred service (avoids grabbing Nordic UART characteristics on Cressi,
         // which exposes both services). If no known service matched, fall back to scanning all.
-        if let preferred = preferredService, service != preferred {
+        if let preferred = preferredService, service.uuid != preferred.uuid {
             return
         }
 
-        for characteristic in characteristics {
-            queue.sync {
+        queue.sync {
+            for characteristic in characteristics {
                 characteristicsByUUID[characteristic.uuid.uuidString.lowercased()] = characteristic
             }
+        }
 
-            if isWriteCharacteristic(characteristic) {
+        // Two-pass selection. Some dive computers (Aqualung i300C and other
+        // Pelagic OEMs) expose more than one characteristic with matching
+        // property bits in the same service -- e.g. a data channel plus an
+        // auth-nonce channel that also carries .notify. A single pass that
+        // overwrites on every match can end up bound to the wrong one
+        // depending on characteristic enumeration order, which the
+        // peripheral then rejects writes to with "Unknown ATT error", or
+        // silently drops replies to.
+        //
+        // Pass 1 prefers .writeWithoutResponse / .notify (the common case).
+        // Pass 2 only fills in .write / .indicate if pass 1 found nothing,
+        // and never overwrites an already-selected characteristic.
+        for characteristic in characteristics {
+            if writeCharacteristic == nil && characteristic.properties.contains(.writeWithoutResponse) {
                 writeCharacteristic = characteristic
             }
-
-            if isReadCharacteristic(characteristic) {
+            if notifyCharacteristic == nil && characteristic.properties.contains(.notify) {
                 notifyCharacteristic = characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
+                // setNotifyValue is deliberately not called here -- enableNotifications()
+                // is called separately after service discovery completes, and
+                // subscribing twice can confuse some BLE stacks.
+            }
+        }
+        for characteristic in characteristics {
+            if writeCharacteristic == nil && characteristic.properties.contains(.write) {
+                writeCharacteristic = characteristic
+            }
+            if notifyCharacteristic == nil && characteristic.properties.contains(.indicate) {
+                notifyCharacteristic = characteristic
             }
         }
     }
@@ -855,15 +902,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return excludedServices.contains(uuid.uuidString.lowercased())
     }
     
-    private func isWriteCharacteristic(_ characteristic: CBCharacteristic) -> Bool {
-        return characteristic.properties.contains(.write) ||
-               characteristic.properties.contains(.writeWithoutResponse)
-    }
-    
-    private func isReadCharacteristic(_ characteristic: CBCharacteristic) -> Bool {
-        return characteristic.properties.contains(.notify) ||
-               characteristic.properties.contains(.indicate)
-    }
 
     @objc public func close() {
         close(clearDevicePtr: false)
