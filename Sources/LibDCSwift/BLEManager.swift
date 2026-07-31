@@ -473,7 +473,24 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
               let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
             return false
         }
-        
+
+        // Wait for the peripheral to reach .disconnected before issuing a new
+        // connect. CoreBluetooth reuses CBPeripheral instances, and if the
+        // previous connection is still tearing down internally, connecting
+        // again triggers "cannot add handler" state-machine errors that delay
+        // or prevent the second connection. Critical for devices needing a
+        // connect-fail-reconnect cycle (e.g. Aqualung i300C's slow wake-up).
+        if peripheral.state != .disconnected {
+            logWarning("[BLE CONNECT] Peripheral state is \(peripheral.state.rawValue), waiting for .disconnected")
+            let deadline = Date(timeIntervalSinceNow: 5.0)
+            while peripheral.state != .disconnected && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if peripheral.state != .disconnected {
+                logWarning("[BLE CONNECT] Peripheral still in state \(peripheral.state.rawValue) after 5s -- proceeding anyway")
+            }
+        }
+
         // connect(toDevice:) is called from openBLEDevice, which every call site
         // dispatches off the main thread (it's a blocking call awaiting CB
         // callbacks). `peripheral` is @Published, so assigning it here directly

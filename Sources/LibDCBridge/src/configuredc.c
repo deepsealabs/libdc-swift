@@ -302,7 +302,10 @@ static void close_device_data(device_data_t *data) {
         dc_context_free(data->context);
         data->context = NULL;
     }
-    data->descriptor = NULL;
+    if (data->descriptor) {
+        dc_descriptor_free(data->descriptor);
+        data->descriptor = NULL;
+    }
 }
 
 /*--------------------------------------------------------------------
@@ -357,6 +360,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     rc = ble_packet_open(&data->iostream, data->context, devaddr, data);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to open BLE connection, rc=%d\n", rc);
+        dc_descriptor_free(descriptor);
         close_device_data(data);
         return rc;
     }
@@ -394,6 +398,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     rc = dc_device_set_events(data->device, events, ble_device_event_cb, data);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to set event handler, rc=%d\n", rc);
+        dc_descriptor_free(descriptor);
         close_device_data(data);
         return rc;
     }
@@ -704,7 +709,16 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
         free(data);
         return rc;
     }
-    
+
+    // Skip if name-based detection resolves to the same device family we
+    // already tried -- retrying the same protocol family with a slightly
+    // different model number can't help (same wire protocol, same
+    // handshake) and creates BLE races.
+    if (stored_family != DC_FAMILY_NULL && family == stored_family) {
+        free(data);
+        return DC_STATUS_IO;
+    }
+
     rc = open_ble_device(data, address, family, model);
     if (rc != DC_STATUS_SUCCESS) {
         free(data);
