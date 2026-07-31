@@ -722,22 +722,45 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // When a known serial service was identified, only bind streaming characteristics
         // from that preferred service (avoids grabbing Nordic UART characteristics on Cressi,
         // which exposes both services). If no known service matched, fall back to scanning all.
-        if let preferred = preferredService, service != preferred {
+        if let preferred = preferredService, service.uuid != preferred.uuid {
             return
         }
 
-        for characteristic in characteristics {
-            queue.sync {
+        queue.sync {
+            for characteristic in characteristics {
                 characteristicsByUUID[characteristic.uuid.uuidString.lowercased()] = characteristic
             }
+        }
 
-            if isWriteCharacteristic(characteristic) {
+        // Two-pass selection. Some dive computers (Aqualung i300C and other
+        // Pelagic OEMs) expose more than one characteristic with matching
+        // property bits in the same service -- e.g. a data channel plus an
+        // auth-nonce channel that also carries .notify. A single pass that
+        // overwrites on every match can end up bound to the wrong one
+        // depending on characteristic enumeration order, which the
+        // peripheral then rejects writes to with "Unknown ATT error", or
+        // silently drops replies to.
+        //
+        // Pass 1 prefers .writeWithoutResponse / .notify (the common case).
+        // Pass 2 only fills in .write / .indicate if pass 1 found nothing,
+        // and never overwrites an already-selected characteristic.
+        for characteristic in characteristics {
+            if writeCharacteristic == nil && characteristic.properties.contains(.writeWithoutResponse) {
                 writeCharacteristic = characteristic
             }
-
-            if isReadCharacteristic(characteristic) {
+            if notifyCharacteristic == nil && characteristic.properties.contains(.notify) {
                 notifyCharacteristic = characteristic
-                peripheral.setNotifyValue(true, for: characteristic)
+                // setNotifyValue is deliberately not called here -- enableNotifications()
+                // is called separately after service discovery completes, and
+                // subscribing twice can confuse some BLE stacks.
+            }
+        }
+        for characteristic in characteristics {
+            if writeCharacteristic == nil && characteristic.properties.contains(.write) {
+                writeCharacteristic = characteristic
+            }
+            if notifyCharacteristic == nil && characteristic.properties.contains(.indicate) {
+                notifyCharacteristic = characteristic
             }
         }
     }
@@ -862,15 +885,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return excludedServices.contains(uuid.uuidString.lowercased())
     }
     
-    private func isWriteCharacteristic(_ characteristic: CBCharacteristic) -> Bool {
-        return characteristic.properties.contains(.write) ||
-               characteristic.properties.contains(.writeWithoutResponse)
-    }
-    
-    private func isReadCharacteristic(_ characteristic: CBCharacteristic) -> Bool {
-        return characteristic.properties.contains(.notify) ||
-               characteristic.properties.contains(.indicate)
-    }
 
     @objc public func close() {
         close(clearDevicePtr: false)
