@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 /*--------------------------------------------------------------------
  * BLE stream structures
@@ -360,10 +361,29 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         return rc;
     }
 
-    // Use dc_device_open to handle device-specific opening
-    rc = dc_device_open(&data->device, data->context, descriptor, data->iostream);
+    // Retry dc_device_open on the same BLE link. Some devices (notably
+    // Aqualung i300C and other Pelagic OEMs) ignore protocol commands for
+    // several seconds after a fresh BLE link is established -- the initial
+    // handshake gets no answer (oceanic_atom2_packet: "Failed to receive
+    // the answer"). Retrying on the same link gives the device's Bluetooth
+    // module time to initialize without the expensive (and fragile)
+    // disconnect + reconnect cycle that leaves CoreBluetooth in a bad state.
+    #define MAX_PROTOCOL_RETRIES 5
+    for (int attempt = 1; attempt <= MAX_PROTOCOL_RETRIES; attempt++) {
+        if (attempt > 1) {
+            printf("[PROTOCOL RETRY] dc_device_open attempt %d/%d, waiting 3s...\n",
+                   attempt, MAX_PROTOCOL_RETRIES);
+            usleep(3000000);
+        }
+        rc = dc_device_open(&data->device, data->context, descriptor, data->iostream);
+        if (rc == DC_STATUS_SUCCESS) {
+            break;
+        }
+        data->device = NULL;
+    }
     if (rc != DC_STATUS_SUCCESS) {
-        printf("Failed to open device, rc=%d\n", rc);
+        printf("Failed to open device after %d attempts, rc=%d\n", MAX_PROTOCOL_RETRIES, rc);
+        dc_descriptor_free(descriptor);
         close_device_data(data);
         return rc;
     }
