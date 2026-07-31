@@ -184,11 +184,6 @@ public class DiveLogRetriever {
            let typeStr = deviceType.map({ String(cString: $0) }) {
              
              if let fingerprint = viewModel.getFingerprint(forDeviceType: typeStr, serial: serialStr) {
-                // Sanity check: Shearwater fingerprints should be exactly 4 bytes
-                if fingerprint.count != 4 {
-                    logWarning("⚠️ Fingerprint size mismatch! Expected 4 bytes, got \(fingerprint.count)")
-                }
-
                 size.pointee = fingerprint.count
                 // Allocate with malloc, not Swift's allocator: close_device_data() on the C
                 // side calls free() on this pointer, and mixing Swift's UnsafeMutablePointer
@@ -198,15 +193,17 @@ public class DiveLogRetriever {
                 fingerprint.copyBytes(to: buffer, count: fingerprint.count)
                 return buffer
             } else {
-                // No stored fingerprint - return a sentinel value (0xFFFFFFFF) that won't match any real dive
-                // This is necessary because libdivecomputer defaults to 0x00000000 if no fingerprint is set,
-                // which could accidentally match a dive with fingerprint 0x00000000 and stop enumeration
-                let sentinelFingerprint: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF]
-                size.pointee = sentinelFingerprint.count
-                guard let raw = malloc(sentinelFingerprint.count) else { return nil }
-                let buffer = raw.assumingMemoryBound(to: UInt8.self)
-                buffer.initialize(from: sentinelFingerprint, count: sentinelFingerprint.count)
-                return buffer
+                // No stored fingerprint -- return nil so the C bridge skips
+                // dc_device_set_fingerprint entirely (configuredc.c checks
+                // `fingerprint && fsize > 0` before calling it). Previously
+                // this returned a 4-byte 0xFFFFFFFF sentinel, which broke
+                // fingerprinting on any device whose fingerprint size isn't
+                // 4 bytes (e.g. Oceanic/Aqualung Atom2 requires 8): passing
+                // a wrongly-sized buffer makes dc_device_set_fingerprint
+                // fail with DC_STATUS_INVALIDARGS, so fingerprinting never
+                // took effect and every sync re-downloaded all dives.
+                size.pointee = 0
+                return nil
             }
         } else {
             logWarning("⚠️ Fingerprint lookup called with nil device type or serial")
