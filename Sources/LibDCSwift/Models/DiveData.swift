@@ -265,7 +265,11 @@ public struct DiveData: Identifiable {
     
     // Decompression data
     public var decoStop: DecoStop?
-    
+
+    // Raw fingerprint bytes identifying the specific dive on the computer,
+    // returned by dc_device_foreach's per-dive callback.
+    public var fingerprint: Data?
+
     public struct Tank {
         public var volume: Double
         public var workingPressure: Double
@@ -411,7 +415,8 @@ public struct DiveData: Identifiable {
         setpoint: Double?,
         ppo2Readings: [(sensor: UInt32, value: Double)],
         cns: Double?,
-        decoStop: DecoStop?
+        decoStop: DecoStop?,
+        fingerprint: Data? = nil
     ) {
         self.number = number
         self.datetime = datetime
@@ -441,5 +446,6 @@ public struct DiveData: Identifiable {
         self.ppo2Readings = ppo2Readings
         self.cns = cns
         self.decoStop = decoStop
+        self.fingerprint = fingerprint
     }
-} 
+}

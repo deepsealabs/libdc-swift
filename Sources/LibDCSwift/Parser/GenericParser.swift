@@ -205,7 +205,8 @@ public class GenericParser {
         diveNumber: Int,
         diveData: UnsafePointer<UInt8>,
         dataSize: Int,
-        context: OpaquePointer? = nil
+        context: OpaquePointer? = nil,
+        fingerprint: Data? = nil
     ) throws -> DiveData {
         var parser: OpaquePointer?
         
@@ -533,7 +534,8 @@ public class GenericParser {
                     time: TimeInterval(deco.time),
                     type: Int(deco.type.rawValue)
                 )
-            }
+            },
+            fingerprint: fingerprint
         )
     }
     

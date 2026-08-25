@@ -150,7 +150,8 @@ public class DiveLogRetriever {
                 model: modelToUse, 
                 diveNumber: context.logCount,
                 diveData: data,
-                dataSize: Int(size)
+                dataSize: Int(size),
+                fingerprint: fingerprintData
             )
             
             DispatchQueue.main.async {
