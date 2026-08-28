@@ -1,0 +1,40 @@
+name: NauticTestApp
+options:
+  bundleIdPrefix: com.deepsealabs
+  deploymentTarget:
+    iOS: "16.0"
+
+packages:
+  LibDCSwift:
+    path: ..
+
+targets:
+  NauticTestApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    dependencies:
+      - package: LibDCSwift
+        product: LibDCSwift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.deepsealabs.NauticTestApp
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "2"
+        SWIFT_VERSION: "5.10"
+        TARGETED_DEVICE_FAMILY: "1"
+        ENABLE_PREVIEWS: "YES"
+        DEVELOPMENT_TEAM: "4X7MY69TG5"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+    info:
+      path: Generated/Info.plist
+      properties:
+        UILaunchScreen: {}
+        NSBluetoothAlwaysUsageDescription: "Nautic Test needs Bluetooth to connect to your Suunto Nautic/Ocean and download raw dive captures for testing."
+        NSBluetoothPeripheralUsageDescription: "Nautic Test needs Bluetooth to connect to your Suunto Nautic/Ocean and download raw dive captures for testing."
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIBackgroundModes:
+          - bluetooth-central
