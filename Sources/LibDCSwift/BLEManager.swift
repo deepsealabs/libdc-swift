@@ -144,7 +144,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         SerialService(uuid: "1aa44039-1667-4b29-87cc-dfecaaf31d97", vendor: "Shearwater", product: "Perdix 3"),
         SerialService(uuid: "0000fcef-0000-1000-8000-00805f9b34fb", vendor: "Divesoft", product: "Freedom"),
         SerialService(uuid: "00000001-8c3b-4f2c-a59e-8c08224f3253", vendor: "Halcyon", product: "Symbios"),
-        SerialService(uuid: "84968ffe-d26d-478a-b953-5010bcf58bca", vendor: "Seac", product: "Screen")
+        SerialService(uuid: "84968ffe-d26d-478a-b953-5010bcf58bca", vendor: "Seac", product: "Screen"),
+        // EXPERIMENTAL: raw dive download works, profile decoding does not
+        // yet — see suunto_nautic.h in the libdivecomputer submodule.
+        SerialService(uuid: "61353090-8231-49cc-b57a-886370740041", vendor: "Suunto", product: "Nautic/Ocean")
     ]
     
     /// Service UUIDs to exclude from discovery

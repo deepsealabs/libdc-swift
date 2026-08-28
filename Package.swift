@@ -76,7 +76,8 @@ let package = Package(
                 "Models/DeviceFingerprint.swift",
                 "ViewModels/DiveDataViewModel.swift",
                 "Parser/GenericParser.swift",
-                "DiveLogRetriever.swift"
+                "DiveLogRetriever.swift",
+                "SuuntoNauticExplorer.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),

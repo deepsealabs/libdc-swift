@@ -512,7 +512,12 @@ static const struct name_pattern name_patterns[] = {
     { "EON Steel", "Suunto", "EON Steel", MATCH_EXACT },
     { "Suunto D5", "Suunto", "D5", MATCH_EXACT },
     { "EON Core", "Suunto", "EON Core", MATCH_EXACT },
-    
+    // EXPERIMENTAL: advertised names are a best guess pending confirmation
+    // from a real device (see suunto_nautic.h in the libdivecomputer
+    // submodule for the full status of this driver).
+    { "Suunto Nautic", "Suunto", "Nautic", MATCH_PREFIX },
+    { "Suunto Ocean", "Suunto", "Ocean", MATCH_PREFIX },
+
     // Scubapro dive computers
     { "G2", "Scubapro", "G2", MATCH_EXACT },
     { "HUD", "Scubapro", "G2 HUD", MATCH_EXACT },
