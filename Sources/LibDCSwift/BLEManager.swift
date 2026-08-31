@@ -209,6 +209,12 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return writeCharacteristic != nil && notifyCharacteristic != nil
     }
     
+    /// How long to wait for the notify CCCD write to take effect. Generous
+    /// because on some peripherals (Suunto Nautic) that write provokes an
+    /// iOS pairing dialog, and the first attempt must outlast the user
+    /// tapping the code -- see the comment in enableNotifications().
+    private static let notifyEnableTimeoutSeconds: TimeInterval = 20.0
+
     @objc(enableNotifications)
     public func enableNotifications() -> Bool {
         guard let notifyCharacteristic = self.notifyCharacteristic,
@@ -224,9 +230,20 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
-        
-        // Wait for notifications to be enabled with timeout
-        let timeout = Date(timeIntervalSinceNow: 5.0)
+
+        // Wait for notifications to be enabled with timeout.
+        //
+        // Enabling notifications writes the RX characteristic's CCCD, and on
+        // the Suunto Nautic that write is what makes iOS raise a BLE pairing
+        // prompt (issue #29). While that dialog is up, iOS holds the CCCD
+        // write, so isNotifying doesn't flip -- with the old 5s budget the
+        // first connect always timed out before the user could tap the
+        // pairing code, forcing a retry. A wider budget lets the first
+        // attempt survive the dialog. This only extends the *failure* wait;
+        // a healthy peripheral flips isNotifying in well under a second and
+        // exits immediately, so devices that enable notifications normally
+        // are unaffected.
+        let timeout = Date(timeIntervalSinceNow: Self.notifyEnableTimeoutSeconds)
         while !notifyCharacteristic.isNotifying {
             if Date() > timeout {
                 logError("Timeout waiting for notifications to enable")
@@ -234,7 +251,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             }
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         }
-        
+
         return notifyCharacteristic.isNotifying
     }
     
