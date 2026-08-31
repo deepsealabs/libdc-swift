@@ -255,7 +255,7 @@ import LibDCBridge
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)?
     ) -> Bool {
-        logDebug("Attempting to open BLE device: \(name) at address: \(deviceAddress)")
+        logDebug("LibDCSwift build \(libDCSwiftBuildTag) -- attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
         // Set connecting flag to prevent auto-reconnect during connection attempt
         DispatchQueue.main.async {
