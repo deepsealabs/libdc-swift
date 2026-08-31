@@ -206,14 +206,24 @@ struct ExplorerView: View {
     }
 
     private func sendRequest(path: String) {
+        // The logbook-listing endpoints return more than fits in a single
+        // ACK, so they need the full GET->ACK->FETCH1->FETCH2->stream
+        // sequence (SuuntoNauticExplorer.fetch), same as dive download.
+        // A plain GET (request) only returns the ACK, which for these
+        // reads back the watch's own Handle/session bytes instead of the
+        // real payload. /System/Mode and other small endpoints answer in
+        // the ACK itself, so they stay on request.
+        let needsFetch = path == "/Logbook/Entries" || path == "/Logbook/UnsynchronisedLogs"
         busy = true
         statusMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let data = try SuuntoNauticExplorer.request(device: devicePtr, path: path)
+                let data = needsFetch
+                    ? try SuuntoNauticExplorer.fetch(device: devicePtr, path: path)
+                    : try SuuntoNauticExplorer.request(device: devicePtr, path: path)
                 DispatchQueue.main.async {
                     lastResponse = data
-                    lastLabel = "GET \(path)"
+                    lastLabel = "\(needsFetch ? "FETCH" : "GET") \(path)"
                     statusMessage = "Received \(data.count) bytes for \(path)."
                     busy = false
                 }

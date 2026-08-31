@@ -50,7 +50,33 @@ public enum SuuntoNauticExplorer {
         return dataFromBuffer(buffer)
     }
 
-    /// Lists real dive IDs on the connected watch by requesting
+    /// Fetch the full payload of an endpoint whose response doesn't fit in
+    /// a single ACK (e.g. `/Logbook/Entries`,
+    /// `/Logbook/UnsynchronisedLogs`). Unlike `request` above — which only
+    /// performs the GET and returns the ACK — this runs the full
+    /// GET → ACK(watch magic) → FETCH1 → FETCH2 → stream-collect sequence.
+    /// The listing endpoints return an uncompressed array, so the bytes
+    /// are usable directly; dive *data* is compressed and should go
+    /// through `download` instead.
+    public static func fetch(device devicePtr: UnsafeMutablePointer<device_data_t>, path: String) throws -> Data {
+        guard let dcDevice = devicePtr.pointee.device else {
+            throw ExplorerError.notConnected
+        }
+
+        guard let buffer = dc_buffer_new(0) else {
+            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
+        }
+        defer { dc_buffer_free(buffer) }
+
+        let status = suunto_nautic_device_fetch(dcDevice, path, buffer)
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+
+        return dataFromBuffer(buffer)
+    }
+
+    /// Lists real dive IDs on the connected watch by fetching
     /// `/Logbook/Entries` directly, without downloading any dive data —
     /// unlike driving this family through `dc_device_foreach()`, which
     /// downloads and decodes every not-yet-fingerprinted dive just to
@@ -61,7 +87,7 @@ public enum SuuntoNauticExplorer {
     /// the endpoint's own ordering isn't documented, so this sorts
     /// client-side the same way the C driver does).
     public static func listDives(device devicePtr: UnsafeMutablePointer<device_data_t>) throws -> [UInt32] {
-        let data = try request(device: devicePtr, path: "/Logbook/Entries")
+        let data = try fetch(device: devicePtr, path: "/Logbook/Entries")
 
         let bytes = [UInt8](data)
         var ids: [UInt32] = []
