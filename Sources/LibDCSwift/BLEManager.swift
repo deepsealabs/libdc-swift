@@ -842,6 +842,19 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 notifyCharacteristic = characteristic
             }
         }
+
+        // Diagnostic for the Suunto Nautic pairing/reboot investigation
+        // (issue #29): a with-response write to an auth-flagged characteristic
+        // is what makes iOS auto-initiate BLE pairing, so surface which write
+        // type this characteristic will actually get. writeWithoutResponse in
+        // the property list means write() takes the .withoutResponse path.
+        if let wc = writeCharacteristic {
+            let props = wc.properties
+            logInfo("Selected write characteristic \(wc.uuid.uuidString): "
+                + "writeWithoutResponse=\(props.contains(.writeWithoutResponse)) "
+                + "write=\(props.contains(.write)) "
+                + "-> will use \(props.contains(.writeWithoutResponse) ? ".withoutResponse" : ".withResponse")")
+        }
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
