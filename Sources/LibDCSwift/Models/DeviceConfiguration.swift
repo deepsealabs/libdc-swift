@@ -448,6 +448,17 @@ import LibDCBridge
             return result
         }
 
+        // Suunto Nautic/Ocean advertise "Suunto Nautic <serial>" / "Suunto Ocean <serial>"
+        // (e.g. "Suunto Nautic 2604C3003306"), so find_descriptor_by_name's product-name
+        // match returns nil for the serial-suffixed form. Match the family prefix directly
+        // so an unstored watch is still recognised on the first active scan (issue #29).
+        if name.hasPrefix("Suunto Ocean") {
+            return (.suuntoNautic, 1)
+        }
+        if name.hasPrefix("Suunto Nautic") {
+            return (.suuntoNautic, 0)
+        }
+
         var descriptor: OpaquePointer?
         let rc = find_descriptor_by_name(&descriptor, name)
         if rc == DC_STATUS_SUCCESS, let desc = descriptor {
