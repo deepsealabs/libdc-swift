@@ -155,12 +155,22 @@ struct ExplorerView: View {
 
             if !lastResponse.isEmpty {
                 Section("Last Response — \(lastLabel) (\(lastResponse.count) bytes)") {
+                    // Only hex-dump a bounded preview. A full dive decompresses
+                    // to tens of KB, and rendering that as one giant Text froze
+                    // the app on the main thread (issue #29). The complete
+                    // bytes are still written by Export Raw Capture below.
                     ScrollView {
-                        Text(hexDump(lastResponse))
+                        Text(hexDump(lastResponse, maxBytes: Self.hexPreviewLimit))
                             .font(.system(.footnote, design: .monospaced))
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: 240)
+
+                    if lastResponse.count > Self.hexPreviewLimit {
+                        Text("Showing the first \(Self.hexPreviewLimit) of \(lastResponse.count) bytes. Export the raw capture for the rest.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
 
                     Button("Export Raw Capture") {
                         exportCapture()
@@ -292,9 +302,14 @@ struct ExplorerView: View {
         return String(format: "%d:%02d", total / 60, total % 60)
     }
 
-    private func hexDump(_ data: Data) -> String {
+    /// Cap on how many bytes hexDump renders in the on-screen preview.
+    /// Rendering a full decompressed dive (tens of KB) as one Text froze
+    /// the UI; export still writes every byte.
+    private static let hexPreviewLimit = 2048
+
+    private func hexDump(_ data: Data, maxBytes: Int = .max) -> String {
         var lines: [String] = []
-        let bytes = [UInt8](data)
+        let bytes = [UInt8](data.prefix(maxBytes))
         var offset = 0
         while offset < bytes.count {
             let end = min(offset + 16, bytes.count)
