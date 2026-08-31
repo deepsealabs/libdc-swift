@@ -703,8 +703,15 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     unsigned int model;
     dc_status_t rc;
     
-    // Try stored configuration first if provided
-    if (stored_family != DC_FAMILY_NULL && stored_model != 0) {
+    // Try stored configuration first if provided. Model 0 is a legitimate
+    // value for families that don't distinguish sub-models (e.g. Suunto
+    // Nautic is always forced as (suuntoNautic, 0)) -- requiring
+    // stored_model != 0 here used to skip this branch entirely for those
+    // families, silently falling through to the name-detection branch
+    // below, which then hit the "already tried this family" bailout at
+    // DC_STATUS_IO without ever calling open_ble_device (and therefore
+    // without ever attempting any BLE I/O at all).
+    if (stored_family != DC_FAMILY_NULL) {
         rc = open_ble_device(data, address, stored_family, stored_model);
         if (rc == DC_STATUS_SUCCESS) {
             *out_data = data;
