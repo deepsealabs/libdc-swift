@@ -6,4 +6,4 @@
 /// push that should have changed it, most likely because they were re-
 /// downloading a ZIP snapshot rather than `git pull`ing, so there was no
 /// way to tell "still broken" apart from "running old code" from logs alone.
-public let libDCSwiftBuildTag = "2026-08-31-entries-short-fetch"
+public let libDCSwiftBuildTag = "2026-08-31-poweron-guard"

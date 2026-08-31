@@ -488,6 +488,21 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     public func startScanning(omitUnsupportedPeripherals: Bool = true) {
+        // Never issue a CoreBluetooth command before the central reports
+        // .poweredOn. Doing so is an API-misuse no-op ("can only accept this
+        // command while in the powered on state"), and issuing BLE traffic
+        // during that bad-state window has been implicated in a Suunto Nautic
+        // firmware crash/reboot (issue #29): that watch does its auth at the
+        // app/PMT layer and mishandles a GATT-level security exchange, which
+        // a malformed early command can provoke. Defer until powered on -- the
+        // pending op replays through this same guard once state flips.
+        guard isBluetoothReady else {
+            logInfo("Bluetooth not powered on yet; deferring scan until it is")
+            pendingOperations.append { [weak self] in
+                self?.startScanning(omitUnsupportedPeripherals: omitUnsupportedPeripherals)
+            }
+            return
+        }
         centralManager.scanForPeripherals(
             withServices: omitUnsupportedPeripherals ? knownSerialServices.map { CBUUID(string: $0.uuid) } : nil,
             options: nil)
@@ -500,6 +515,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     @objc public func connect(toDevice address: String!) -> Bool {
+        // retrievePeripherals/connect are CoreBluetooth commands and must not
+        // run before the central is .poweredOn (see startScanning). This is a
+        // blocking API returning success/failure, so it can't defer -- it
+        // reports not-ready as a failure instead of misusing the API.
+        guard isBluetoothReady else {
+            logError("connect(toDevice:) failed -- Bluetooth is not powered on yet")
+            return false
+        }
         guard let uuid = UUID(uuidString: address) else {
             logError("connect(toDevice:) failed -- \"\(address ?? "nil")\" is not a valid UUID string")
             return false
