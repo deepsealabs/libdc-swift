@@ -520,10 +520,27 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             }
             return
         }
+        let knownServiceUUIDs = knownSerialServices.map { CBUUID(string: $0.uuid) }
         centralManager.scanForPeripherals(
-            withServices: omitUnsupportedPeripherals ? knownSerialServices.map { CBUUID(string: $0.uuid) } : nil,
+            withServices: omitUnsupportedPeripherals ? knownServiceUUIDs : nil,
             options: nil)
         isScanning = true
+
+        // Also surface already-bonded / system-connected peripherals that an
+        // active scan can miss. A Suunto Nautic re-pairs on every connect and
+        // iOS rotates its CBPeripheral UUID after a pairing cycle (issue #29),
+        // so a device last seen under an old UUID can stop appearing in scan
+        // results and in retrievePeripherals(withIdentifiers:) lookups of the
+        // stored UUID. retrieveConnectedPeripherals returns it under its
+        // current identifier; surface any whose name we recognise so the user
+        // can reconnect (the fresh identifier is what actually gets used).
+        for peripheral in centralManager.retrieveConnectedPeripherals(withServices: knownServiceUUIDs) {
+            guard let name = peripheral.name else { continue }
+            if DeviceConfiguration.fromName(name) != nil ||
+               DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) != nil {
+                addDiscoveredPeripheral(peripheral)
+            }
+        }
     }
     
     public func stopScanning() {
