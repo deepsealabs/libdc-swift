@@ -257,6 +257,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// (`isPeripheralReady`), never by this grace period.
     private static let writeReadyGraceSeconds: TimeInterval = 0.5
 
+    /// Gap between chunks of a `.withoutResponse` write that exceeds
+    /// `maximumWriteValueLength`. Some peripherals (e.g. Suunto Nautic,
+    /// which per its reverse-engineered protocol docs never negotiates an
+    /// extended ATT MTU) need a short pause between BLE writes to keep up,
+    /// not just correctly-sized chunks -- see the chunking comment in
+    /// `write()` below.
+    private static let chunkedWriteInterChunkDelay: TimeInterval = 0.008
+
     /// 0 = success, 1 = timed out waiting for a with-response write's
     /// confirmation (transient — the without-response path never returns
     /// this, since it writes anyway past its grace period rather than
@@ -282,18 +290,38 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         let timeoutMs = self.timeout > 0 ? self.timeout : 3000
 
         if writeType == .withoutResponse {
-            if !peripheral.canSendWriteWithoutResponse {
-                guard self.isPeripheralReady else {
-                    logWarning("Write blocked and peripheral no longer ready -- treating as a real disconnect")
-                    return 2
+            // CoreBluetooth does not fragment .withoutResponse writes itself --
+            // a single writeValue() call larger than maximumWriteValueLength is
+            // silently truncated/dropped, not split. Most peripherals in this
+            // package negotiate a large enough MTU that this never bites (data
+            // is usually well under it), but some (e.g. Suunto Nautic, whose
+            // reverse-engineered protocol docs say it never negotiates past the
+            // default ~20-byte payload) need every multi-byte frame chunked
+            // here, with a short gap so the peripheral's write queue can drain.
+            let maxLen = peripheral.maximumWriteValueLength(for: .withoutResponse)
+            var offset = 0
+            repeat {
+                let end = maxLen > 0 ? min(offset + maxLen, data.count) : data.count
+                let chunk = (offset == 0 && end == data.count) ? data! : data.subdata(in: offset..<end)
+
+                if !peripheral.canSendWriteWithoutResponse {
+                    guard self.isPeripheralReady else {
+                        logWarning("Write blocked and peripheral no longer ready -- treating as a real disconnect")
+                        return 2
+                    }
+                    drainSemaphore(writeReadySemaphore)
+                    let graceMs = Int(Self.writeReadyGraceSeconds * 1000)
+                    if writeReadySemaphore.wait(timeout: .now() + .milliseconds(graceMs)) == .timedOut {
+                        logWarning("canSendWriteWithoutResponse still false after \(Self.writeReadyGraceSeconds)s, writing anyway")
+                    }
                 }
-                drainSemaphore(writeReadySemaphore)
-                let graceMs = Int(Self.writeReadyGraceSeconds * 1000)
-                if writeReadySemaphore.wait(timeout: .now() + .milliseconds(graceMs)) == .timedOut {
-                    logWarning("canSendWriteWithoutResponse still false after \(Self.writeReadyGraceSeconds)s, writing anyway")
+                peripheral.writeValue(chunk, for: characteristic, type: .withoutResponse)
+
+                offset = end
+                if offset < data.count {
+                    Thread.sleep(forTimeInterval: Self.chunkedWriteInterChunkDelay)
                 }
-            }
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            } while offset < data.count
             return 0
         } else {
             // With-response write: wait for the didWriteValueFor confirmation.

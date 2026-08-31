@@ -347,6 +347,10 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         return rc;
     }
     dc_context_set_logfunc(data->context, dc_log_callback, NULL);
+    // DEBUG carries the EVA handshake request/response hexdumps
+    // (suunto_nautic.c) needed to diff against a tester's own capture --
+    // the default level is WARNING, which would silently drop them.
+    dc_context_set_loglevel(data->context, DC_LOGLEVEL_DEBUG);
 
     // Get descriptor for the device
     rc = find_descriptor_by_model(&descriptor, family, model);
