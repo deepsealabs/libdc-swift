@@ -89,6 +89,15 @@ public enum SuuntoNauticExplorer {
     public static func listDives(device devicePtr: UnsafeMutablePointer<device_data_t>) throws -> [UInt32] {
         let data = try fetch(device: devicePtr, path: "/Logbook/Entries")
 
+        // The response embeds each dive's LogId (a UNIX timestamp) as a
+        // 4-aligned little-endian uint32 inside a small SBEM payload,
+        // interleaved with handle/flag/count/CRC fields. Filter to a
+        // plausible timestamp window to isolate the IDs, matching the C
+        // driver (suunto_nautic_device_foreach) and the reference client.
+        // Scanning must stay 4-aligned: the IDs are packed adjacently, so an
+        // unaligned read straddling two of them can land in-window and
+        // invent a phantom dive.
+        let diveIDRange: ClosedRange<UInt32> = 1_500_000_000...2_100_000_000
         let bytes = [UInt8](data)
         var ids: [UInt32] = []
         var offset = 0
@@ -97,7 +106,9 @@ public enum SuuntoNauticExplorer {
                 | (UInt32(bytes[offset + 1]) << 8)
                 | (UInt32(bytes[offset + 2]) << 16)
                 | (UInt32(bytes[offset + 3]) << 24)
-            ids.append(id)
+            if diveIDRange.contains(id) {
+                ids.append(id)
+            }
             offset += 4
         }
 
