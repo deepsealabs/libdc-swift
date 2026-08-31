@@ -155,10 +155,9 @@ struct ExplorerView: View {
 
             if !lastResponse.isEmpty {
                 Section("Last Response — \(lastLabel) (\(lastResponse.count) bytes)") {
-                    // Only hex-dump a bounded preview. A full dive decompresses
-                    // to tens of KB, and rendering that as one giant Text froze
-                    // the app on the main thread (issue #29). The complete
-                    // bytes are still written by Export Raw Capture below.
+                    // Bounded preview only: rendering a full decompressed dive
+                    // (tens of KB) as one Text froze the main thread. Export
+                    // Raw Capture still writes every byte.
                     ScrollView {
                         Text(hexDump(lastResponse, maxBytes: Self.hexPreviewLimit))
                             .font(.system(.footnote, design: .monospaced))
@@ -216,13 +215,9 @@ struct ExplorerView: View {
     }
 
     private func sendRequest(path: String) {
-        // The logbook-listing endpoints return more than fits in a single
-        // ACK, so they need the full GET->ACK->FETCH1->FETCH2->stream
-        // sequence (SuuntoNauticExplorer.fetch), same as dive download.
-        // A plain GET (request) only returns the ACK, which for these
-        // reads back the watch's own Handle/session bytes instead of the
-        // real payload. /System/Mode and other small endpoints answer in
-        // the ACK itself, so they stay on request.
+        // The logbook-listing endpoints need the fetch sequence
+        // (SuuntoNauticExplorer.fetch); a plain GET returns only the ACK for
+        // them. /System/Mode and other small endpoints answer in the ACK.
         let needsFetch = path == "/Logbook/Entries" || path == "/Logbook/UnsynchronisedLogs"
         busy = true
         statusMessage = nil
@@ -302,9 +297,8 @@ struct ExplorerView: View {
         return String(format: "%d:%02d", total / 60, total % 60)
     }
 
-    /// Cap on how many bytes hexDump renders in the on-screen preview.
-    /// Rendering a full decompressed dive (tens of KB) as one Text froze
-    /// the UI; export still writes every byte.
+    /// Cap on bytes hexDump renders on screen; a full dive as one Text froze
+    /// the UI. Export still writes every byte.
     private static let hexPreviewLimit = 2048
 
     private func hexDump(_ data: Data, maxBytes: Int = .max) -> String {

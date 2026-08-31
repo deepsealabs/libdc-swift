@@ -209,10 +209,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return writeCharacteristic != nil && notifyCharacteristic != nil
     }
     
-    /// How long to wait for the notify CCCD write to take effect. Generous
-    /// because on some peripherals (Suunto Nautic) that write provokes an
-    /// iOS pairing dialog, and the first attempt must outlast the user
-    /// tapping the code -- see the comment in enableNotifications().
+    /// Notify-enable timeout. Generous so the first connect outlasts the iOS
+    /// pairing dialog the Nautic's CCCD write can raise (see enableNotifications()).
     private static let notifyEnableTimeoutSeconds: TimeInterval = 20.0
 
     @objc(enableNotifications)
@@ -231,18 +229,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
 
-        // Wait for notifications to be enabled with timeout.
-        //
-        // Enabling notifications writes the RX characteristic's CCCD, and on
-        // the Suunto Nautic that write is what makes iOS raise a BLE pairing
-        // prompt (issue #29). While that dialog is up, iOS holds the CCCD
-        // write, so isNotifying doesn't flip -- with the old 5s budget the
-        // first connect always timed out before the user could tap the
-        // pairing code, forcing a retry. A wider budget lets the first
-        // attempt survive the dialog. This only extends the *failure* wait;
-        // a healthy peripheral flips isNotifying in well under a second and
-        // exits immediately, so devices that enable notifications normally
-        // are unaffected.
+        // The CCCD write here can raise an iOS pairing dialog on the Nautic;
+        // while it's up isNotifying won't flip, so the wait must outlast it.
+        // Only the failure path waits this long -- a healthy peripheral flips
+        // in under a second and exits immediately.
         let timeout = Date(timeIntervalSinceNow: Self.notifyEnableTimeoutSeconds)
         while !notifyCharacteristic.isNotifying {
             if Date() > timeout {
@@ -274,12 +264,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// (`isPeripheralReady`), never by this grace period.
     private static let writeReadyGraceSeconds: TimeInterval = 0.5
 
-    /// Gap between chunks of a `.withoutResponse` write that exceeds
-    /// `maximumWriteValueLength`. Some peripherals (e.g. Suunto Nautic,
-    /// which per its reverse-engineered protocol docs never negotiates an
-    /// extended ATT MTU) need a short pause between BLE writes to keep up,
-    /// not just correctly-sized chunks -- see the chunking comment in
-    /// `write()` below.
+    /// Pause between chunks of an oversized `.withoutResponse` write. The
+    /// Nautic never negotiates an extended MTU and needs this gap to keep up.
     private static let chunkedWriteInterChunkDelay: TimeInterval = 0.008
 
     /// 0 = success, 1 = timed out waiting for a with-response write's
@@ -307,14 +293,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         let timeoutMs = self.timeout > 0 ? self.timeout : 3000
 
         if writeType == .withoutResponse {
-            // CoreBluetooth does not fragment .withoutResponse writes itself --
-            // a single writeValue() call larger than maximumWriteValueLength is
-            // silently truncated/dropped, not split. Most peripherals in this
-            // package negotiate a large enough MTU that this never bites (data
-            // is usually well under it), but some (e.g. Suunto Nautic, whose
-            // reverse-engineered protocol docs say it never negotiates past the
-            // default ~20-byte payload) need every multi-byte frame chunked
-            // here, with a short gap so the peripheral's write queue can drain.
+            // CoreBluetooth silently truncates a .withoutResponse write larger
+            // than maximumWriteValueLength rather than splitting it, so chunk
+            // here. Matters for peripherals that never extend their MTU (Nautic).
             let maxLen = peripheral.maximumWriteValueLength(for: .withoutResponse)
             var offset = 0
             repeat {
@@ -505,14 +486,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     public func startScanning(omitUnsupportedPeripherals: Bool = true) {
-        // Never issue a CoreBluetooth command before the central reports
-        // .poweredOn. Doing so is an API-misuse no-op ("can only accept this
-        // command while in the powered on state"), and issuing BLE traffic
-        // during that bad-state window has been implicated in a Suunto Nautic
-        // firmware crash/reboot (issue #29): that watch does its auth at the
-        // app/PMT layer and mishandles a GATT-level security exchange, which
-        // a malformed early command can provoke. Defer until powered on -- the
-        // pending op replays through this same guard once state flips.
+        // Never issue a CoreBluetooth command before .poweredOn: it's an
+        // API-misuse no-op, and some peripherals react badly to BLE traffic
+        // during that window. Defer until ready.
         guard isBluetoothReady else {
             logInfo("Bluetooth not powered on yet; deferring scan until it is")
             pendingOperations.append { [weak self] in
@@ -526,14 +502,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             options: nil)
         isScanning = true
 
-        // Also surface already-bonded / system-connected peripherals that an
-        // active scan can miss. A Suunto Nautic re-pairs on every connect and
-        // iOS rotates its CBPeripheral UUID after a pairing cycle (issue #29),
-        // so a device last seen under an old UUID can stop appearing in scan
-        // results and in retrievePeripherals(withIdentifiers:) lookups of the
-        // stored UUID. retrieveConnectedPeripherals returns it under its
-        // current identifier; surface any whose name we recognise so the user
-        // can reconnect (the fresh identifier is what actually gets used).
+        // Also surface already-connected peripherals an active scan can miss.
+        // iOS can rotate the Nautic's CBPeripheral UUID across sessions, so a
+        // device stored under an old UUID stops appearing;
+        // retrieveConnectedPeripherals returns it under its current identifier.
         for peripheral in centralManager.retrieveConnectedPeripherals(withServices: knownServiceUUIDs) {
             guard let name = peripheral.name else { continue }
             if DeviceConfiguration.fromName(name) != nil ||
@@ -549,10 +521,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     @objc public func connect(toDevice address: String!) -> Bool {
-        // retrievePeripherals/connect are CoreBluetooth commands and must not
-        // run before the central is .poweredOn (see startScanning). This is a
-        // blocking API returning success/failure, so it can't defer -- it
-        // reports not-ready as a failure instead of misusing the API.
+        // Must not touch CoreBluetooth before .poweredOn (see startScanning);
+        // this call is blocking, so it fails rather than defers.
         guard isBluetoothReady else {
             logError("connect(toDevice:) failed -- Bluetooth is not powered on yet")
             return false
@@ -562,10 +532,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             return false
         }
         guard let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
-            // A purely local CoreBluetooth cache lookup, no BLE I/O -- if this is
-            // what's failing, it returns near-instantly (single-digit ms), which
-            // is otherwise easy to mistake for a handshake/protocol-level failure
-            // much further downstream (see the DC_STATUS_IO -6 case in issue #29).
             logError("connect(toDevice:) failed -- retrievePeripherals(withIdentifiers:) found no known peripheral for \(uuid)")
             return false
         }
@@ -877,18 +843,6 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             }
         }
 
-        // Diagnostic for the Suunto Nautic pairing/reboot investigation
-        // (issue #29): a with-response write to an auth-flagged characteristic
-        // is what makes iOS auto-initiate BLE pairing, so surface which write
-        // type this characteristic will actually get. writeWithoutResponse in
-        // the property list means write() takes the .withoutResponse path.
-        if let wc = writeCharacteristic {
-            let props = wc.properties
-            logInfo("Selected write characteristic \(wc.uuid.uuidString): "
-                + "writeWithoutResponse=\(props.contains(.writeWithoutResponse)) "
-                + "write=\(props.contains(.write)) "
-                + "-> will use \(props.contains(.writeWithoutResponse) ? ".withoutResponse" : ".withResponse")")
-        }
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {

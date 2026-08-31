@@ -347,9 +347,8 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         return rc;
     }
     dc_context_set_logfunc(data->context, dc_log_callback, NULL);
-    // DEBUG carries the EVA handshake request/response hexdumps
-    // (suunto_nautic.c) needed to diff against a tester's own capture --
-    // the default level is WARNING, which would silently drop them.
+    // Default level is WARNING, which drops the DEBUG hexdumps (e.g. the
+    // Suunto Nautic handshake/protocol frames); raise it so they surface.
     dc_context_set_loglevel(data->context, DC_LOGLEVEL_DEBUG);
 
     // Get descriptor for the device
@@ -703,14 +702,9 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     unsigned int model;
     dc_status_t rc;
     
-    // Try stored configuration first if provided. Model 0 is a legitimate
-    // value for families that don't distinguish sub-models (e.g. Suunto
-    // Nautic is always forced as (suuntoNautic, 0)) -- requiring
-    // stored_model != 0 here used to skip this branch entirely for those
-    // families, silently falling through to the name-detection branch
-    // below, which then hit the "already tried this family" bailout at
-    // DC_STATUS_IO without ever calling open_ble_device (and therefore
-    // without ever attempting any BLE I/O at all).
+    // Try stored configuration first if provided. Model 0 is legitimate for
+    // families without sub-models (e.g. Suunto Nautic is forced as
+    // (suuntoNautic, 0)); guarding on stored_model != 0 here would skip them.
     if (stored_family != DC_FAMILY_NULL) {
         rc = open_ble_device(data, address, stored_family, stored_model);
         if (rc == DC_STATUS_SUCCESS) {

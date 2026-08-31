@@ -50,14 +50,10 @@ public enum SuuntoNauticExplorer {
         return dataFromBuffer(buffer)
     }
 
-    /// Fetch the full payload of an endpoint whose response doesn't fit in
-    /// a single ACK (e.g. `/Logbook/Entries`,
-    /// `/Logbook/UnsynchronisedLogs`). Unlike `request` above — which only
-    /// performs the GET and returns the ACK — this runs the full
-    /// GET → ACK(watch magic) → FETCH1 → FETCH2 → stream-collect sequence.
-    /// The listing endpoints return an uncompressed array, so the bytes
-    /// are usable directly; dive *data* is compressed and should go
-    /// through `download` instead.
+    /// Fetch a small whole resource (e.g. `/Logbook/Entries`) via the
+    /// short-fetch flow. Unlike `request` above, which returns only the ACK,
+    /// this runs the GET → ACK → short 0x0D fetch → data sequence. For dive
+    /// *data* (compressed, paginated) use `download` instead.
     public static func fetch(device devicePtr: UnsafeMutablePointer<device_data_t>, path: String) throws -> Data {
         guard let dcDevice = devicePtr.pointee.device else {
             throw ExplorerError.notConnected
@@ -76,27 +72,17 @@ public enum SuuntoNauticExplorer {
         return dataFromBuffer(buffer)
     }
 
-    /// Lists real dive IDs on the connected watch by fetching
-    /// `/Logbook/Entries` directly, without downloading any dive data —
-    /// unlike driving this family through `dc_device_foreach()`, which
-    /// downloads and decodes every not-yet-fingerprinted dive just to
-    /// enumerate them (fine for a background sync, far too slow for an
-    /// interactive picker). Mirrors `suunto_nautic_device_foreach()`'s
-    /// own parsing (flat array of 4-byte little-endian UInt32 IDs) and
-    /// ordering (newest first — each ID is itself a UNIX timestamp, and
-    /// the endpoint's own ordering isn't documented, so this sorts
-    /// client-side the same way the C driver does).
+    /// Lists dive IDs from `/Logbook/Entries`, sorted newest-first (each ID
+    /// is a UNIX timestamp). Cheaper than `dc_device_foreach()`, which
+    /// downloads every dive just to enumerate them.
     public static func listDives(device devicePtr: UnsafeMutablePointer<device_data_t>) throws -> [UInt32] {
         let data = try fetch(device: devicePtr, path: "/Logbook/Entries")
 
-        // The response embeds each dive's LogId (a UNIX timestamp) as a
-        // 4-aligned little-endian uint32 inside a small SBEM payload,
-        // interleaved with handle/flag/count/CRC fields. Filter to a
-        // plausible timestamp window to isolate the IDs, matching the C
-        // driver (suunto_nautic_device_foreach) and the reference client.
-        // Scanning must stay 4-aligned: the IDs are packed adjacently, so an
-        // unaligned read straddling two of them can land in-window and
-        // invent a phantom dive.
+        // The response embeds each LogId as a 4-aligned little-endian uint32
+        // in a small SBEM payload among handle/flag/count/CRC fields; filter
+        // to a plausible timestamp window to isolate them (matches the C
+        // driver). Must stay 4-aligned -- the IDs are packed adjacently, so an
+        // unaligned read straddling two can invent a phantom dive.
         let diveIDRange: ClosedRange<UInt32> = 1_500_000_000...2_100_000_000
         let bytes = [UInt8](data)
         var ids: [UInt32] = []
