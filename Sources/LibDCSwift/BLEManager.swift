@@ -500,8 +500,16 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     @objc public func connect(toDevice address: String!) -> Bool {
-        guard let uuid = UUID(uuidString: address),
-              let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
+        guard let uuid = UUID(uuidString: address) else {
+            logError("connect(toDevice:) failed -- \"\(address ?? "nil")\" is not a valid UUID string")
+            return false
+        }
+        guard let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
+            // A purely local CoreBluetooth cache lookup, no BLE I/O -- if this is
+            // what's failing, it returns near-instantly (single-digit ms), which
+            // is otherwise easy to mistake for a handshake/protocol-level failure
+            // much further downstream (see the DC_STATUS_IO -6 case in issue #29).
+            logError("connect(toDevice:) failed -- retrievePeripherals(withIdentifiers:) found no known peripheral for \(uuid)")
             return false
         }
 
