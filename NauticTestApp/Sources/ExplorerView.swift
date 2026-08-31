@@ -5,12 +5,12 @@ import LibDCBridge
 
 /// Raw RPC explorer for a connected Suunto Nautic/Ocean device.
 ///
-/// There is no dive list here on purpose: `dc_device_foreach()` cannot
-/// enumerate real dives yet (the `/Logbook/Entries` response format is
-/// unknown), so this screen instead exposes the raw request/response
-/// primitives directly. See `SuuntoNauticExplorer.swift` and
-/// `suunto_nautic.h` in the libdivecomputer submodule for what is/isn't
-/// understood about this protocol.
+/// Alongside the raw request/response primitives, this screen lists
+/// real dives via `SuuntoNauticExplorer.listDives` (each dive ID is a
+/// UNIX timestamp, so they're shown as dates) — tap one to download and
+/// decode it. See `SuuntoNauticExplorer.swift` and `suunto_nautic.h` in
+/// the libdivecomputer submodule for what is/isn't understood about
+/// this protocol.
 struct ExplorerView: View {
     let devicePtr: UnsafeMutablePointer<device_data_t>
     @ObservedObject var bluetoothManager: CoreBluetoothManager
@@ -24,6 +24,7 @@ struct ExplorerView: View {
     @State private var shareItems: [Any]?
     @State private var decodedProfile: SuuntoNauticExplorer.DecodedProfile?
     @State private var diveNotes: String = ""
+    @State private var diveIDs: [UInt32] = []
 
     private static let commonPaths = [
         "/System/Mode",
@@ -36,6 +37,35 @@ struct ExplorerView: View {
             Section("Connected") {
                 Text(bluetoothManager.connectedDevice?.name ?? "Suunto Nautic/Ocean")
                     .font(.headline)
+            }
+
+            Section("Dives") {
+                Button {
+                    listDives()
+                } label: {
+                    Label("List Dives", systemImage: "arrow.clockwise")
+                }
+                .disabled(busy)
+
+                ForEach(diveIDs, id: \.self) { id in
+                    Button {
+                        logbookID = String(id)
+                        downloadDive(id: String(id))
+                    } label: {
+                        HStack {
+                            Text(formatDiveDate(id))
+                            Spacer()
+                            Text(String(id)).font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(busy)
+                }
+
+                if diveIDs.isEmpty {
+                    Text("Tap List Dives to fetch real dive IDs from the watch.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Section("Quick Requests") {
@@ -145,6 +175,34 @@ struct ExplorerView: View {
         )) {
             ActivityView(activityItems: shareItems ?? [])
         }
+    }
+
+    private func listDives() {
+        busy = true
+        statusMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let ids = try SuuntoNauticExplorer.listDives(device: devicePtr)
+                DispatchQueue.main.async {
+                    diveIDs = ids
+                    statusMessage = "Found \(ids.count) dive(s)."
+                    busy = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    statusMessage = "Listing dives failed: \(error)"
+                    busy = false
+                }
+            }
+        }
+    }
+
+    private func formatDiveDate(_ id: UInt32) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(id))
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
     }
 
     private func sendRequest(path: String) {

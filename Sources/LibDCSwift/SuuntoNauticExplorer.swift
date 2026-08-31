@@ -6,14 +6,16 @@ import LibDCBridge
 /// devices.
 ///
 /// This family still can't be driven through the normal
-/// `DiveLogRetriever`/`GenericParser` pipeline: `dc_device_foreach()`
-/// cannot enumerate real dives (the `/Logbook/Entries` response format
-/// is unknown), and the parser has no dive datetime (see
-/// `suunto_nautic.h` in the libdivecomputer submodule), which
-/// `GenericParser.parseDiveData` requires and would throw on. `decode`
-/// below calls the same underlying dc_parser_t machinery directly,
-/// skipping the datetime requirement, since real profile data (depth,
-/// temperature, tank pressure) decodes successfully even without it.
+/// `DiveLogRetriever`/`GenericParser` pipeline: the parser has no dive
+/// datetime (see `suunto_nautic.h` in the libdivecomputer submodule),
+/// which `GenericParser.parseDiveData` requires and would throw on.
+/// (`dc_device_foreach()` itself *can* enumerate real dives now — see
+/// `listDives` below, which uses the same `/Logbook/Entries` endpoint
+/// more cheaply, without downloading every dive just to list them.)
+/// `decode` below calls the same underlying dc_parser_t machinery
+/// directly, skipping the datetime requirement, since real profile data
+/// (depth, temperature, tank pressure) decodes successfully even
+/// without it.
 ///
 /// These functions exist so a connected device can still be
 /// interactively explored, dives can be downloaded + decoded by a known
@@ -46,6 +48,34 @@ public enum SuuntoNauticExplorer {
         }
 
         return dataFromBuffer(buffer)
+    }
+
+    /// Lists real dive IDs on the connected watch by requesting
+    /// `/Logbook/Entries` directly, without downloading any dive data —
+    /// unlike driving this family through `dc_device_foreach()`, which
+    /// downloads and decodes every not-yet-fingerprinted dive just to
+    /// enumerate them (fine for a background sync, far too slow for an
+    /// interactive picker). Mirrors `suunto_nautic_device_foreach()`'s
+    /// own parsing (flat array of 4-byte little-endian UInt32 IDs) and
+    /// ordering (newest first — each ID is itself a UNIX timestamp, and
+    /// the endpoint's own ordering isn't documented, so this sorts
+    /// client-side the same way the C driver does).
+    public static func listDives(device devicePtr: UnsafeMutablePointer<device_data_t>) throws -> [UInt32] {
+        let data = try request(device: devicePtr, path: "/Logbook/Entries")
+
+        let bytes = [UInt8](data)
+        var ids: [UInt32] = []
+        var offset = 0
+        while offset + 4 <= bytes.count {
+            let id = UInt32(bytes[offset])
+                | (UInt32(bytes[offset + 1]) << 8)
+                | (UInt32(bytes[offset + 2]) << 16)
+                | (UInt32(bytes[offset + 3]) << 24)
+            ids.append(id)
+            offset += 4
+        }
+
+        return ids.sorted(by: >)
     }
 
     /// Download and decompress a specific logbook entry, given its
