@@ -140,6 +140,12 @@ import LibDCBridge
         // Halcyon computers
         ComputerModel(name: "Halcyon Symbios HUD",     family: .halcyonSymbios, modelID: 1),
         ComputerModel(name: "Halcyon Symbios Handset", family: .halcyonSymbios, modelID: 7),
+
+        // Suunto Nautic / Ocean (EXPERIMENTAL - see suunto_nautic.h in the
+        // libdivecomputer submodule for what is/isn't supported: raw dive
+        // download works, decoding a dive profile does not yet)
+        ComputerModel(name: "Suunto Nautic", family: .suuntoNautic, modelID: 0),
+        ComputerModel(name: "Suunto Ocean",  family: .suuntoNautic, modelID: 1),
     ]
 
     /// Represents the family of dive computers that support BLE communication.
@@ -160,6 +166,7 @@ import LibDCBridge
         case diveSystem
         case seacScreen
         case halcyonSymbios
+        case suuntoNautic
 
         /// Converts the Swift enum to libdivecomputer's dc_family_t type
         public var asDCFamily: dc_family_t {
@@ -180,6 +187,7 @@ import LibDCBridge
             case .diveSystem: return DC_FAMILY_DIVESYSTEM_IDIVE
             case .seacScreen: return DC_FAMILY_SEAC_SCREEN
             case .halcyonSymbios: return DC_FAMILY_HALCYON_SYMBIOS
+            case .suuntoNautic: return DC_FAMILY_SUUNTO_NAUTIC
             }
         }
 
@@ -202,6 +210,7 @@ import LibDCBridge
             case DC_FAMILY_DIVESYSTEM_IDIVE: self = .diveSystem
             case DC_FAMILY_SEAC_SCREEN: self = .seacScreen
             case DC_FAMILY_HALCYON_SYMBIOS: self = .halcyonSymbios
+            case DC_FAMILY_SUUNTO_NAUTIC: self = .suuntoNautic
             default: return nil
             }
         }
@@ -221,7 +230,8 @@ import LibDCBridge
         CBUUID(string: "1aa44039-1667-4b29-87cc-dfecaaf31d97"), // Shearwater Perdix 3
         CBUUID(string: "0000fcef-0000-1000-8000-00805f9b34fb"), // Divesoft Freedom
         CBUUID(string: "00000001-8c3b-4f2c-a59e-8c08224f3253"), // Halcyon Symbios
-        CBUUID(string: "84968ffe-d26d-478a-b953-5010bcf58bca")  // Seac Screen
+        CBUUID(string: "84968ffe-d26d-478a-b953-5010bcf58bca"), // Seac Screen
+        CBUUID(string: "61353090-8231-49cc-b57a-886370740041")  // Suunto Nautic/Ocean (EXPERIMENTAL)
     ]
     
     public static func getKnownServiceUUIDs() -> [CBUUID] {
@@ -245,7 +255,7 @@ import LibDCBridge
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)?
     ) -> Bool {
-        logDebug("Attempting to open BLE device: \(name) at address: \(deviceAddress)")
+        logDebug("LibDCSwift build \(libDCSwiftBuildTag) -- attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
         // Set connecting flag to prevent auto-reconnect during connection attempt
         DispatchQueue.main.async {
@@ -436,6 +446,16 @@ import LibDCBridge
         // name. Try the serial-derived model code first.
         if let result = resolveOceanicBLEName(name) {
             return result
+        }
+
+        // Suunto Nautic/Ocean advertise "Suunto Nautic <serial>", which
+        // find_descriptor_by_name (product-name match) misses. Match the
+        // family prefix directly so an unstored watch is recognised on scan.
+        if name.hasPrefix("Suunto Ocean") {
+            return (.suuntoNautic, 1)
+        }
+        if name.hasPrefix("Suunto Nautic") {
+            return (.suuntoNautic, 0)
         }
 
         var descriptor: OpaquePointer?

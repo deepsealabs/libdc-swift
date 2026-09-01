@@ -1,0 +1,6 @@
+NauticTestApp.xcodeproj/
+Generated/
+.build/
+DerivedData/
+build/
+signing/

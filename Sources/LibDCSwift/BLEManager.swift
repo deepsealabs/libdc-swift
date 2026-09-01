@@ -144,7 +144,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         SerialService(uuid: "1aa44039-1667-4b29-87cc-dfecaaf31d97", vendor: "Shearwater", product: "Perdix 3"),
         SerialService(uuid: "0000fcef-0000-1000-8000-00805f9b34fb", vendor: "Divesoft", product: "Freedom"),
         SerialService(uuid: "00000001-8c3b-4f2c-a59e-8c08224f3253", vendor: "Halcyon", product: "Symbios"),
-        SerialService(uuid: "84968ffe-d26d-478a-b953-5010bcf58bca", vendor: "Seac", product: "Screen")
+        SerialService(uuid: "84968ffe-d26d-478a-b953-5010bcf58bca", vendor: "Seac", product: "Screen"),
+        // EXPERIMENTAL: raw dive download works, profile decoding does not
+        // yet — see suunto_nautic.h in the libdivecomputer submodule.
+        SerialService(uuid: "61353090-8231-49cc-b57a-886370740041", vendor: "Suunto", product: "Nautic/Ocean")
     ]
     
     /// Service UUIDs to exclude from discovery
@@ -206,6 +209,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return writeCharacteristic != nil && notifyCharacteristic != nil
     }
     
+    /// Notify-enable timeout. Generous so the first connect outlasts the iOS
+    /// pairing dialog the Nautic's CCCD write can raise (see enableNotifications()).
+    private static let notifyEnableTimeoutSeconds: TimeInterval = 20.0
+
     @objc(enableNotifications)
     public func enableNotifications() -> Bool {
         guard let notifyCharacteristic = self.notifyCharacteristic,
@@ -221,9 +228,12 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         
         peripheral.setNotifyValue(true, for: notifyCharacteristic)
-        
-        // Wait for notifications to be enabled with timeout
-        let timeout = Date(timeIntervalSinceNow: 5.0)
+
+        // The CCCD write here can raise an iOS pairing dialog on the Nautic;
+        // while it's up isNotifying won't flip, so the wait must outlast it.
+        // Only the failure path waits this long -- a healthy peripheral flips
+        // in under a second and exits immediately.
+        let timeout = Date(timeIntervalSinceNow: Self.notifyEnableTimeoutSeconds)
         while !notifyCharacteristic.isNotifying {
             if Date() > timeout {
                 logError("Timeout waiting for notifications to enable")
@@ -231,7 +241,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             }
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         }
-        
+
         return notifyCharacteristic.isNotifying
     }
     
@@ -253,6 +263,10 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// Bailing out early is still driven by a genuine disconnect
     /// (`isPeripheralReady`), never by this grace period.
     private static let writeReadyGraceSeconds: TimeInterval = 0.5
+
+    /// Pause between chunks of an oversized `.withoutResponse` write. The
+    /// Nautic never negotiates an extended MTU and needs this gap to keep up.
+    private static let chunkedWriteInterChunkDelay: TimeInterval = 0.008
 
     /// 0 = success, 1 = timed out waiting for a with-response write's
     /// confirmation (transient — the without-response path never returns
@@ -279,18 +293,33 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         let timeoutMs = self.timeout > 0 ? self.timeout : 3000
 
         if writeType == .withoutResponse {
-            if !peripheral.canSendWriteWithoutResponse {
-                guard self.isPeripheralReady else {
-                    logWarning("Write blocked and peripheral no longer ready -- treating as a real disconnect")
-                    return 2
+            // CoreBluetooth silently truncates a .withoutResponse write larger
+            // than maximumWriteValueLength rather than splitting it, so chunk
+            // here. Matters for peripherals that never extend their MTU (Nautic).
+            let maxLen = peripheral.maximumWriteValueLength(for: .withoutResponse)
+            var offset = 0
+            repeat {
+                let end = maxLen > 0 ? min(offset + maxLen, data.count) : data.count
+                let chunk = (offset == 0 && end == data.count) ? data! : data.subdata(in: offset..<end)
+
+                if !peripheral.canSendWriteWithoutResponse {
+                    guard self.isPeripheralReady else {
+                        logWarning("Write blocked and peripheral no longer ready -- treating as a real disconnect")
+                        return 2
+                    }
+                    drainSemaphore(writeReadySemaphore)
+                    let graceMs = Int(Self.writeReadyGraceSeconds * 1000)
+                    if writeReadySemaphore.wait(timeout: .now() + .milliseconds(graceMs)) == .timedOut {
+                        logWarning("canSendWriteWithoutResponse still false after \(Self.writeReadyGraceSeconds)s, writing anyway")
+                    }
                 }
-                drainSemaphore(writeReadySemaphore)
-                let graceMs = Int(Self.writeReadyGraceSeconds * 1000)
-                if writeReadySemaphore.wait(timeout: .now() + .milliseconds(graceMs)) == .timedOut {
-                    logWarning("canSendWriteWithoutResponse still false after \(Self.writeReadyGraceSeconds)s, writing anyway")
+                peripheral.writeValue(chunk, for: characteristic, type: .withoutResponse)
+
+                offset = end
+                if offset < data.count {
+                    Thread.sleep(forTimeInterval: Self.chunkedWriteInterChunkDelay)
                 }
-            }
-            peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+            } while offset < data.count
             return 0
         } else {
             // With-response write: wait for the didWriteValueFor confirmation.
@@ -457,10 +486,34 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     public func startScanning(omitUnsupportedPeripherals: Bool = true) {
+        // Never issue a CoreBluetooth command before .poweredOn: it's an
+        // API-misuse no-op, and some peripherals react badly to BLE traffic
+        // during that window. Defer until ready.
+        guard isBluetoothReady else {
+            logInfo("Bluetooth not powered on yet; deferring scan until it is")
+            pendingOperations.append { [weak self] in
+                self?.startScanning(omitUnsupportedPeripherals: omitUnsupportedPeripherals)
+            }
+            return
+        }
+        let knownServiceUUIDs = knownSerialServices.map { CBUUID(string: $0.uuid) }
         centralManager.scanForPeripherals(
-            withServices: omitUnsupportedPeripherals ? knownSerialServices.map { CBUUID(string: $0.uuid) } : nil,
+            withServices: omitUnsupportedPeripherals ? knownServiceUUIDs : nil,
             options: nil)
         isScanning = true
+
+        // Also surface already-connected peripherals an active scan can miss.
+        // iOS can rotate the Nautic's CBPeripheral UUID across sessions, so a
+        // device stored under an old UUID stops appearing;
+        // retrieveConnectedPeripherals returns it under its current identifier.
+        for peripheral in centralManager.retrieveConnectedPeripherals(withServices: knownServiceUUIDs) {
+            guard let name = peripheral.name else { continue }
+            if DeviceConfiguration.fromName(name) != nil ||
+               DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) != nil {
+                DeviceStorage.shared.reconcileUUID(name: name, newUUID: peripheral.identifier.uuidString)
+                addDiscoveredPeripheral(peripheral)
+            }
+        }
     }
     
     public func stopScanning() {
@@ -469,24 +522,37 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     @objc public func connect(toDevice address: String!) -> Bool {
-        guard let uuid = UUID(uuidString: address),
-              let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
+        // Must not touch CoreBluetooth before .poweredOn (see startScanning);
+        // this call is blocking, so it fails rather than defers.
+        guard isBluetoothReady else {
+            logError("connect(toDevice:) failed -- Bluetooth is not powered on yet")
+            return false
+        }
+        guard let uuid = UUID(uuidString: address) else {
+            logError("connect(toDevice:) failed -- \"\(address ?? "nil")\" is not a valid UUID string")
+            return false
+        }
+        guard let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
+            logError("connect(toDevice:) failed -- retrievePeripherals(withIdentifiers:) found no known peripheral for \(uuid)")
             return false
         }
 
-        // Wait for the peripheral to reach .disconnected before issuing a new
-        // connect. CoreBluetooth reuses CBPeripheral instances, and if the
-        // previous connection is still tearing down internally, connecting
-        // again triggers "cannot add handler" state-machine errors that delay
-        // or prevent the second connection. Critical for devices needing a
-        // connect-fail-reconnect cycle (e.g. Aqualung i300C's slow wake-up).
-        if peripheral.state != .disconnected {
-            logWarning("[BLE CONNECT] Peripheral state is \(peripheral.state.rawValue), waiting for .disconnected")
+        // Wait out a transitional state before issuing a new connect:
+        // reconnecting while the peripheral is still tearing down
+        // (.disconnecting) or mid-connect (.connecting) triggers "cannot add
+        // handler" state-machine errors (critical for devices needing a
+        // connect-fail-reconnect cycle, e.g. Aqualung i300C's slow wake-up).
+        // A peripheral that's already .connected (e.g. a system-bonded Suunto
+        // Nautic) needs no wait -- it never reaches .disconnected on its own,
+        // and waiting 5s just widens the window for other work to race the
+        // connect.
+        if peripheral.state == .connecting || peripheral.state == .disconnecting {
+            logWarning("[BLE CONNECT] Peripheral state is \(peripheral.state.rawValue), waiting for it to settle")
             let deadline = Date(timeIntervalSinceNow: 5.0)
-            while peripheral.state != .disconnected && Date() < deadline {
+            while (peripheral.state == .connecting || peripheral.state == .disconnecting) && Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.1)
             }
-            if peripheral.state != .disconnected {
+            if peripheral.state == .connecting || peripheral.state == .disconnecting {
                 logWarning("[BLE CONNECT] Peripheral still in state \(peripheral.state.rawValue) after 5s -- proceeding anyway")
             }
         }
@@ -665,13 +731,16 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
-        if peripheral.name != nil {
+        if let name = peripheral.name {
             // Add the peripheral if:
             // 1. It's a stored device
             // 2. It's a supported device
             // 3. We haven't already added it
             if DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) != nil ||
-               DeviceConfiguration.fromName(peripheral.name ?? "") != nil {
+               DeviceConfiguration.fromName(name) != nil {
+                // Keep the stored record current if iOS rotated this device's
+                // UUID, so auto-reconnect by stored UUID still resolves it.
+                DeviceStorage.shared.reconcileUUID(name: name, newUUID: peripheral.identifier.uuidString)
                 addDiscoveredPeripheral(peripheral)
             }
         }
@@ -780,6 +849,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 notifyCharacteristic = characteristic
             }
         }
+
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {

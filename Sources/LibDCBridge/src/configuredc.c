@@ -347,6 +347,9 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         return rc;
     }
     dc_context_set_logfunc(data->context, dc_log_callback, NULL);
+    // Default level is WARNING, which drops the DEBUG hexdumps (e.g. the
+    // Suunto Nautic handshake/protocol frames); raise it so they surface.
+    dc_context_set_loglevel(data->context, DC_LOGLEVEL_DEBUG);
 
     // Get descriptor for the device
     rc = find_descriptor_by_model(&descriptor, family, model);
@@ -512,7 +515,12 @@ static const struct name_pattern name_patterns[] = {
     { "EON Steel", "Suunto", "EON Steel", MATCH_EXACT },
     { "Suunto D5", "Suunto", "D5", MATCH_EXACT },
     { "EON Core", "Suunto", "EON Core", MATCH_EXACT },
-    
+    // EXPERIMENTAL: advertised names are a best guess pending confirmation
+    // from a real device (see suunto_nautic.h in the libdivecomputer
+    // submodule for the full status of this driver).
+    { "Suunto Nautic", "Suunto", "Nautic", MATCH_PREFIX },
+    { "Suunto Ocean", "Suunto", "Ocean", MATCH_PREFIX },
+
     // Scubapro dive computers
     { "G2", "Scubapro", "G2", MATCH_EXACT },
     { "HUD", "Scubapro", "G2 HUD", MATCH_EXACT },
@@ -694,8 +702,10 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     unsigned int model;
     dc_status_t rc;
     
-    // Try stored configuration first if provided
-    if (stored_family != DC_FAMILY_NULL && stored_model != 0) {
+    // Try stored configuration first if provided. Model 0 is legitimate for
+    // families without sub-models (e.g. Suunto Nautic is forced as
+    // (suuntoNautic, 0)); guarding on stored_model != 0 here would skip them.
+    if (stored_family != DC_FAMILY_NULL) {
         rc = open_ble_device(data, address, stored_family, stored_model);
         if (rc == DC_STATUS_SUCCESS) {
             *out_data = data;

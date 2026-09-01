@@ -76,7 +76,8 @@ let package = Package(
                 "Models/DeviceFingerprint.swift",
                 "ViewModels/DiveDataViewModel.swift",
                 "Parser/GenericParser.swift",
-                "DiveLogRetriever.swift"
+                "DiveLogRetriever.swift",
+                "SuuntoNauticExplorer.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
@@ -86,6 +87,14 @@ let package = Package(
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("Foundation")
             ]
+        ),
+        .testTarget(
+            name: "LibDCSwiftTests",
+            dependencies: ["LibDCSwift", "LibDCBridge", "Clibdivecomputer"],
+            path: "Tests/LibDCSwiftTests",
+            resources: [
+                .copy("Fixtures/suunto_nautic_1787752091.sbem")
+            ]
         )
     ]
-) 
+)
