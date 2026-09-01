@@ -23,6 +23,7 @@ struct ExplorerView: View {
     @State private var lastLabel: String = ""
     @State private var shareItems: [Any]?
     @State private var decodedProfile: SuuntoNauticExplorer.DecodedProfile?
+    @State private var summaryInfo: SuuntoNauticExplorer.SummaryInfo?
     @State private var diveNotes: String = ""
     @State private var diveIDs: [UInt32] = []
 
@@ -115,6 +116,14 @@ struct ExplorerView: View {
                     }
                     ForEach(profile.tanks, id: \.index) { tank in
                         LabeledContent("Tank \(tank.index)", value: String(format: "%.0f → %.0f bar", tank.beginPressure, tank.endPressure))
+                    }
+                    if let summary = summaryInfo {
+                        LabeledContent("Gradient factors", value: "\(summary.gfLow)/\(summary.gfHigh)")
+                        ForEach(Array(summary.gases.enumerated()), id: \.offset) { idx, gas in
+                            LabeledContent("Gas \(idx + 1)", value: gas.hePercent > 0
+                                ? "O₂ \(gas.o2Percent)% / He \(gas.hePercent)%"
+                                : "O₂ \(gas.o2Percent)%")
+                        }
                     }
                 }
 
@@ -245,14 +254,18 @@ struct ExplorerView: View {
         busy = true
         statusMessage = nil
         decodedProfile = nil
+        summaryInfo = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let data = try SuuntoNauticExplorer.download(device: devicePtr, logbookID: id)
                 let profile = try? SuuntoNauticExplorer.decode(sbemData: data)
+                // GF/gas live in /Summary, not the profile; fetch it too (best-effort).
+                let summary = try? SuuntoNauticExplorer.downloadSummary(device: devicePtr, logbookID: id)
                 DispatchQueue.main.async {
                     lastResponse = data
                     lastLabel = "Download #\(id)"
                     decodedProfile = profile
+                    summaryInfo = summary ?? nil
                     if profile != nil {
                         statusMessage = "Decoded logbook entry \(id) (\(data.count) bytes)."
                     } else {
