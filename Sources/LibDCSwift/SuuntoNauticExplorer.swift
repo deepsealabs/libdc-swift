@@ -69,6 +69,26 @@ public enum SuuntoNauticExplorer {
         return dataFromBuffer(buffer)
     }
 
+    /// Diagnostic: run the fetch sequence but return the RAW response frame with
+    /// no validation, so the actual bytes can be exported even when a normal
+    /// `fetch` fails (e.g. `/Logbook/Entries` returning DATAFORMAT on a watch
+    /// whose response format isn't understood yet). For reverse-engineering.
+    public static func fetchRaw(device devicePtr: UnsafeMutablePointer<device_data_t>, path: String) throws -> Data {
+        guard let dcDevice = devicePtr.pointee.device else {
+            throw ExplorerError.notConnected
+        }
+        guard let buffer = dc_buffer_new(0) else {
+            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
+        }
+        defer { dc_buffer_free(buffer) }
+
+        let status = suunto_nautic_device_fetch_raw(dcDevice, path, buffer)
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+        return dataFromBuffer(buffer)
+    }
+
     /// Lists dive IDs from `/Logbook/Entries`, sorted newest-first (each ID
     /// is a UNIX timestamp). Cheaper than `dc_device_foreach()`, which
     /// downloads every dive just to enumerate them.

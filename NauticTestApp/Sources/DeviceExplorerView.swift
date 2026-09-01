@@ -79,6 +79,19 @@ struct DeviceExplorerView: View {
                 }
             }
 
+            Section {
+                Button {
+                    captureRaw(path: "/Logbook/Entries")
+                } label: {
+                    Label("Capture raw /Logbook/Entries", systemImage: "ladybug")
+                }
+                .disabled(busy)
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("If List Dives fails, tap this to fetch the raw /Logbook/Entries frame without decoding it, then use Export Raw Capture below and send us the file. This captures the exact bytes even when listing errors out.")
+            }
+
             Section("Custom GET Request") {
                 TextField("/Some/Path", text: $customPath)
                     .autocorrectionDisabled()
@@ -236,6 +249,27 @@ struct DeviceExplorerView: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private func captureRaw(path: String) {
+        busy = true
+        statusMessage = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let data = try SuuntoNauticExplorer.fetchRaw(device: devicePtr, path: path)
+                DispatchQueue.main.async {
+                    lastResponse = data
+                    lastLabel = "RAW \(path)"
+                    statusMessage = "Captured \(data.count) raw bytes for \(path). Tap Export Raw Capture below and send us the file."
+                    busy = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    statusMessage = "Raw capture for \(path) failed: \(error)"
+                    busy = false
+                }
+            }
+        }
     }
 
     private func sendRequest(path: String) {
