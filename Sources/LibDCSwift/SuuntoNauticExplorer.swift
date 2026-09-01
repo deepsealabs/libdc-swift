@@ -85,13 +85,28 @@ public enum SuuntoNauticExplorer {
         // unaligned read straddling two can invent a phantom dive.
         let diveIDRange: ClosedRange<UInt32> = 1_500_000_000...2_100_000_000
         let bytes = [UInt8](data)
+
+        func uint32LE(_ i: Int) -> UInt32 {
+            UInt32(bytes[i]) | (UInt32(bytes[i + 1]) << 8)
+                | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24)
+        }
+
+        // Cap extraction at the SBEM entry count (LE uint32 at offset 16 of
+        // the frame content). The payload ends with a per-request rolling
+        // token that can itself fall in the dive-ID window; stopping after
+        // `expected` values keeps that tail from becoming a phantom entry.
+        let countOffset = 16
+        let maxIDs = bytes.count / 4
+        var expected = maxIDs
+        if bytes.count >= countOffset + 4 {
+            let n = Int(uint32LE(countOffset))
+            if n <= maxIDs { expected = n }
+        }
+
         var ids: [UInt32] = []
         var offset = 0
-        while offset + 4 <= bytes.count {
-            let id = UInt32(bytes[offset])
-                | (UInt32(bytes[offset + 1]) << 8)
-                | (UInt32(bytes[offset + 2]) << 16)
-                | (UInt32(bytes[offset + 3]) << 24)
+        while offset + 4 <= bytes.count && ids.count < expected {
+            let id = uint32LE(offset)
             if diveIDRange.contains(id) {
                 ids.append(id)
             }
