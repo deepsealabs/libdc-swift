@@ -156,6 +156,11 @@ public enum SuuntoNauticExplorer {
         /// A dive event (alarm, warning, gas switch, ...). `type` is the
         /// libdivecomputer `parser_sample_event_t` value; `isBegin` marks a
         /// begin (true) vs end (false) edge.
+        /// A battery telemetry sample. libdivecomputer has no dedicated battery
+        /// sample type, so the C parser decodes it and delivers it through the
+        /// standard DC_SAMPLE_VENDOR channel (SAMPLE_VENDOR_SUUNTO_NAUTIC); this
+        /// layer only unpacks that record. Voltage in volts, charge 0..1.
+        public struct BatterySample { public let time: TimeInterval; public let voltage: Double; public let charge: Double }
         public struct Event {
             public let time: TimeInterval
             public let type: UInt32
@@ -226,6 +231,7 @@ public enum SuuntoNauticExplorer {
         public var temperatureProfile: [TemperatureSample]
         public var tankProfile: [TankSample]
         public var events: [Event]
+        public var batteryProfile: [BatterySample]
     }
 
     /// Decode a downloaded (and already decompressed) SBEM0103 stream
@@ -320,6 +326,18 @@ public enum SuuntoNauticExplorer {
             case DC_SAMPLE_EVENT:
                 let isBegin = (value.event.flags & UInt32(SAMPLE_FLAGS_BEGIN.rawValue)) != 0
                 collector.events.append(.init(time: collector.currentTime, type: value.event.type, isBegin: isBegin, value: value.event.value))
+            case DC_SAMPLE_VENDOR:
+                // Battery telemetry, decoded in the C parser and delivered as a
+                // canonical record: [version:1][voltage_mv:uint16][charge_permille:uint16].
+                guard value.vendor.type == UInt32(SAMPLE_VENDOR_SUUNTO_NAUTIC.rawValue),
+                      value.vendor.size >= 5, let raw = value.vendor.data else { break }
+                let b = raw.assumingMemoryBound(to: UInt8.self)
+                guard b[0] == 1 else { break } // version
+                let voltageMv = UInt16(b[1]) | (UInt16(b[2]) << 8)
+                let chargePermille = UInt16(b[3]) | (UInt16(b[4]) << 8)
+                collector.battery.append(.init(time: collector.currentTime,
+                                                voltage: Double(voltageMv) / 1000.0,
+                                                charge: Double(chargePermille) / 1000.0))
             default:
                 break
             }
@@ -341,7 +359,8 @@ public enum SuuntoNauticExplorer {
             depthProfile: collector.depth,
             temperatureProfile: collector.temperature,
             tankProfile: collector.tank,
-            events: collector.events
+            events: collector.events,
+            batteryProfile: collector.battery
         )
     }
 
@@ -360,4 +379,5 @@ private final class SampleCollector {
     var temperature: [SuuntoNauticExplorer.DecodedProfile.TemperatureSample] = []
     var tank: [SuuntoNauticExplorer.DecodedProfile.TankSample] = []
     var events: [SuuntoNauticExplorer.DecodedProfile.Event] = []
+    var battery: [SuuntoNauticExplorer.DecodedProfile.BatterySample] = []
 }

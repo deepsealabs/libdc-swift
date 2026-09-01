@@ -69,6 +69,17 @@ final class SuuntoNauticParserTests: XCTestCase {
             "expected an 'At safety stop' event; got \(labels)")
     }
 
+    func testBatteryTelemetryDecodes() throws {
+        let profile = try SuuntoNauticExplorer.decode(sbemData: loadFixture())
+        XCTAssertFalse(profile.batteryProfile.isEmpty, "expected battery samples")
+        // This dive ran at ~4.4 V and ~98% charge throughout.
+        let first = try XCTUnwrap(profile.batteryProfile.first)
+        XCTAssertEqual(first.voltage, 4.417, accuracy: 0.05)
+        XCTAssertEqual(first.charge, 0.98, accuracy: 0.03)
+        // Times are within the dive.
+        XCTAssertTrue(profile.batteryProfile.allSatisfy { $0.time >= 0 })
+    }
+
     func testDiveEntryPairingReturnsOneDive() {
         // Real /Logbook/Entries buffer for a single dive (start immediately
         // followed by its end timestamp). Both land in the dive-ID window, so a
