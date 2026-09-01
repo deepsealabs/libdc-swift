@@ -510,6 +510,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             guard let name = peripheral.name else { continue }
             if DeviceConfiguration.fromName(name) != nil ||
                DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) != nil {
+                DeviceStorage.shared.reconcileUUID(name: name, newUUID: peripheral.identifier.uuidString)
                 addDiscoveredPeripheral(peripheral)
             }
         }
@@ -536,19 +537,22 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             return false
         }
 
-        // Wait for the peripheral to reach .disconnected before issuing a new
-        // connect. CoreBluetooth reuses CBPeripheral instances, and if the
-        // previous connection is still tearing down internally, connecting
-        // again triggers "cannot add handler" state-machine errors that delay
-        // or prevent the second connection. Critical for devices needing a
-        // connect-fail-reconnect cycle (e.g. Aqualung i300C's slow wake-up).
-        if peripheral.state != .disconnected {
-            logWarning("[BLE CONNECT] Peripheral state is \(peripheral.state.rawValue), waiting for .disconnected")
+        // Wait out a transitional state before issuing a new connect:
+        // reconnecting while the peripheral is still tearing down
+        // (.disconnecting) or mid-connect (.connecting) triggers "cannot add
+        // handler" state-machine errors (critical for devices needing a
+        // connect-fail-reconnect cycle, e.g. Aqualung i300C's slow wake-up).
+        // A peripheral that's already .connected (e.g. a system-bonded Suunto
+        // Nautic) needs no wait -- it never reaches .disconnected on its own,
+        // and waiting 5s just widens the window for other work to race the
+        // connect.
+        if peripheral.state == .connecting || peripheral.state == .disconnecting {
+            logWarning("[BLE CONNECT] Peripheral state is \(peripheral.state.rawValue), waiting for it to settle")
             let deadline = Date(timeIntervalSinceNow: 5.0)
-            while peripheral.state != .disconnected && Date() < deadline {
+            while (peripheral.state == .connecting || peripheral.state == .disconnecting) && Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.1)
             }
-            if peripheral.state != .disconnected {
+            if peripheral.state == .connecting || peripheral.state == .disconnecting {
                 logWarning("[BLE CONNECT] Peripheral still in state \(peripheral.state.rawValue) after 5s -- proceeding anyway")
             }
         }
@@ -727,13 +731,16 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
-        if peripheral.name != nil {
+        if let name = peripheral.name {
             // Add the peripheral if:
             // 1. It's a stored device
             // 2. It's a supported device
             // 3. We haven't already added it
             if DeviceStorage.shared.getStoredDevice(uuid: peripheral.identifier.uuidString) != nil ||
-               DeviceConfiguration.fromName(peripheral.name ?? "") != nil {
+               DeviceConfiguration.fromName(name) != nil {
+                // Keep the stored record current if iOS rotated this device's
+                // UUID, so auto-reconnect by stored UUID still resolves it.
+                DeviceStorage.shared.reconcileUUID(name: name, newUUID: peripheral.identifier.uuidString)
                 addDiscoveredPeripheral(peripheral)
             }
         }

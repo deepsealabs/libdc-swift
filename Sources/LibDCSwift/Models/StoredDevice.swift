@@ -112,6 +112,30 @@ public class StoredDevice: Codable {
        }
    }
 
+   /// Reconciles a stored device whose CBPeripheral UUID has rotated (iOS
+   /// can reassign a peripheral's identifier across sessions, e.g. after a
+   /// Suunto Nautic re-pairs). When a device is seen by `name` under
+   /// `newUUID` but the stored record for that name is under a different
+   /// UUID, migrate the record to `newUUID` (preserving family/model/serial)
+   /// so auto-reconnect by stored UUID keeps working. The name carries the
+   /// device serial, so it identifies one physical device. Returns true if a
+   /// record was migrated.
+   @discardableResult
+   public func reconcileUUID(name: String, newUUID: String) -> Bool {
+       // Already stored under the current UUID -- nothing to do.
+       if storedDevices.contains(where: { $0.uuid == newUUID }) {
+           return false
+       }
+       guard let index = storedDevices.firstIndex(where: { $0.name == name }) else {
+           return false
+       }
+       let old = storedDevices[index]
+       storedDevices[index] = StoredDevice(uuid: newUUID, name: old.name, family: old.family, model: old.model, serial: old.serial)
+       saveDevices()
+       logInfo("Reconciled stored device \(name): UUID \(old.uuid) -> \(newUUID)")
+       return true
+   }
+
    /// Updates the serial number for an existing stored device
    public func updateDeviceSerial(uuid: String, serial: String) {
        if let index = storedDevices.firstIndex(where: { $0.uuid == uuid }) {
