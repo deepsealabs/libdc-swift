@@ -89,6 +89,13 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(firstGps.evpe, 23, accuracy: 1)
         // IMU (0x23) dominates the stream (~10 Hz over a ~37 min dive).
         XCTAssertGreaterThan(profile.imuProfile.count, 20000)
+        // Accel scale sanity: over the whole dive the median accel magnitude
+        // should be ~1g (gravity) with the validated 1/4096 factor.
+        let mags = profile.imuProfile.map { s -> Double in
+            let a = s.accelG; return (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot()
+        }.sorted()
+        let median = mags[mags.count / 2]
+        XCTAssertEqual(median, 1.0, accuracy: 0.1, "median accel magnitude should be ~1g")
         // DiveRoute (0x24), ~1.7 Hz, 5 features each.
         XCTAssertFalse(profile.diveRouteProfile.isEmpty)
         XCTAssertEqual(profile.diveRouteProfile.first?.features.count, 5)

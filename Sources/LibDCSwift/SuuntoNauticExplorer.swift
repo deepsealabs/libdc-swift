@@ -162,13 +162,31 @@ public enum SuuntoNauticExplorer {
         /// only unpacks the kind-tagged records.
         public struct BatterySample { public let time: TimeInterval; public let voltage: Double; public let charge: Double } // V, 0..1
         public struct GPSAccuracySample { public let time: TimeInterval; public let ehpe: Double; public let evpe: Double } // metres
-        /// 9-axis IMU. Raw int16 counts; axis order and scale aren't confirmed
-        /// yet (need a known-orientation capture), triples are accel/gyro/mag.
+        /// 9-axis IMU (accel/gyro/mag), raw int16 counts. The scale factors
+        /// below are validated against this reference dive (accel magnitude ≈ 1g
+        /// and gyro ≈ 0 during the stillest samples); the per-axis order and
+        /// sign still need a known-orientation capture to confirm.
         public struct IMUSample {
             public let time: TimeInterval
             public let ax: Int, ay: Int, az: Int
             public let gx: Int, gy: Int, gz: Int
             public let mx: Int, my: Int, mz: Int
+
+            /// raw accel * this = g. Sensor is ±4g (binary constant 1/8192) but
+            /// the stream is logged at half resolution, so the effective factor
+            /// is 1/4096 (gives 0.98g at rest on the reference dive).
+            public static let accelScaleG = 1.0 / 4096.0
+            /// raw gyro * this = deg/s (±250°/s; reads ~0.26°/s at rest).
+            public static let gyroScaleDegPerSec = 1.0 / 131.0
+            /// Standard gravity, for g -> m/s².
+            public static let gravity = 9.80665
+
+            public var accelG: (x: Double, y: Double, z: Double) {
+                (Double(ax) * Self.accelScaleG, Double(ay) * Self.accelScaleG, Double(az) * Self.accelScaleG)
+            }
+            public var gyroDegPerSec: (x: Double, y: Double, z: Double) {
+                (Double(gx) * Self.gyroScaleDegPerSec, Double(gy) * Self.gyroScaleDegPerSec, Double(gz) * Self.gyroScaleDegPerSec)
+            }
         }
         public struct DiveRouteSample { public let time: TimeInterval; public let features: [Int] } // 5x uint16, semantics TBD
         public struct Event {
