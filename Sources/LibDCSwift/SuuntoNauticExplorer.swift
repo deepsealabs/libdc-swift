@@ -20,8 +20,7 @@ import LibDCBridge
 /// These functions exist so a connected device can still be
 /// interactively explored, dives can be downloaded + decoded by a known
 /// logbook ID, and raw captures can be exported to help push the
-/// remaining reverse-engineering (dive enumeration, other SBEM chunks,
-/// the true dive timestamp) forward.
+/// remaining reverse-engineering (the true dive timestamp) forward.
 public enum SuuntoNauticExplorer {
 
     public enum ExplorerError: Error {
@@ -149,6 +148,34 @@ public enum SuuntoNauticExplorer {
         public struct TankSample { public let time: TimeInterval; public let tank: Int; public let pressure: Double }
         public struct Tank { public let index: Int; public let beginPressure: Double; public let endPressure: Double }
         public struct Gas { public let o2Percent: Int; public let hePercent: Int }
+        /// A dive event (alarm, warning, gas switch, ...). `type` is the
+        /// libdivecomputer `parser_sample_event_t` value; `isBegin` marks a
+        /// begin (true) vs end (false) edge.
+        public struct Event {
+            public let time: TimeInterval
+            public let type: UInt32
+            public let isBegin: Bool
+            public let value: UInt32
+
+            /// Human-readable label, e.g. "Ascent rate start" or "Gas switch → 2".
+            public var label: String {
+                let name: String
+                switch type {
+                case SAMPLE_EVENT_ASCENT.rawValue: name = "Ascent rate"
+                case SAMPLE_EVENT_CEILING.rawValue, SAMPLE_EVENT_CEILING_SAFETYSTOP.rawValue: name = "Ceiling"
+                case SAMPLE_EVENT_DECOSTOP.rawValue: name = "Deco stop"
+                case SAMPLE_EVENT_DEEPSTOP.rawValue: name = "Deep stop"
+                case SAMPLE_EVENT_SAFETYSTOP.rawValue, SAMPLE_EVENT_SAFETYSTOP_MANDATORY.rawValue: name = "Safety stop"
+                case SAMPLE_EVENT_PO2.rawValue: name = "PO₂"
+                case SAMPLE_EVENT_AIRTIME.rawValue: name = "Air time"
+                case SAMPLE_EVENT_GASCHANGE.rawValue: return "Gas switch → \(value)"
+                case SAMPLE_EVENT_VIOLATION.rawValue: name = "Violation"
+                case SAMPLE_EVENT_BOOKMARK.rawValue: name = "Bookmark"
+                default: name = "Event \(type)"
+                }
+                return "\(name) \(isBegin ? "start" : "end")"
+            }
+        }
 
         public var divetime: TimeInterval
         public var maxDepth: Double
@@ -162,6 +189,7 @@ public enum SuuntoNauticExplorer {
         public var depthProfile: [DepthSample]
         public var temperatureProfile: [TemperatureSample]
         public var tankProfile: [TankSample]
+        public var events: [Event]
     }
 
     /// Decode a downloaded (and already decompressed) SBEM0103 stream
@@ -238,6 +266,9 @@ public enum SuuntoNauticExplorer {
                 collector.temperature.append(.init(time: collector.currentTime, temperature: value.temperature))
             case DC_SAMPLE_PRESSURE:
                 collector.tank.append(.init(time: collector.currentTime, tank: Int(value.pressure.tank), pressure: value.pressure.value))
+            case DC_SAMPLE_EVENT:
+                let isBegin = (value.event.flags & UInt32(SAMPLE_FLAGS_BEGIN.rawValue)) != 0
+                collector.events.append(.init(time: collector.currentTime, type: value.event.type, isBegin: isBegin, value: value.event.value))
             default:
                 break
             }
@@ -257,7 +288,8 @@ public enum SuuntoNauticExplorer {
             gases: gases,
             depthProfile: collector.depth,
             temperatureProfile: collector.temperature,
-            tankProfile: collector.tank
+            tankProfile: collector.tank,
+            events: collector.events
         )
     }
 
@@ -275,4 +307,5 @@ private final class SampleCollector {
     var depth: [SuuntoNauticExplorer.DecodedProfile.DepthSample] = []
     var temperature: [SuuntoNauticExplorer.DecodedProfile.TemperatureSample] = []
     var tank: [SuuntoNauticExplorer.DecodedProfile.TankSample] = []
+    var events: [SuuntoNauticExplorer.DecodedProfile.Event] = []
 }

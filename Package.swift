@@ -87,6 +87,14 @@ let package = Package(
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("Foundation")
             ]
+        ),
+        .testTarget(
+            name: "LibDCSwiftTests",
+            dependencies: ["LibDCSwift", "LibDCBridge", "Clibdivecomputer"],
+            path: "Tests/LibDCSwiftTests",
+            resources: [
+                .copy("Fixtures/suunto_nautic_1787752091.sbem")
+            ]
         )
     ]
-) 
+)

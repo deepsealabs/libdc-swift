@@ -100,7 +100,7 @@ struct ExplorerView: View {
                     downloadDive(id: logbookID)
                 }
                 .disabled(busy || logbookID.isEmpty)
-                Text("Downloads and decodes depth, temperature, and tank pressure for this dive. Dive events, GPS, and the exact dive date/time aren't decoded yet — see below for how you can help with those.")
+                Text("Downloads and decodes depth, temperature, tank pressure, dive events, and GPS for this dive. The exact dive date/time isn't decoded yet — see below for how you can help with that.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -126,6 +126,19 @@ struct ExplorerView: View {
                     }
                 }
 
+                if !profile.events.isEmpty {
+                    Section("Dive Events (\(profile.events.count))") {
+                        ForEach(Array(profile.events.enumerated()), id: \.offset) { _, event in
+                            HStack {
+                                Text(event.label)
+                                Spacer()
+                                Text(formatDuration(event.time))
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                }
+
                 if !profile.depthProfile.isEmpty {
                     Section("Depth Profile") {
                         Chart(profile.depthProfile, id: \.time) { sample in
@@ -137,7 +150,7 @@ struct ExplorerView: View {
                 }
 
                 Section("Help Map the Remaining Data") {
-                    Text("Depth/temperature/tank pressure decode. Dive events (alarms, gas switches, laps) and GPS don't yet — we know which numeric chunk IDs carry them, just not what's inside. If anything notable happened on this dive (alarm, gas switch, lap button, low tank warning), describe it below — pairing your notes (or an official Suunto app export of this same dive, if you can get one) with the raw capture is what will actually crack those.")
+                    Text("Depth, temperature, tank pressure, dive events, and GPS decode now. The exact dive date/time still doesn't — the timestamp in the stream isn't fully cracked. If anything notable happened on this dive (alarm, gas switch, lap button, low tank warning), describe it below — pairing your notes (or an official Suunto app export of this same dive, if you can get one) with the raw capture is what confirms the decode.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     TextField("e.g. \"hit low-tank alarm around 20 min\"", text: $diveNotes, axis: .vertical)
