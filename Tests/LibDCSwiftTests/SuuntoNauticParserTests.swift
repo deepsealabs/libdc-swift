@@ -141,17 +141,37 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertTrue(kinds.isSuperset(of: [1, 2, 3, 4, 5]), "kinds seen: \(kinds)")
     }
 
-    func testDiveEntryPairingReturnsOneDive() {
-        // Real /Logbook/Entries buffer for a single dive (start immediately
-        // followed by its end timestamp). Both land in the dive-ID window, so a
-        // naive scan lists two dives; the pairing must return only the start.
+    /// Thin wrapper over the C entry parser (the single source of truth), so
+    /// the Swift `listDives` and C `device_foreach` both exercise this logic.
+    private func extractIDs(_ data: Data) -> [UInt32] {
+        var ids = [UInt32](repeating: 0, count: data.count / 4 + 1)
+        let n = data.withUnsafeBytes { raw -> UInt32 in
+            suunto_nautic_extract_entry_ids(
+                raw.bindMemory(to: UInt8.self).baseAddress,
+                data.count, &ids, UInt32(ids.count))
+        }
+        return Array(ids.prefix(Int(n)))
+    }
+
+    func testEntryPairingSingleDive() {
+        // Single-dive entries buffer: start immediately followed by its end.
+        // Both land in the dive-ID window; the pairing must return only the start.
         let entries: [UInt8] = [
             0x26, 0x24, 0xe1, 0x02, 0x01, 0x00, 0x4d, 0x00, 0x0c, 0x00, 0x00, 0x00,
             0x01, 0x00, 0xff, 0xff, 0x9b, 0xee, 0x8e, 0x6a, 0x6a, 0xf7, 0x8e, 0x6a,
             0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x95, 0x51, 0x0a, 0x00,
             0x00, 0x00, 0x00, 0x00,
         ]
-        let ids = SuuntoNauticExplorer.parseDiveEntries(Data(entries))
-        XCTAssertEqual(ids, [1787752091]) // start only; 1787754346 (end) dropped
+        XCTAssertEqual(extractIDs(Data(entries)), [1787752091]) // end 1787754346 dropped
+    }
+
+    func testEntryPairingMultiDiveDropsHeaderTimestamp() throws {
+        // Real /Logbook/Entries buffer from a tester's watch. It contains two
+        // dive (start,end) pairs plus a lone header timestamp (the response's
+        // own "current time") that must NOT be listed as a dive.
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "logbook_entries_multi", withExtension: "bin"))
+        let ids = extractIDs(try Data(contentsOf: url))
+        // Exactly the two real dives, newest-first; header ts 1788224574 dropped.
+        XCTAssertEqual(ids, [1788079236, 1787385018]) // Aug 30 and Aug 22, 2026
     }
 }

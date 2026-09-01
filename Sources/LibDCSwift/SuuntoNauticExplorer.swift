@@ -73,49 +73,33 @@ public enum SuuntoNauticExplorer {
     /// is a UNIX timestamp). Cheaper than `dc_device_foreach()`, which
     /// downloads every dive just to enumerate them.
     public static func listDives(device devicePtr: UnsafeMutablePointer<device_data_t>) throws -> [UInt32] {
-        let data = try fetch(device: devicePtr, path: "/Logbook/Entries")
-        return parseDiveEntries(data)
-    }
+        guard let dcDevice = devicePtr.pointee.device else {
+            throw ExplorerError.notConnected
+        }
+        guard let buffer = dc_buffer_new(0) else {
+            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
+        }
+        defer { dc_buffer_free(buffer) }
 
-    /// Extract dive-start IDs from a raw /Logbook/Entries response.
-    ///
-    /// Each logbook entry stores its start timestamp (the LogId, a UNIX time)
-    /// immediately followed by the dive's end timestamp, both as 4-aligned
-    /// little-endian uint32s in the plausible-timestamp window. We want only
-    /// the starts: when an in-range value is immediately followed by a larger
-    /// in-range value within a day, that pair is one entry's (start, end), so
-    /// take the start and skip the end. Anything between entries (flags, counts)
-    /// falls outside the window and is skipped. This is why a single dive used
-    /// to list as two: the end timestamp looks just like another dive id.
-    static func parseDiveEntries(_ data: Data) -> [UInt32] {
-        let diveIDRange: ClosedRange<UInt32> = 1_500_000_000...2_100_000_000
-        let maxPairGap: UInt32 = 86_400 // 24h: an end is always within a day of its start
+        // The entry parsing lives in the C driver (suunto_nautic_device_list),
+        // the single source of truth also used by dc_device_foreach. It writes
+        // the dive ids as packed little-endian uint32, newest-first; here we
+        // just unpack that list — no protocol logic duplicated in Swift.
+        let status = suunto_nautic_device_list(dcDevice, buffer)
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+
+        let data = dataFromBuffer(buffer)
         let bytes = [UInt8](data)
-
-        func uint32LE(_ i: Int) -> UInt32 {
-            UInt32(bytes[i]) | (UInt32(bytes[i + 1]) << 8)
-                | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24)
-        }
-
         var ids: [UInt32] = []
-        var offset = 0
-        while offset + 4 <= bytes.count {
-            let id = uint32LE(offset)
-            if diveIDRange.contains(id) {
-                ids.append(id)
-                // Skip this entry's paired end timestamp, if present.
-                if offset + 8 <= bytes.count {
-                    let next = uint32LE(offset + 4)
-                    if diveIDRange.contains(next) && next > id && next - id <= maxPairGap {
-                        offset += 8
-                        continue
-                    }
-                }
-            }
-            offset += 4
+        var i = 0
+        while i + 4 <= bytes.count {
+            ids.append(UInt32(bytes[i]) | (UInt32(bytes[i + 1]) << 8)
+                | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24))
+            i += 4
         }
-
-        return ids.sorted(by: >)
+        return ids
     }
 
     /// Download and decompress a specific logbook entry, given its
