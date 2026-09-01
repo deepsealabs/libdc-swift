@@ -5,22 +5,22 @@ import LibDCBridge
 /// EXPERIMENTAL: raw protocol access + decoding for Suunto Nautic/Ocean
 /// devices.
 ///
-/// This family still can't be driven through the normal
-/// `DiveLogRetriever`/`GenericParser` pipeline: the parser has no dive
-/// datetime (see `suunto_nautic.h` in the libdivecomputer submodule),
-/// which `GenericParser.parseDiveData` requires and would throw on.
+/// This family isn't driven through the normal
+/// `DiveLogRetriever`/`GenericParser` pipeline yet: the parser only
+/// recovers the dive datetime when the dive has a surface GPS fix (it's
+/// derived from the GPS UTC anchor — see `suunto_nautic.h` in the
+/// libdivecomputer submodule), whereas `GenericParser.parseDiveData`
+/// requires a datetime unconditionally and would throw on a no-GPS dive.
 /// (`dc_device_foreach()` itself *can* enumerate real dives now — see
 /// `listDives` below, which uses the same `/Logbook/Entries` endpoint
 /// more cheaply, without downloading every dive just to list them.)
 /// `decode` below calls the same underlying dc_parser_t machinery
-/// directly, skipping the datetime requirement, since real profile data
-/// (depth, temperature, tank pressure) decodes successfully even
-/// without it.
+/// directly, and fills the datetime from the logbook ID when the stream
+/// has no fix.
 ///
 /// These functions exist so a connected device can still be
 /// interactively explored, dives can be downloaded + decoded by a known
-/// logbook ID, and raw captures can be exported to help push the
-/// remaining reverse-engineering (the true dive timestamp) forward.
+/// logbook ID, and raw captures can be exported.
 public enum SuuntoNauticExplorer {
 
     public enum ExplorerError: Error {
@@ -177,6 +177,12 @@ public enum SuuntoNauticExplorer {
             }
         }
 
+        /// Dive start time. Derived by the parser from the first GPS fix's
+        /// absolute UTC (dc_parser_get_datetime); for a dive with no surface GPS
+        /// fix the parser can't recover it, and `decode` falls back to the
+        /// logbook ID, which is that same UNIX timestamp. nil only when neither
+        /// is available.
+        public var startDate: Date?
         public var divetime: TimeInterval
         public var maxDepth: Double
         public var avgDepth: Double
@@ -196,7 +202,10 @@ public enum SuuntoNauticExplorer {
     /// into a real dive profile. Calls the same dc_parser_t machinery
     /// GenericParser uses, but directly — see the type-level doc comment
     /// for why this bypasses GenericParser.parseDiveData.
-    public static func decode(sbemData: Data) throws -> DecodedProfile {
+    ///
+    /// Pass `logbookID` (the numeric id used to download the dive) to fill in
+    /// `startDate`: that id is the dive's start time as a UNIX timestamp.
+    public static func decode(sbemData: Data, logbookID: UInt32? = nil) throws -> DecodedProfile {
         var parser: OpaquePointer?
         let status = sbemData.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> dc_status_t in
             let ptr = raw.bindMemory(to: UInt8.self).baseAddress
@@ -213,6 +222,18 @@ public enum SuuntoNauticExplorer {
         dc_parser_get_field(parser, DC_FIELD_DIVETIME, 0, &divetime)
         dc_parser_get_field(parser, DC_FIELD_MAXDEPTH, 0, &maxDepth)
         dc_parser_get_field(parser, DC_FIELD_AVGDEPTH, 0, &avgDepth)
+
+        // Dive start: prefer the parser's stream-derived datetime (from the GPS
+        // UTC anchor); fall back to the logbook ID when the stream has no fix.
+        var startDate: Date? = logbookID.map { Date(timeIntervalSince1970: TimeInterval($0)) }
+        var dt = dc_datetime_t()
+        if dc_parser_get_datetime(parser, &dt) == DC_STATUS_SUCCESS {
+            var comps = DateComponents()
+            comps.year = Int(dt.year); comps.month = Int(dt.month); comps.day = Int(dt.day)
+            comps.hour = Int(dt.hour); comps.minute = Int(dt.minute); comps.second = Int(dt.second)
+            comps.timeZone = TimeZone(identifier: "UTC")
+            if let d = Calendar(identifier: .gregorian).date(from: comps) { startDate = d }
+        }
 
         var tempMin: Double = 0
         var tempMax: Double = 0
@@ -277,6 +298,7 @@ public enum SuuntoNauticExplorer {
         dc_parser_samples_foreach(parser, callback, collectorPtr)
 
         return DecodedProfile(
+            startDate: startDate,
             divetime: TimeInterval(divetime),
             maxDepth: maxDepth,
             avgDepth: avgDepth,

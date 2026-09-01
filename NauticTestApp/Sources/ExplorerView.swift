@@ -100,13 +100,16 @@ struct ExplorerView: View {
                     downloadDive(id: logbookID)
                 }
                 .disabled(busy || logbookID.isEmpty)
-                Text("Downloads and decodes depth, temperature, tank pressure, dive events, and GPS for this dive. The exact dive date/time isn't decoded yet — see below for how you can help with that.")
+                Text("Downloads and decodes depth, temperature, tank pressure, dive events, GPS, and the dive date/time for this dive.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
 
             if let profile = decodedProfile {
                 Section("Decoded Profile") {
+                    if let start = profile.startDate {
+                        LabeledContent("Date", value: start.formatted(date: .abbreviated, time: .shortened))
+                    }
                     LabeledContent("Dive time", value: formatDuration(profile.divetime))
                     LabeledContent("Max depth", value: String(format: "%.1f m", profile.maxDepth))
                     LabeledContent("Avg depth", value: String(format: "%.1f m", profile.avgDepth))
@@ -150,7 +153,7 @@ struct ExplorerView: View {
                 }
 
                 Section("Help Map the Remaining Data") {
-                    Text("Depth, temperature, tank pressure, dive events, and GPS decode now. The exact dive date/time still doesn't — the timestamp in the stream isn't fully cracked. If anything notable happened on this dive (alarm, gas switch, lap button, low tank warning), describe it below — pairing your notes (or an official Suunto app export of this same dive, if you can get one) with the raw capture is what confirms the decode.")
+                    Text("Depth, temperature, tank pressure, dive events, GPS, and the dive date/time all decode now. If anything notable happened on this dive (alarm, gas switch, lap button, low tank warning), describe it below — pairing your notes (or an official Suunto app export of this same dive, if you can get one) with the raw capture is what confirms the decode.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     TextField("e.g. \"hit low-tank alarm around 20 min\"", text: $diveNotes, axis: .vertical)
@@ -271,7 +274,7 @@ struct ExplorerView: View {
                 // download() returns the profile with the /Summary SBEM appended,
                 // so decode() surfaces GF/gas via the standard parser fields.
                 let data = try SuuntoNauticExplorer.download(device: devicePtr, logbookID: id)
-                let profile = try? SuuntoNauticExplorer.decode(sbemData: data)
+                let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
                 DispatchQueue.main.async {
                     lastResponse = data
                     lastLabel = "Download #\(id)"

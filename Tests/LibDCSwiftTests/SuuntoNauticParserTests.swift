@@ -33,6 +33,15 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertGreaterThan(profile.temperatureProfile.count, 0)
     }
 
+    func testStartDateDerivedFromStream() throws {
+        // No logbook ID passed: the parser must still recover the dive start
+        // from the GPS UTC anchor in the stream. 1787752091 = 2026-08-26T13:48:11Z
+        // (== 15:48:11+02:00 in the app export).
+        let profile = try SuuntoNauticExplorer.decode(sbemData: loadFixture())
+        let start = try XCTUnwrap(profile.startDate)
+        XCTAssertEqual(start.timeIntervalSince1970, 1787752091, accuracy: 1.0)
+    }
+
     func testDecodeEvents() throws {
         let profile = try SuuntoNauticExplorer.decode(sbemData: loadFixture())
 
