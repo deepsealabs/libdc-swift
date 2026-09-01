@@ -76,13 +76,22 @@ public enum SuuntoNauticExplorer {
     /// downloads every dive just to enumerate them.
     public static func listDives(device devicePtr: UnsafeMutablePointer<device_data_t>) throws -> [UInt32] {
         let data = try fetch(device: devicePtr, path: "/Logbook/Entries")
+        return parseDiveEntries(data)
+    }
 
-        // The response embeds each LogId as a 4-aligned little-endian uint32
-        // in a small SBEM payload among handle/flag/count/CRC fields; filter
-        // to a plausible timestamp window to isolate them (matches the C
-        // driver). Must stay 4-aligned -- the IDs are packed adjacently, so an
-        // unaligned read straddling two can invent a phantom dive.
+    /// Extract dive-start IDs from a raw /Logbook/Entries response.
+    ///
+    /// Each logbook entry stores its start timestamp (the LogId, a UNIX time)
+    /// immediately followed by the dive's end timestamp, both as 4-aligned
+    /// little-endian uint32s in the plausible-timestamp window. We want only
+    /// the starts: when an in-range value is immediately followed by a larger
+    /// in-range value within a day, that pair is one entry's (start, end), so
+    /// take the start and skip the end. Anything between entries (flags, counts)
+    /// falls outside the window and is skipped. This is why a single dive used
+    /// to list as two: the end timestamp looks just like another dive id.
+    static func parseDiveEntries(_ data: Data) -> [UInt32] {
         let diveIDRange: ClosedRange<UInt32> = 1_500_000_000...2_100_000_000
+        let maxPairGap: UInt32 = 86_400 // 24h: an end is always within a day of its start
         let bytes = [UInt8](data)
 
         func uint32LE(_ i: Int) -> UInt32 {
@@ -90,24 +99,20 @@ public enum SuuntoNauticExplorer {
                 | (UInt32(bytes[i + 2]) << 16) | (UInt32(bytes[i + 3]) << 24)
         }
 
-        // Cap extraction at the SBEM entry count (LE uint32 at offset 16 of
-        // the frame content). The payload ends with a per-request rolling
-        // token that can itself fall in the dive-ID window; stopping after
-        // `expected` values keeps that tail from becoming a phantom entry.
-        let countOffset = 16
-        let maxIDs = bytes.count / 4
-        var expected = maxIDs
-        if bytes.count >= countOffset + 4 {
-            let n = Int(uint32LE(countOffset))
-            if n <= maxIDs { expected = n }
-        }
-
         var ids: [UInt32] = []
         var offset = 0
-        while offset + 4 <= bytes.count && ids.count < expected {
+        while offset + 4 <= bytes.count {
             let id = uint32LE(offset)
             if diveIDRange.contains(id) {
                 ids.append(id)
+                // Skip this entry's paired end timestamp, if present.
+                if offset + 8 <= bytes.count {
+                    let next = uint32LE(offset + 4)
+                    if diveIDRange.contains(next) && next > id && next - id <= maxPairGap {
+                        offset += 8
+                        continue
+                    }
+                }
             }
             offset += 4
         }
@@ -157,23 +162,48 @@ public enum SuuntoNauticExplorer {
             public let isBegin: Bool
             public let value: UInt32
 
-            /// Human-readable label, e.g. "Ascent rate start" or "Gas switch → 2".
+            /// Human-readable label. For alarm/warning/notify/state events the
+            /// parser passes the native Suunto (subgroup, type) through `value`
+            /// as (subgroup << 8 | type), so we can show the exact Suunto label
+            /// ("Safety Stop Ahead", "At Safety Stop", ...) rather than the
+            /// lossy libdivecomputer mapping. Gas switch keeps `value` as the
+            /// gas number.
             public var label: String {
-                let name: String
-                switch type {
-                case SAMPLE_EVENT_ASCENT.rawValue: name = "Ascent rate"
-                case SAMPLE_EVENT_CEILING.rawValue, SAMPLE_EVENT_CEILING_SAFETYSTOP.rawValue: name = "Ceiling"
-                case SAMPLE_EVENT_DECOSTOP.rawValue: name = "Deco stop"
-                case SAMPLE_EVENT_DEEPSTOP.rawValue: name = "Deep stop"
-                case SAMPLE_EVENT_SAFETYSTOP.rawValue, SAMPLE_EVENT_SAFETYSTOP_MANDATORY.rawValue: name = "Safety stop"
-                case SAMPLE_EVENT_PO2.rawValue: name = "PO₂"
-                case SAMPLE_EVENT_AIRTIME.rawValue: name = "Air time"
-                case SAMPLE_EVENT_GASCHANGE.rawValue: return "Gas switch → \(value)"
-                case SAMPLE_EVENT_VIOLATION.rawValue: name = "Violation"
-                case SAMPLE_EVENT_BOOKMARK.rawValue: name = "Bookmark"
-                default: name = "Event \(type)"
+                if type == SAMPLE_EVENT_GASCHANGE.rawValue {
+                    return "Gas switch → \(value)\(isBegin ? "" : " end")"
                 }
-                return "\(name) \(isBegin ? "start" : "end")"
+                if let native = Self.nauticEventLabel(subgroup: Int(value >> 8), type: Int(value & 0xFF)) {
+                    return "\(native) \(isBegin ? "start" : "end")"
+                }
+                return "Event \(type) \(isBegin ? "start" : "end")"
+            }
+
+            /// Authoritative Suunto dive-event labels, per subgroup, from the
+            /// per-dive /Logbook/byId/<id>/Descriptors SBEM schema. The type
+            /// number is only meaningful within its subgroup (there is no flat
+            /// table). 0x18 Alarm, 0x19 Warning, 0x1A Notify, 0x1B State.
+            static func nauticEventLabel(subgroup: Int, type: Int) -> String? {
+                switch subgroup {
+                case 0x18: // Alarm
+                    return [1: "PO₂ low", 2: "PO₂ high", 3: "Tank pressure", 4: "Gas time",
+                            5: "Ascent speed", 7: "CNS 100%", 8: "OTU 300", 10: "Deco stop broken",
+                            12: "Deep stop broken", 13: "Safety stop broken", 31: "Depth", 50: "Battery"][type]
+                case 0x19: // Warning
+                    return [6: "User PO₂ high", 14: "CNS 80%", 15: "OTU 250", 20: "No-deco time",
+                            28: "User tank pressure", 29: "User gas time", 30: "Sidemount", 31: "Depth",
+                            32: "Dive time", 42: "User NDL", 44: "Recovery time", 50: "Battery"][type]
+                case 0x1A: // Notify
+                    return [11: "Gas switch", 21: "Setpoint switch", 28: "User tank pressure",
+                            29: "User gas time", 30: "Sidemount", 31: "Depth", 32: "Dive time",
+                            41: "Stop done", 42: "User NDL", 44: "Recovery time", 60: "Bearing set",
+                            61: "Bearing cleared", 62: "Stopwatch started", 63: "Stopwatch reset"][type]
+                case 0x1B: // State
+                    return [19: "NDL exceeded", 35: "At deco stop", 36: "At deep stop",
+                            37: "At safety stop", 38: "Deco stop ahead", 39: "Deep stop ahead",
+                            40: "Safety stop ahead"][type]
+                default:
+                    return nil
+                }
             }
         }
 
