@@ -138,93 +138,17 @@ public enum SuuntoNauticExplorer {
         return dataFromBuffer(buffer)
     }
 
-    /// Dive metadata from the /Summary endpoint (gradient factors and gas
-    /// mix), which the profile /Data stream doesn't carry.
-    public struct SummaryInfo {
-        public struct Gas { public let o2Percent: Int; public let hePercent: Int }
-        public var gfLow: Int
-        public var gfHigh: Int
-        public var gases: [Gas]
-    }
 
-    /// Download a dive's /Summary (paginated, uncompressed SBEM0103) and
-    /// parse gradient factors + gas mix. Separate from the profile decode:
-    /// GF/gas live in /Summary, not in the /Data profile stream. Returns nil
-    /// if the SBEM0103 signature or the expected fields aren't present.
-    public static func downloadSummary(device devicePtr: UnsafeMutablePointer<device_data_t>, logbookID: String) throws -> SummaryInfo? {
-        guard let dcDevice = devicePtr.pointee.device else {
-            throw ExplorerError.notConnected
-        }
-
-        guard let buffer = dc_buffer_new(0) else {
-            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
-        }
-        defer { dc_buffer_free(buffer) }
-
-        let status = suunto_nautic_device_download_summary(dcDevice, logbookID, buffer)
-        guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
-        }
-
-        return parseSummary(dataFromBuffer(buffer))
-    }
-
-    /// Parse gradient factors and gas mix from a raw /Summary SBEM0103 blob.
-    /// Offsets are relative to the "SBEM0103" signature (confirmed on real
-    /// hardware): GF low u16 LE at +0x33, GF high at +0x35, gas #1 at +0xC7
-    /// (id, O2%, He%, type), 4 bytes per gas.
-    static func parseSummary(_ data: Data) -> SummaryInfo? {
-        let sig: [UInt8] = Array("SBEM0103".utf8)
-        let bytes = [UInt8](data)
-        guard let sigStart = firstIndex(of: sig, in: bytes) else { return nil }
-
-        func u16LE(_ rel: Int) -> Int? {
-            let i = sigStart + rel
-            guard i + 2 <= bytes.count else { return nil }
-            return Int(bytes[i]) | (Int(bytes[i + 1]) << 8)
-        }
-        func u8(_ rel: Int) -> Int? {
-            let i = sigStart + rel
-            guard i < bytes.count else { return nil }
-            return Int(bytes[i])
-        }
-
-        guard let gfLow = u16LE(0x33), let gfHigh = u16LE(0x35) else { return nil }
-
-        var gases: [SummaryInfo.Gas] = []
-        for g in 0..<4 {
-            let base = 0xC7 + g * 4
-            guard let o2 = u8(base + 1), let he = u8(base + 2) else { break }
-            // A zero O2 for anything past the first slot marks an unused gas.
-            if o2 == 0 && g > 0 { break }
-            gases.append(.init(o2Percent: o2, hePercent: he))
-        }
-
-        return SummaryInfo(gfLow: gfLow, gfHigh: gfHigh, gases: gases)
-    }
-
-    private static func firstIndex(of pattern: [UInt8], in bytes: [UInt8]) -> Int? {
-        guard !pattern.isEmpty, bytes.count >= pattern.count else { return nil }
-        for start in 0...(bytes.count - pattern.count) {
-            var match = true
-            for k in 0..<pattern.count where bytes[start + k] != pattern[k] {
-                match = false
-                break
-            }
-            if match { return start }
-        }
-        return nil
-    }
-
-    /// A decoded dive profile. Only the fields/chunks the parser
-    /// currently understands are populated (depth, temperature, tank
-    /// pressure) — see suunto_nautic.h for what's still missing (dive
-    /// events, GPS, the true dive date/time).
+    /// A decoded dive profile. Populated from the standard dc_parser_t
+    /// fields/samples: depth, temperature, tank pressure, and (from the
+    /// appended /Summary section) gradient factors and gas mix. See
+    /// suunto_nautic.h for what's still missing (dive events, datetime).
     public struct DecodedProfile {
         public struct DepthSample { public let time: TimeInterval; public let depth: Double }
         public struct TemperatureSample { public let time: TimeInterval; public let temperature: Double }
         public struct TankSample { public let time: TimeInterval; public let tank: Int; public let pressure: Double }
         public struct Tank { public let index: Int; public let beginPressure: Double; public let endPressure: Double }
+        public struct Gas { public let o2Percent: Int; public let hePercent: Int }
 
         public var divetime: TimeInterval
         public var maxDepth: Double
@@ -232,6 +156,9 @@ public enum SuuntoNauticExplorer {
         public var temperatureMinimum: Double?
         public var temperatureMaximum: Double?
         public var tanks: [Tank]
+        public var gradientFactorLow: Int?
+        public var gradientFactorHigh: Int?
+        public var gases: [Gas]
         public var depthProfile: [DepthSample]
         public var temperatureProfile: [TemperatureSample]
         public var tankProfile: [TankSample]
@@ -272,6 +199,29 @@ public enum SuuntoNauticExplorer {
             }
         }
 
+        // Gradient factors (from the /Summary section, via the decompression model).
+        var gfLow: Int?
+        var gfHigh: Int?
+        var deco = dc_decomodel_t()
+        if dc_parser_get_field(parser, DC_FIELD_DECOMODEL, 0, &deco) == DC_STATUS_SUCCESS,
+           deco.type == DC_DECOMODEL_BUHLMANN {
+            gfLow = Int(deco.params.gf.low)
+            gfHigh = Int(deco.params.gf.high)
+        }
+
+        // Gas mixes (fractions -> percent).
+        var gases: [DecodedProfile.Gas] = []
+        var gasCount: UInt32 = 0
+        if dc_parser_get_field(parser, DC_FIELD_GASMIX_COUNT, 0, &gasCount) == DC_STATUS_SUCCESS {
+            for i in 0..<gasCount {
+                var mix = dc_gasmix_t()
+                if dc_parser_get_field(parser, DC_FIELD_GASMIX, i, &mix) == DC_STATUS_SUCCESS {
+                    gases.append(.init(o2Percent: Int((mix.oxygen * 100).rounded()),
+                                       hePercent: Int((mix.helium * 100).rounded())))
+                }
+            }
+        }
+
         let collector = SampleCollector()
         let collectorPtr = Unmanaged.passRetained(collector).toOpaque()
         defer { Unmanaged<SampleCollector>.fromOpaque(collectorPtr).release() }
@@ -302,6 +252,9 @@ public enum SuuntoNauticExplorer {
             temperatureMinimum: tempMinStatus == DC_STATUS_SUCCESS ? tempMin : nil,
             temperatureMaximum: tempMaxStatus == DC_STATUS_SUCCESS ? tempMax : nil,
             tanks: tanks,
+            gradientFactorLow: gfLow,
+            gradientFactorHigh: gfHigh,
+            gases: gases,
             depthProfile: collector.depth,
             temperatureProfile: collector.temperature,
             tankProfile: collector.tank
