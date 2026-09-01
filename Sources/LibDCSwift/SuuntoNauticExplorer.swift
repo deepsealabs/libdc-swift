@@ -162,10 +162,13 @@ public enum SuuntoNauticExplorer {
         /// only unpacks the kind-tagged records.
         public struct BatterySample { public let time: TimeInterval; public let voltage: Double; public let charge: Double } // V, 0..1
         public struct GPSAccuracySample { public let time: TimeInterval; public let ehpe: Double; public let evpe: Double } // metres
-        /// 9-axis IMU (accel/gyro/mag), raw int16 counts. The scale factors
-        /// below are validated against this reference dive (accel magnitude ≈ 1g
-        /// and gyro ≈ 0 during the stillest samples); the per-axis order and
-        /// sign still need a known-orientation capture to confirm.
+        /// 9-axis IMU (accel/gyro/mag), raw int16 counts in stream order. The
+        /// scale factors below are validated against this reference dive (accel
+        /// magnitude ≈ 1g and gyro ≈ 0 during the stillest samples). The axis
+        /// order is identity with no sign flips (accel/gyro/mag lanes → X,Y,Z in
+        /// order), confirmed by decompiling libmds' IMU path (no swaps, no FNEG).
+        /// The magnetometer unit is microtesla but its raw→µT scale isn't in
+        /// libmds (it's in the on-device / MATLAB nav code), so mag stays raw.
         public struct IMUSample {
             public let time: TimeInterval
             public let ax: Int, ay: Int, az: Int
