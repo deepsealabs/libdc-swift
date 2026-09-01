@@ -39,7 +39,7 @@ struct ContentView: View {
                 }
                 .listStyle(.insetGrouped)
             }
-            .navigationTitle("Nautic Test")
+            .navigationTitle("DC Tester")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(bluetoothManager.isScanning ? "Stop" : "Scan") {
@@ -55,7 +55,7 @@ struct ContentView: View {
             }
             .navigationDestination(isPresented: explorerBinding) {
                 if let devicePtr = bluetoothManager.openedDeviceDataPtr {
-                    ExplorerView(devicePtr: devicePtr, bluetoothManager: bluetoothManager)
+                    DeviceExplorerView(devicePtr: devicePtr, bluetoothManager: bluetoothManager)
                 }
             }
         }
@@ -73,7 +73,7 @@ struct ContentView: View {
             Text("EXPERIMENTAL")
                 .font(.caption).bold()
                 .foregroundColor(.orange)
-            Text("This app can connect to a Suunto Nautic/Ocean, download a dive by its logbook ID, and decode depth, temperature, and tank pressure. Dive events, GPS, and automatic dive listing aren't there yet. Exports you send back help finish those.")
+            Text("A tester for dive computers this package supports. The Suunto Nautic/Ocean explorer is the most complete: connect, list dives, download by logbook ID, and decode the full profile (depth, temperature, tank pressure, events, GPS, deco, battery, IMU). Raw capture exports you send back help extend support to more devices.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

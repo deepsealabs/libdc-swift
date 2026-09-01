@@ -3,15 +3,15 @@ import Charts
 import LibDCSwift
 import LibDCBridge
 
-/// Raw RPC explorer for a connected Suunto Nautic/Ocean device.
-///
-/// Alongside the raw request/response primitives, this screen lists
-/// real dives via `SuuntoNauticExplorer.listDives` (each dive ID is a
-/// UNIX timestamp, so they're shown as dates) — tap one to download and
-/// decode it. See `SuuntoNauticExplorer.swift` and `suunto_nautic.h` in
-/// the libdivecomputer submodule for what is/isn't understood about
-/// this protocol.
-struct ExplorerView: View {
+/// Per-device explorer/tester screen. Today it drives the Suunto
+/// Nautic/Ocean protocol (raw RPC primitives, dive listing via
+/// `SuuntoNauticExplorer.listDives`, download + decode) — as more device
+/// families gain an explorer, this screen dispatches by connected family.
+/// Each dive ID is a UNIX timestamp, so dives are shown as dates; tap one
+/// to download and decode it. See `SuuntoNauticExplorer.swift` and
+/// `suunto_nautic.h` in the libdivecomputer submodule for what is/isn't
+/// understood about this protocol.
+struct DeviceExplorerView: View {
     let devicePtr: UnsafeMutablePointer<device_data_t>
     @ObservedObject var bluetoothManager: CoreBluetoothManager
 
@@ -201,7 +201,7 @@ struct ExplorerView: View {
                 }
             }
         }
-        .navigationTitle("Nautic Explorer")
+        .navigationTitle("Device Explorer")
         .sheet(isPresented: Binding(
             get: { shareItems != nil },
             set: { if !$0 { shareItems = nil } }

@@ -37,9 +37,10 @@ targets:
     info:
       path: Generated/Info.plist
       properties:
+        CFBundleDisplayName: "DC Tester"
         UILaunchScreen: {}
-        NSBluetoothAlwaysUsageDescription: "Nautic Test needs Bluetooth to connect to your Suunto Nautic/Ocean and download raw dive captures for testing."
-        NSBluetoothPeripheralUsageDescription: "Nautic Test needs Bluetooth to connect to your Suunto Nautic/Ocean and download raw dive captures for testing."
+        NSBluetoothAlwaysUsageDescription: "DC Tester needs Bluetooth to connect to your dive computer and download raw dive data for testing."
+        NSBluetoothPeripheralUsageDescription: "DC Tester needs Bluetooth to connect to your dive computer and download raw dive data for testing."
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         UIBackgroundModes:

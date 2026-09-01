@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct NauticTestAppApp: App {
+struct DCTesterApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
