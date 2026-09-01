@@ -57,7 +57,10 @@ public struct SampleData {
     
     // Decompression data
     var deco: DecoData?
-    
+
+    // Vendor-specific samples (DC_SAMPLE_VENDOR): (time, vendor type, raw bytes)
+    var vendorSamples: [DiveData.VendorSample] = []
+
     public struct Event {
         let type: parser_sample_event_t  // Event type from libdivecomputer
         let value: UInt32               // Event specific value

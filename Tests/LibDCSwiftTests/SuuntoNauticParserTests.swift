@@ -114,6 +114,33 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertGreaterThan(profile.gradientFactorProfile.map(\.gfSurface).max() ?? 0, 50)
     }
 
+    func testGenericPipelineDecodesNauticWithVendorChannel() throws {
+        let data = try loadFixture()
+        // Route through the SAME GenericParser path DiveLogRetriever uses.
+        let dive: DiveData = try data.withUnsafeBytes { raw in
+            let ptr = raw.bindMemory(to: UInt8.self).baseAddress!
+            return try GenericParser.parseDiveData(
+                family: .suuntoNautic, model: 0, diveNumber: 1,
+                diveData: ptr, dataSize: data.count,
+                fingerprint: Data([0x9b, 0xee, 0x8e, 0x6a]),          // id 1787752091 LE
+                fallbackDate: Date(timeIntervalSince1970: 1787752091))
+        }
+        // Standard fields flow through.
+        XCTAssertEqual(dive.maxDepth, 33.11, accuracy: 0.05)
+        XCTAssertFalse(dive.profile.isEmpty)
+        // Datetime present (GPS anchor on this dive) - didn't throw.
+        XCTAssertEqual(Calendar(identifier: .gregorian).component(.year, from: dive.datetime), 2026)
+        // The vendor channel carried the non-standard series generically.
+        XCTAssertFalse(dive.vendorSamples.isEmpty)
+        XCTAssertTrue(dive.vendorSamples.allSatisfy {
+            $0.type == UInt32(SAMPLE_VENDOR_SUUNTO_NAUTIC.rawValue)
+        })
+        // Battery (kind 1), GPS accuracy (2), IMU (3), dive-route (4), GF (5)
+        // all present -> distinct kinds in the first payload byte.
+        let kinds = Set(dive.vendorSamples.compactMap { $0.data.first })
+        XCTAssertTrue(kinds.isSuperset(of: [1, 2, 3, 4, 5]), "kinds seen: \(kinds)")
+    }
+
     func testDiveEntryPairingReturnsOneDive() {
         // Real /Logbook/Entries buffer for a single dive (start immediately
         // followed by its end timestamp). Both land in the dive-ID window, so a
