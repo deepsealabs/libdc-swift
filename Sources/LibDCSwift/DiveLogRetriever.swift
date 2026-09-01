@@ -144,14 +144,26 @@ public class DiveLogRetriever {
             return 0
         }
 
+        // Suunto Nautic dives without a surface GPS fix carry no datetime in
+        // the parsed stream, but the fingerprint IS the dive's start time (a
+        // little-endian UNIX timestamp). Supply it as a fallback so the dive
+        // parses instead of throwing on the missing datetime.
+        var fallbackDate: Date? = nil
+        if deviceFamily == .suuntoNautic, fingerprintData.count == 4 {
+            let b = [UInt8](fingerprintData)
+            let id = UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
+            fallbackDate = Date(timeIntervalSince1970: TimeInterval(id))
+        }
+
         do {
             let diveData = try GenericParser.parseDiveData(
                 family: deviceFamily,
-                model: modelToUse, 
+                model: modelToUse,
                 diveNumber: context.logCount,
                 diveData: data,
                 dataSize: Int(size),
-                fingerprint: fingerprintData
+                fingerprint: fingerprintData,
+                fallbackDate: fallbackDate
             )
             
             DispatchQueue.main.async {

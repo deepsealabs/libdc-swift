@@ -5,22 +5,20 @@ import LibDCBridge
 /// EXPERIMENTAL: raw protocol access + decoding for Suunto Nautic/Ocean
 /// devices.
 ///
-/// This family isn't driven through the normal
-/// `DiveLogRetriever`/`GenericParser` pipeline yet: the parser only
-/// recovers the dive datetime when the dive has a surface GPS fix (it's
-/// derived from the GPS UTC anchor — see `suunto_nautic.h` in the
-/// libdivecomputer submodule), whereas `GenericParser.parseDiveData`
-/// requires a datetime unconditionally and would throw on a no-GPS dive.
-/// (`dc_device_foreach()` itself *can* enumerate real dives now — see
-/// `listDives` below, which uses the same `/Logbook/Entries` endpoint
-/// more cheaply, without downloading every dive just to list them.)
-/// `decode` below calls the same underlying dc_parser_t machinery
-/// directly, and fills the datetime from the logbook ID when the stream
-/// has no fix.
+/// This family now also works through the normal
+/// `DiveLogRetriever`/`GenericParser` pipeline: `dc_device_foreach()`
+/// enumerates real dives, and `GenericParser` parses each one, taking a
+/// fallback datetime from the dive fingerprint (the logbook id is the
+/// dive's UNIX start time) for dives with no surface GPS fix, and carrying
+/// the non-standard series (battery, IMU, GPS accuracy, gradient factors)
+/// through the generic `DC_SAMPLE_VENDOR` channel into
+/// `DiveData.vendorSamples`.
 ///
-/// These functions exist so a connected device can still be
-/// interactively explored, dives can be downloaded + decoded by a known
-/// logbook ID, and raw captures can be exported.
+/// This explorer is complementary, not the only path: it exposes the raw
+/// RPC primitives for interactive protocol work, a cheap `listDives`
+/// (same `/Logbook/Entries` endpoint, without downloading every dive), a
+/// richly-typed `decode` (battery in volts, IMU axes, etc. rather than raw
+/// vendor bytes) for the tester UI, and raw-capture export.
 public enum SuuntoNauticExplorer {
 
     public enum ExplorerError: Error {
