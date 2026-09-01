@@ -156,11 +156,21 @@ public enum SuuntoNauticExplorer {
         /// A dive event (alarm, warning, gas switch, ...). `type` is the
         /// libdivecomputer `parser_sample_event_t` value; `isBegin` marks a
         /// begin (true) vs end (false) edge.
-        /// A battery telemetry sample. libdivecomputer has no dedicated battery
-        /// sample type, so the C parser decodes it and delivers it through the
-        /// standard DC_SAMPLE_VENDOR channel (SAMPLE_VENDOR_SUUNTO_NAUTIC); this
-        /// layer only unpacks that record. Voltage in volts, charge 0..1.
-        public struct BatterySample { public let time: TimeInterval; public let voltage: Double; public let charge: Double }
+        /// Non-standard telemetry the C parser decodes and delivers through the
+        /// standard DC_SAMPLE_VENDOR channel (SAMPLE_VENDOR_SUUNTO_NAUTIC), since
+        /// libdivecomputer has no dedicated sample types for these. This layer
+        /// only unpacks the kind-tagged records.
+        public struct BatterySample { public let time: TimeInterval; public let voltage: Double; public let charge: Double } // V, 0..1
+        public struct GPSAccuracySample { public let time: TimeInterval; public let ehpe: Double; public let evpe: Double } // metres
+        /// 9-axis IMU. Raw int16 counts; axis order and scale aren't confirmed
+        /// yet (need a known-orientation capture), triples are accel/gyro/mag.
+        public struct IMUSample {
+            public let time: TimeInterval
+            public let ax: Int, ay: Int, az: Int
+            public let gx: Int, gy: Int, gz: Int
+            public let mx: Int, my: Int, mz: Int
+        }
+        public struct DiveRouteSample { public let time: TimeInterval; public let features: [Int] } // 5x uint16, semantics TBD
         public struct Event {
             public let time: TimeInterval
             public let type: UInt32
@@ -232,6 +242,9 @@ public enum SuuntoNauticExplorer {
         public var tankProfile: [TankSample]
         public var events: [Event]
         public var batteryProfile: [BatterySample]
+        public var gpsAccuracyProfile: [GPSAccuracySample]
+        public var imuProfile: [IMUSample]
+        public var diveRouteProfile: [DiveRouteSample]
     }
 
     /// Decode a downloaded (and already decompressed) SBEM0103 stream
@@ -327,17 +340,29 @@ public enum SuuntoNauticExplorer {
                 let isBegin = (value.event.flags & UInt32(SAMPLE_FLAGS_BEGIN.rawValue)) != 0
                 collector.events.append(.init(time: collector.currentTime, type: value.event.type, isBegin: isBegin, value: value.event.value))
             case DC_SAMPLE_VENDOR:
-                // Battery telemetry, decoded in the C parser and delivered as a
-                // canonical record: [version:1][voltage_mv:uint16][charge_permille:uint16].
+                // Non-standard telemetry, decoded in the C parser and delivered
+                // as a kind-tagged little-endian record (byte 0 = kind).
                 guard value.vendor.type == UInt32(SAMPLE_VENDOR_SUUNTO_NAUTIC.rawValue),
-                      value.vendor.size >= 5, let raw = value.vendor.data else { break }
+                      value.vendor.size >= 1, let raw = value.vendor.data else { break }
                 let b = raw.assumingMemoryBound(to: UInt8.self)
-                guard b[0] == 1 else { break } // version
-                let voltageMv = UInt16(b[1]) | (UInt16(b[2]) << 8)
-                let chargePermille = UInt16(b[3]) | (UInt16(b[4]) << 8)
-                collector.battery.append(.init(time: collector.currentTime,
-                                                voltage: Double(voltageMv) / 1000.0,
-                                                charge: Double(chargePermille) / 1000.0))
+                let size = Int(value.vendor.size)
+                func i16(_ o: Int) -> Int { Int(Int16(bitPattern: UInt16(b[o]) | (UInt16(b[o + 1]) << 8))) }
+                func u16(_ o: Int) -> Int { Int(UInt16(b[o]) | (UInt16(b[o + 1]) << 8)) }
+                let t = collector.currentTime
+                switch b[0] {
+                case 1 where size >= 5: // battery
+                    collector.battery.append(.init(time: t, voltage: Double(u16(1)) / 1000.0, charge: Double(u16(3)) / 1000.0))
+                case 2 where size >= 5: // GPS accuracy (metres)
+                    collector.gpsAccuracy.append(.init(time: t, ehpe: Double(u16(1)), evpe: Double(u16(3))))
+                case 3 where size >= 19: // IMU: 9x int16
+                    collector.imu.append(.init(time: t, ax: i16(1), ay: i16(3), az: i16(5),
+                                                gx: i16(7), gy: i16(9), gz: i16(11),
+                                                mx: i16(13), my: i16(15), mz: i16(17)))
+                case 4 where size >= 11: // DiveRoute: 5x uint16
+                    collector.diveRoute.append(.init(time: t, features: [u16(1), u16(3), u16(5), u16(7), u16(9)]))
+                default:
+                    break
+                }
             default:
                 break
             }
@@ -360,7 +385,10 @@ public enum SuuntoNauticExplorer {
             temperatureProfile: collector.temperature,
             tankProfile: collector.tank,
             events: collector.events,
-            batteryProfile: collector.battery
+            batteryProfile: collector.battery,
+            gpsAccuracyProfile: collector.gpsAccuracy,
+            imuProfile: collector.imu,
+            diveRouteProfile: collector.diveRoute
         )
     }
 
@@ -380,4 +408,7 @@ private final class SampleCollector {
     var tank: [SuuntoNauticExplorer.DecodedProfile.TankSample] = []
     var events: [SuuntoNauticExplorer.DecodedProfile.Event] = []
     var battery: [SuuntoNauticExplorer.DecodedProfile.BatterySample] = []
+    var gpsAccuracy: [SuuntoNauticExplorer.DecodedProfile.GPSAccuracySample] = []
+    var imu: [SuuntoNauticExplorer.DecodedProfile.IMUSample] = []
+    var diveRoute: [SuuntoNauticExplorer.DecodedProfile.DiveRouteSample] = []
 }

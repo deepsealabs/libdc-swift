@@ -80,6 +80,20 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertTrue(profile.batteryProfile.allSatisfy { $0.time >= 0 })
     }
 
+    func testVendorSeriesDecode() throws {
+        let profile = try SuuntoNauticExplorer.decode(sbemData: loadFixture())
+        // GPS accuracy (0x0E), only in the surface section, first fix EHPE≈14 EVPE≈23.
+        XCTAssertFalse(profile.gpsAccuracyProfile.isEmpty)
+        let firstGps = try XCTUnwrap(profile.gpsAccuracyProfile.first)
+        XCTAssertEqual(firstGps.ehpe, 14, accuracy: 1)
+        XCTAssertEqual(firstGps.evpe, 23, accuracy: 1)
+        // IMU (0x23) dominates the stream (~10 Hz over a ~37 min dive).
+        XCTAssertGreaterThan(profile.imuProfile.count, 20000)
+        // DiveRoute (0x24), ~1.7 Hz, 5 features each.
+        XCTAssertFalse(profile.diveRouteProfile.isEmpty)
+        XCTAssertEqual(profile.diveRouteProfile.first?.features.count, 5)
+    }
+
     func testDiveEntryPairingReturnsOneDive() {
         // Real /Logbook/Entries buffer for a single dive (start immediately
         // followed by its end timestamp). Both land in the dive-ID window, so a
