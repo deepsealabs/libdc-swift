@@ -189,6 +189,18 @@ public enum SuuntoNauticExplorer {
             }
         }
         public struct DiveRouteSample { public let time: TimeInterval; public let features: [Int] } // 5x uint16, semantics TBD
+        /// Decompression status, from the standard DC_SAMPLE_DECO channel.
+        public struct DecoSample {
+            public enum Kind { case noDeco, decoStop }
+            public let time: TimeInterval
+            public let kind: Kind
+            public let ndl: TimeInterval   // seconds remaining (no-deco phase)
+            public let ceiling: Double     // metres (deco phase)
+            public let tts: TimeInterval   // seconds to surface
+        }
+        /// Real-time gradient factors (percent). No standard libdivecomputer
+        /// channel, so carried via DC_SAMPLE_VENDOR.
+        public struct GradientFactorSample { public let time: TimeInterval; public let gf99: Int; public let gfSurface: Int; public let gfLeading: Int }
         public struct Event {
             public let time: TimeInterval
             public let type: UInt32
@@ -263,6 +275,8 @@ public enum SuuntoNauticExplorer {
         public var gpsAccuracyProfile: [GPSAccuracySample]
         public var imuProfile: [IMUSample]
         public var diveRouteProfile: [DiveRouteSample]
+        public var decoProfile: [DecoSample]
+        public var gradientFactorProfile: [GradientFactorSample]
     }
 
     /// Decode a downloaded (and already decompressed) SBEM0103 stream
@@ -357,6 +371,13 @@ public enum SuuntoNauticExplorer {
             case DC_SAMPLE_EVENT:
                 let isBegin = (value.event.flags & UInt32(SAMPLE_FLAGS_BEGIN.rawValue)) != 0
                 collector.events.append(.init(time: collector.currentTime, type: value.event.type, isBegin: isBegin, value: value.event.value))
+            case DC_SAMPLE_DECO:
+                let isDeco = value.deco.type == DC_DECO_DECOSTOP.rawValue
+                collector.deco.append(.init(time: collector.currentTime,
+                                            kind: isDeco ? .decoStop : .noDeco,
+                                            ndl: TimeInterval(value.deco.time),
+                                            ceiling: value.deco.depth,
+                                            tts: TimeInterval(value.deco.tts)))
             case DC_SAMPLE_VENDOR:
                 // Non-standard telemetry, decoded in the C parser and delivered
                 // as a kind-tagged little-endian record (byte 0 = kind).
@@ -378,6 +399,8 @@ public enum SuuntoNauticExplorer {
                                                 mx: i16(13), my: i16(15), mz: i16(17)))
                 case 4 where size >= 11: // DiveRoute: 5x uint16
                     collector.diveRoute.append(.init(time: t, features: [u16(1), u16(3), u16(5), u16(7), u16(9)]))
+                case 5 where size >= 7: // real-time gradient factors
+                    collector.gf.append(.init(time: t, gf99: i16(1), gfSurface: i16(3), gfLeading: i16(5)))
                 default:
                     break
                 }
@@ -406,7 +429,9 @@ public enum SuuntoNauticExplorer {
             batteryProfile: collector.battery,
             gpsAccuracyProfile: collector.gpsAccuracy,
             imuProfile: collector.imu,
-            diveRouteProfile: collector.diveRoute
+            diveRouteProfile: collector.diveRoute,
+            decoProfile: collector.deco,
+            gradientFactorProfile: collector.gf
         )
     }
 
@@ -429,4 +454,6 @@ private final class SampleCollector {
     var gpsAccuracy: [SuuntoNauticExplorer.DecodedProfile.GPSAccuracySample] = []
     var imu: [SuuntoNauticExplorer.DecodedProfile.IMUSample] = []
     var diveRoute: [SuuntoNauticExplorer.DecodedProfile.DiveRouteSample] = []
+    var deco: [SuuntoNauticExplorer.DecodedProfile.DecoSample] = []
+    var gf: [SuuntoNauticExplorer.DecodedProfile.GradientFactorSample] = []
 }

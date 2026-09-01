@@ -101,6 +101,19 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(profile.diveRouteProfile.first?.features.count, 5)
     }
 
+    func testDecoAndGradientFactorsDecode() throws {
+        let profile = try SuuntoNauticExplorer.decode(sbemData: loadFixture())
+        // One deco sample per 0x16 chunk (244 on this dive).
+        XCTAssertEqual(profile.decoProfile.count, 244)
+        XCTAssertEqual(profile.gradientFactorProfile.count, 244)
+        // The dive goes into deco: at least one decoStop with a positive ceiling.
+        XCTAssertTrue(profile.decoProfile.contains { $0.kind == .decoStop && $0.ceiling > 0 })
+        // TTS peaks in the hundreds of seconds.
+        XCTAssertGreaterThan(profile.decoProfile.map(\.tts).max() ?? 0, 300)
+        // gfSurface climbs meaningfully by the end of the dive.
+        XCTAssertGreaterThan(profile.gradientFactorProfile.map(\.gfSurface).max() ?? 0, 50)
+    }
+
     func testDiveEntryPairingReturnsOneDive() {
         // Real /Logbook/Entries buffer for a single dive (start immediately
         // followed by its end timestamp). Both land in the dive-ID window, so a
