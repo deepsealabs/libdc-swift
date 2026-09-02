@@ -21,7 +21,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.deepsealabs.NauticTestApp
         MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "4"
         SWIFT_VERSION: "5.10"
         TARGETED_DEVICE_FAMILY: "1"
         ENABLE_PREVIEWS: "YES"
