@@ -319,6 +319,35 @@ final class SuuntoNauticParserTests: XCTestCase {
         print("corpus: checked \(bins.count) captures")
     }
 
+    func testSidemountSecondTransmitter() throws {
+        // A sidemount pair is one cylinder slot with two pressure fields:
+        // Pressure at +44 and Pressure2 at +48. Pressure2 only counts as a real
+        // second tank once it reads non-zero at least twice (a lone spurious
+        // reading followed by zeros must NOT become a phantom tank). Validated
+        // against a real Ocean sidemount dive (issue #29).
+        func chunk(_ p1: UInt32, _ p2: UInt32) -> [UInt8] {
+            var pay = [UInt8](repeating: 0, count: 141)
+            pay[42] = 0                                   // slot 0 index byte
+            func put(_ off: Int, _ v: UInt32) {
+                pay[off] = UInt8(v & 0xff); pay[off+1] = UInt8((v>>8)&0xff)
+                pay[off+2] = UInt8((v>>16)&0xff); pay[off+3] = UInt8((v>>24)&0xff)
+            }
+            put(44, p1); put(48, p2)
+            return [0x16, 141] + pay
+        }
+        // Two chunks with a real Pressure2 (two non-zero readings) -> 2 tanks.
+        var buf = Array("SBEM0103".utf8) + chunk(15_000_000, 10_000_000) + chunk(14_000_000, 9_000_000)
+        var p = try SuuntoNauticExplorer.decode(sbemData: Data(buf), logbookID: 1787000000)
+        XCTAssertEqual(p.tanks.count, 2, "sidemount pair should give two tanks")
+        XCTAssertEqual(p.tanks.first { $0.index == 0 }?.beginPressure ?? 0, 150, accuracy: 0.5)
+        XCTAssertEqual(p.tanks.first { $0.index == 1 }?.beginPressure ?? 0, 100, accuracy: 0.5)
+
+        // One spurious Pressure2 reading then zero -> only one tank (no phantom).
+        buf = Array("SBEM0103".utf8) + chunk(15_000_000, 12_000_000) + chunk(14_000_000, 0)
+        p = try SuuntoNauticExplorer.decode(sbemData: Data(buf), logbookID: 1787000000)
+        XCTAssertEqual(p.tanks.count, 1, "a lone Pressure2 sample must not become a tank")
+    }
+
     func testEntryPairingEmptyLogbook() {
         // Real /Logbook/Entries response from an empty Nautic S (kreitje, 0 dives):
         // status 200, count 0, header + CRC only, no entry records. Must yield no
