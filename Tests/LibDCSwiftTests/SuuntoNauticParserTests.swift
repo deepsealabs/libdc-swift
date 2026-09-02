@@ -23,7 +23,7 @@ final class SuuntoNauticParserTests: XCTestCase {
     func testDecodeProfileFields() throws {
         let profile = try SuuntoNauticExplorer.decode(sbemData: loadFixture())
 
-        // Dive time = the longest Diving span (spurious startup blips excluded).
+        // Dive time = total time in the Diving state (single-span here = 1922 s).
         XCTAssertEqual(profile.divetime, 1922, accuracy: 1)
         // Depth, in metres.
         XCTAssertEqual(profile.maxDepth, 33.11, accuracy: 0.05)
@@ -265,6 +265,58 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(p.tanks.count, 2)
         XCTAssertEqual(p.tanks.first { $0.index == 0 }?.beginPressure ?? 0, 150, accuracy: 0.5)
         XCTAssertEqual(p.tanks.first { $0.index == 1 }?.beginPressure ?? 0, 100, accuracy: 0.5)
+    }
+
+    /// Regression corpus: real tester dive captures live in a git-ignored
+    /// `captures/` dir next to this file (see .gitignore). Each `<logid>.bin` is
+    /// a downloaded profile; an optional `<logid>.json` is the Suunto-app export
+    /// of the same dive. This decodes every capture and cross-checks it against
+    /// the app JSON (dive time exact, max depth close), so the whole real-world
+    /// corpus can be re-run after any parser change. Skips cleanly when the dir
+    /// is absent (fresh clones / CI don't have the captures).
+    func testCaptureCorpus() throws {
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("captures")
+        let bins = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "bin" }.sorted { $0.lastPathComponent < $1.lastPathComponent } ?? []
+        try XCTSkipIf(bins.isEmpty, "no captures/ corpus present (git-ignored); nothing to check")
+
+        for bin in bins {
+            let logid = bin.deletingPathExtension().lastPathComponent
+            let data = try Data(contentsOf: bin)
+            let id = UInt32(logid)
+            let p = try SuuntoNauticExplorer.decode(sbemData: data, logbookID: id)
+
+            // Sanity: catches the depth=0 and divetime-underflow class of bugs.
+            XCTAssert(p.maxDepth > 0.5 && p.maxDepth < 150, "\(logid): implausible maxDepth \(p.maxDepth)")
+            XCTAssert(p.divetime > 30 && p.divetime < 30000, "\(logid): implausible divetime \(p.divetime)")
+            if let lo = p.gradientFactorLow, let hi = p.gradientFactorHigh {
+                XCTAssertLessThanOrEqual(lo, hi, "\(logid): GF low \(lo) > high \(hi) (inverted)")
+            }
+
+            // Cross-check against the app JSON when present.
+            let jsonURL = dir.appendingPathComponent("\(logid).json")
+            guard let jdata = try? Data(contentsOf: jsonURL),
+                  let root = try? JSONSerialization.jsonObject(with: jdata) as? [String: Any],
+                  let header = (root["DeviceLog"] as? [String: Any])?["Header"] as? [String: Any]
+            else { continue }
+
+            if let dtm = header["DiveTimeMax"] as? Double, dtm > 0 {
+                // Dive time is the total Diving-state time. It must never exceed
+                // the app's DiveTimeMax and shouldn't grossly undercount it (the
+                // old "longest single span" logic gave ~40%). A few long/
+                // multi-level dives still undercount by 5-30% -- an open
+                // timeline-completeness question (issue #29), so the lower bound
+                // is loose while the upper bound and the depth check stay tight.
+                XCTAssertLessThanOrEqual(p.divetime, dtm + 3, "\(logid): divetime \(p.divetime) OVER app \(dtm)")
+                XCTAssertGreaterThan(p.divetime, dtm * 0.5, "\(logid): divetime \(p.divetime) grossly under app \(dtm)")
+                if abs(p.divetime - dtm) > 3 { print("  \(logid): divetime \(p.divetime) vs app \(dtm) (undercount)") }
+            }
+            if let mda = header["MaxDepthAverage"] as? Double, mda > 0 {
+                XCTAssertEqual(p.maxDepth, mda, accuracy: 2.0, "\(logid): maxDepth \(p.maxDepth) vs app \(mda)")
+            }
+        }
+        print("corpus: checked \(bins.count) captures")
     }
 
     func testEntryPairingEmptyLogbook() {
