@@ -178,4 +178,15 @@ final class SuuntoNauticParserTests: XCTestCase {
         // Exactly the two real dives, newest-first; header ts 1788224574 dropped.
         XCTAssertEqual(ids, [1788079236, 1787385018]) // Aug 30 and Aug 22, 2026
     }
+
+    func testEntryPairingEmptyLogbook() {
+        // Real /Logbook/Entries response from an empty Nautic S (kreitje, 0 dives):
+        // status 200, count 0, header + CRC only, no entry records. Must yield no
+        // dives (and not crash or misread a header field as a timestamp).
+        let entries: [UInt8] = [
+            0x01, 0x24, 0x0a, 0x24, 0x00, 0x00, 0x00, 0x00, 0x08, 0x3c,
+            0x08, 0x00, 0x00, 0x00, 0x37, 0x3b, 0x46, 0x0e,
+        ]
+        XCTAssertEqual(extractIDs(Data(entries)), [])
+    }
 }
