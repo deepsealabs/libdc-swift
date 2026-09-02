@@ -517,7 +517,18 @@ public class GenericParser {
             dateComponents.minute = Int(datetime.minute)
             dateComponents.second = Int(datetime.second)
 
-            let calendar = Calendar(identifier: .gregorian)
+            // Most families report the dive's local wall-clock, so the
+            // components are interpreted in the device's local calendar. The
+            // Suunto Nautic is different: its datetime is derived from the GPS
+            // fix and returned as true UTC (dc_datetime_gmtime), so build the
+            // Date in UTC to preserve the correct absolute instant. The watch's
+            // local offset is not in the dive data (it's a device TZ setting the
+            // Suunto app reads separately, see issue #29), so display is left to
+            // localize into the viewer's timezone.
+            var calendar = Calendar(identifier: .gregorian)
+            if family == .suuntoNautic {
+                calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
+            }
             guard let d = calendar.date(from: dateComponents) else {
                 throw ParserError.invalidParameters
             }

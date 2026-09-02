@@ -128,8 +128,12 @@ final class SuuntoNauticParserTests: XCTestCase {
         // Standard fields flow through.
         XCTAssertEqual(dive.maxDepth, 33.11, accuracy: 0.05)
         XCTAssertFalse(dive.profile.isEmpty)
-        // Datetime present (GPS anchor on this dive) - didn't throw.
-        XCTAssertEqual(Calendar(identifier: .gregorian).component(.year, from: dive.datetime), 2026)
+        // Datetime must be the correct absolute UTC instant, not the GPS UTC
+        // components reinterpreted in the test machine's local calendar. The
+        // Nautic reports true UTC (from the GPS anchor), so GenericParser builds
+        // the Date in UTC; display localizes. This is TZ-independent: it fails
+        // if the parser ever rebuilds Nautic dates in the local calendar again.
+        XCTAssertEqual(dive.datetime.timeIntervalSince1970, 1787752091, accuracy: 1.0)
         // The vendor channel carried the non-standard series generically.
         XCTAssertFalse(dive.vendorSamples.isEmpty)
         XCTAssertTrue(dive.vendorSamples.allSatisfy {
