@@ -242,6 +242,31 @@ final class SuuntoNauticParserTests: XCTestCase {
         _ = buf
     }
 
+    func testShortChunkReadsMultipleTanks() throws {
+        // A 141 B extended-status chunk carries cylinder slots 0-4 (idx bytes
+        // 0-4), each an 18 B record with pressure at base+2. The reader must
+        // pick up every slot whose full record fits (so a 2-transmitter dive
+        // shows both cylinders) while ignoring the partial slot past the end
+        // (which caused phantom tanks). Build tank 0 (150 bar) + tank 1 (100
+        // bar) in a 141 B chunk and confirm both decode, and only those two.
+        var payload = [UInt8](repeating: 0, count: 141)
+        func putTank(_ i: Int, _ pa: UInt32) {
+            let base = 42 + i * 18
+            payload[base] = UInt8(i)                    // index byte
+            payload[base + 2] = UInt8(pa & 0xff); payload[base + 3] = UInt8((pa >> 8) & 0xff)
+            payload[base + 4] = UInt8((pa >> 16) & 0xff); payload[base + 5] = UInt8((pa >> 24) & 0xff)
+        }
+        putTank(0, 15_000_000)                          // 150 bar
+        putTank(1, 10_000_000)                          // 100 bar
+        // slots 2-4 left as index bytes with zero pressure (skipped, not phantom)
+        payload[42 + 2 * 18] = 2; payload[42 + 3 * 18] = 3; payload[42 + 4 * 18] = 4
+        let buf: [UInt8] = Array("SBEM0103".utf8) + [0x16, 141] + payload
+        let p = try SuuntoNauticExplorer.decode(sbemData: Data(buf), logbookID: 1787000000)
+        XCTAssertEqual(p.tanks.count, 2)
+        XCTAssertEqual(p.tanks.first { $0.index == 0 }?.beginPressure ?? 0, 150, accuracy: 0.5)
+        XCTAssertEqual(p.tanks.first { $0.index == 1 }?.beginPressure ?? 0, 100, accuracy: 0.5)
+    }
+
     func testEntryPairingEmptyLogbook() {
         // Real /Logbook/Entries response from an empty Nautic S (kreitje, 0 dives):
         // status 200, count 0, header + CRC only, no entry records. Must yield no
