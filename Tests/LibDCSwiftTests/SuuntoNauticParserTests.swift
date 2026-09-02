@@ -179,6 +179,29 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(ids, [1788079236, 1787385018]) // Aug 30 and Aug 22, 2026
     }
 
+    func testExtendedStatusVariableLength() throws {
+        // The 0x16 extended-status chunk is VARIABLE length: 195 bytes on the
+        // Ocean/Nautic but 141 on the Nautic S (and other firmware). It must not
+        // be in the ghost-chunk fixed-length table -- hardcoding 195 rejected
+        // every Nautic S chunk, zeroing depth and underflowing divetime (issue
+        // #29, nandodiver). Build a minimal SBEM profile whose only 0x16 chunk is
+        // 141 bytes with depth = 10.0 m and assert the parser reads it.
+        var buf: [UInt8] = Array("SBEM0103".utf8)
+        buf += [0x16, 141]                       // id, length (not 195)
+        buf += [0x00, 0x00]                      // timeline delta = 0
+        buf += [0x00, 0x00, 0x20, 0x41]          // depth float32 LE = 10.0
+        buf += [UInt8](repeating: 0, count: 141 - 6)
+        let data = Data(buf)
+        let dive: DiveData = try data.withUnsafeBytes { raw in
+            try GenericParser.parseDiveData(
+                family: .suuntoNautic, model: 0, diveNumber: 1,
+                diveData: raw.bindMemory(to: UInt8.self).baseAddress!, dataSize: data.count,
+                fingerprint: Data([0x00, 0x00, 0x00, 0x6a]),
+                fallbackDate: Date(timeIntervalSince1970: 1787000000))
+        }
+        XCTAssertEqual(dive.maxDepth, 10.0, accuracy: 0.01) // 0 before the fix
+    }
+
     func testEntryPairingEmptyLogbook() {
         // Real /Logbook/Entries response from an empty Nautic S (kreitje, 0 dives):
         // status 200, count 0, header + CRC only, no entry records. Must yield no
