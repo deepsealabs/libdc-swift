@@ -102,6 +102,12 @@ struct DeviceExplorerView: View {
                     sendRequest(path: customPath)
                 }
                 .disabled(busy || customPath.isEmpty)
+                Button("Capture raw (this path)") {
+                    captureRaw(path: customPath)
+                }
+                .disabled(busy || customPath.isEmpty)
+            } footer: {
+                Text("\"Send\" does a plain GET. \"Capture raw\" does the full fetch and exports the bytes, for probing resources like /Mem/Logbook/Entries. Then use Export Raw Capture below.")
             }
 
             Section("Download Dive by Logbook ID") {
