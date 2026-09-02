@@ -179,6 +179,24 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(ids, [1788079236, 1787385018]) // Aug 30 and Aug 22, 2026
     }
 
+    func testSummaryGradientFactorOrdering() throws {
+        // GF low is at Summary offset 0x35 and GF high at 0x33, NOT the reverse.
+        // Real Summaries store the bytes so that reading 0x33 as low gives low >
+        // high (physically invalid): Nautic 75/35 -> 35/75, Nautic S 85/40 ->
+        // 40/85. Build a two-section buffer (empty profile + a Summary whose
+        // byte@0x33 = 85 and byte@0x35 = 40) and assert GF decodes to 40 low /
+        // 85 high. Guards against the offsets being swapped again (issue #29).
+        var buf: [UInt8] = Array("SBEM0103".utf8)     // profile section (empty)
+        var summary = Array("SBEM0103".utf8) + [UInt8](repeating: 0, count: 0x40)
+        summary[0x33] = 85                             // GF high byte (offset in the Summary section)
+        summary[0x35] = 40                             // GF low byte
+        buf += summary
+        let data = Data(buf)
+        let p = try SuuntoNauticExplorer.decode(sbemData: data, logbookID: 1787000000)
+        XCTAssertEqual(p.gradientFactorLow, 40)        // was 85 before the fix
+        XCTAssertEqual(p.gradientFactorHigh, 85)       // was 40 before the fix
+    }
+
     func testExtendedStatusVariableLength() throws {
         // The 0x16 extended-status chunk is VARIABLE length: 195 bytes on the
         // Ocean/Nautic but 141 on the Nautic S (and other firmware). It must not
