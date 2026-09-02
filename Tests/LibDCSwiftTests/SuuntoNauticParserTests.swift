@@ -220,6 +220,28 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(dive.maxDepth, 10.0, accuracy: 0.01) // 0 before the fix
     }
 
+    func testNauticSTankPressureShortChunk() throws {
+        // Tank 0 pressure is at extended-status offset 44 on BOTH the 195 B
+        // Ocean/Nautic chunk and the 141 B Nautic S chunk. The parser used to
+        // require the full 8-slot array (>=186 B) and so dropped ALL tank
+        // pressure on the Nautic S. Build a 141 B 0x16 chunk with tank 0 at
+        // offset 42 (idx byte 0, pressure 150 bar at offset 44) and confirm the
+        // tank decodes (validated against a Nautic S pod dive's app JSON, #29).
+        var payload = [UInt8](repeating: 0, count: 141)
+        // offset 2..6 = depth float 5.0 m
+        payload[2] = 0x00; payload[3] = 0x00; payload[4] = 0xA0; payload[5] = 0x40
+        // offset 42 = tank 0 index byte (0); offset 44 = pressure uint32 LE Pa = 15_000_000 (150 bar)
+        let pa: UInt32 = 15_000_000
+        payload[44] = UInt8(pa & 0xff); payload[45] = UInt8((pa >> 8) & 0xff)
+        payload[46] = UInt8((pa >> 16) & 0xff); payload[47] = UInt8((pa >> 24) & 0xff)
+        var buf: [UInt8] = Array("SBEM0103".utf8) + [0x16, 141] + payload
+        let data = Data(buf)
+        let p = try SuuntoNauticExplorer.decode(sbemData: data, logbookID: 1787000000)
+        XCTAssertEqual(p.tanks.count, 1)                       // was 0 before the fix
+        XCTAssertEqual(p.tanks.first?.beginPressure ?? 0, 150, accuracy: 0.5)
+        _ = buf
+    }
+
     func testEntryPairingEmptyLogbook() {
         // Real /Logbook/Entries response from an empty Nautic S (kreitje, 0 dives):
         // status 200, count 0, header + CRC only, no entry records. Must yield no
