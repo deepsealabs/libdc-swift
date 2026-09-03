@@ -193,10 +193,11 @@ public enum SuuntoNauticExplorer {
                 (Double(gx) * Self.gyroScaleDegPerSec, Double(gy) * Self.gyroScaleDegPerSec, Double(gz) * Self.gyroScaleDegPerSec)
             }
         }
-        /// A 2 Hz auxiliary record (5x int16). NOT the dive route: the watch
-        /// does not store an X/Y/Z track (the app dead-reckons it from raw IMU).
-        /// Semantics of these 5 fields are unknown; exposed for future analysis.
-        public struct Aux2HzSample { public let time: TimeInterval; public let features: [Int] }
+        /// DiveRouteFeatures (5x uint16), the app's SBEM name for these fields.
+        /// They are INPUTS to the dive-route tracking algorithm, NOT the X/Y/Z
+        /// track (the watch does not store the track; the app dead-reckons it
+        /// from the raw IMU). Individual feature meanings are unknown.
+        public struct DiveRouteFeaturesSample { public let time: TimeInterval; public let features: [Int] }
         /// Decompression status, from the standard DC_SAMPLE_DECO channel.
         public struct DecoSample {
             public enum Kind { case noDeco, decoStop }
@@ -282,7 +283,7 @@ public enum SuuntoNauticExplorer {
         public var batteryProfile: [BatterySample]
         public var gpsAccuracyProfile: [GPSAccuracySample]
         public var imuProfile: [IMUSample]
-        public var aux2HzProfile: [Aux2HzSample]
+        public var diveRouteFeaturesProfile: [DiveRouteFeaturesSample]
         public var decoProfile: [DecoSample]
         public var gradientFactorProfile: [GradientFactorSample]
     }
@@ -405,8 +406,8 @@ public enum SuuntoNauticExplorer {
                     collector.imu.append(.init(time: t, ax: i16(1), ay: i16(3), az: i16(5),
                                                 gx: i16(7), gy: i16(9), gz: i16(11),
                                                 mx: i16(13), my: i16(15), mz: i16(17)))
-                case 4 where size >= 11: // 2 Hz auxiliary: 5x int16 (not the dive route)
-                    collector.aux2Hz.append(.init(time: t, features: [i16(1), i16(3), i16(5), i16(7), i16(9)]))
+                case 4 where size >= 11: // DiveRouteFeatures: 5x uint16 (algo inputs, not the track)
+                    collector.diveRouteFeatures.append(.init(time: t, features: [u16(1), u16(3), u16(5), u16(7), u16(9)]))
                 case 5 where size >= 7: // real-time gradient factors
                     collector.gf.append(.init(time: t, gf99: i16(1), gfSurface: i16(3), gfLeading: i16(5)))
                 default:
@@ -437,7 +438,7 @@ public enum SuuntoNauticExplorer {
             batteryProfile: collector.battery,
             gpsAccuracyProfile: collector.gpsAccuracy,
             imuProfile: collector.imu,
-            aux2HzProfile: collector.aux2Hz,
+            diveRouteFeaturesProfile: collector.diveRouteFeatures,
             decoProfile: collector.deco,
             gradientFactorProfile: collector.gf
         )
@@ -461,7 +462,7 @@ private final class SampleCollector {
     var battery: [SuuntoNauticExplorer.DecodedProfile.BatterySample] = []
     var gpsAccuracy: [SuuntoNauticExplorer.DecodedProfile.GPSAccuracySample] = []
     var imu: [SuuntoNauticExplorer.DecodedProfile.IMUSample] = []
-    var aux2Hz: [SuuntoNauticExplorer.DecodedProfile.Aux2HzSample] = []
+    var diveRouteFeatures: [SuuntoNauticExplorer.DecodedProfile.DiveRouteFeaturesSample] = []
     var deco: [SuuntoNauticExplorer.DecodedProfile.DecoSample] = []
     var gf: [SuuntoNauticExplorer.DecodedProfile.GradientFactorSample] = []
 }

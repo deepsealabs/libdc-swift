@@ -96,10 +96,10 @@ final class SuuntoNauticParserTests: XCTestCase {
         }.sorted()
         let median = mags[mags.count / 2]
         XCTAssertEqual(median, 1.0, accuracy: 0.1, "median accel magnitude should be ~1g")
-        // 2 Hz auxiliary channel (5x int16; not the dive route). On this 195 B
-        // watch it is chunk 0x24; on 141 B watches it is 0x23 (payload 16).
-        XCTAssertFalse(profile.aux2HzProfile.isEmpty)
-        XCTAssertEqual(profile.aux2HzProfile.first?.features.count, 5)
+        // DiveRouteFeatures (5x uint16; app schema name). Algo inputs, not the
+        // X/Y/Z track. On this 195 B watch it is chunk 0x24; on 141 B it is 0x23.
+        XCTAssertFalse(profile.diveRouteFeaturesProfile.isEmpty)
+        XCTAssertEqual(profile.diveRouteFeaturesProfile.first?.features.count, 5)
     }
 
     func testDecoAndGradientFactorsDecode() throws {
