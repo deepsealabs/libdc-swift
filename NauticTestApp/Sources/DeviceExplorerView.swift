@@ -2,29 +2,33 @@ import SwiftUI
 import Charts
 import LibDCSwift
 import LibDCBridge
+import Clibdivecomputer
 
-/// Per-device explorer/tester screen. Today it drives the Suunto
-/// Nautic/Ocean protocol (raw RPC primitives, dive listing via
-/// `SuuntoNauticExplorer.listDives`, download + decode) — as more device
-/// families gain an explorer, this screen dispatches by connected family.
-/// Each dive ID is a UNIX timestamp, so dives are shown as dates; tap one
-/// to download and decode it. See `SuuntoNauticExplorer.swift` and
-/// `suunto_nautic.h` in the libdivecomputer submodule for what is/isn't
-/// understood about this protocol.
+/// Per-device explorer/tester screen, dispatched by the connected device
+/// family. Every family shares the generic flow — download dives through the
+/// standard `DiveLogRetriever` (dc_device_foreach) and inspect the decoded
+/// `DiveData` — while a family that also has a low-level transport worth
+/// probing (currently only Suunto Nautic/Ocean) adds its own advanced panel.
 struct DeviceExplorerView: View {
     let devicePtr: UnsafeMutablePointer<device_data_t>
     @ObservedObject var bluetoothManager: CoreBluetoothManager
+    @StateObject private var viewModel = DiveDataViewModel()
 
-    @State private var customPath: String = "/System/Mode"
-    @State private var logbookID: String = ""
+    @State private var family: DeviceConfiguration.DeviceFamily?
     @State private var busy = false
     @State private var statusMessage: String?
+
+    // Suunto Nautic advanced panel state.
+    @State private var customPath: String = "/System/Mode"
+    @State private var logbookID: String = ""
     @State private var lastResponse: Data = Data()
     @State private var lastLabel: String = ""
     @State private var shareItems: [Any]?
     @State private var decodedProfile: SuuntoNauticExplorer.DecodedProfile?
     @State private var diveNotes: String = ""
     @State private var diveIDs: [UInt32] = []
+
+    private var isNautic: Bool { family == .suuntoNautic }
 
     private static let commonPaths = [
         "/System/Mode",
@@ -35,186 +39,61 @@ struct DeviceExplorerView: View {
     var body: some View {
         Form {
             Section("Connected") {
-                Text(bluetoothManager.connectedDevice?.name ?? "Suunto Nautic/Ocean")
+                Text(bluetoothManager.connectedDevice?.name ?? "Dive computer")
                     .font(.headline)
+                LabeledContent("Family", value: familyLabel)
             }
 
-            Section("Dives") {
-                Button {
-                    listDives()
-                } label: {
-                    Label("List Dives", systemImage: "arrow.clockwise")
-                }
-                .disabled(busy)
-
-                ForEach(diveIDs, id: \.self) { id in
-                    Button {
-                        logbookID = String(id)
-                        downloadDive(id: String(id))
-                    } label: {
-                        HStack {
-                            Text(formatDiveDate(id))
-                            Spacer()
-                            Text(String(id)).font(.caption).foregroundColor(.secondary)
-                        }
-                    }
-                    .disabled(busy)
-                }
-
-                if diveIDs.isEmpty {
-                    Text("Tap List Dives to fetch real dive IDs from the watch.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-
-            Section("Quick Requests") {
-                ForEach(Self.commonPaths, id: \.self) { path in
-                    Button {
-                        sendRequest(path: path)
-                    } label: {
-                        Label(path, systemImage: "arrow.up.arrow.down")
-                    }
-                    .disabled(busy)
-                }
-            }
-
+            // Generic flow: works for any connected family.
             Section {
                 Button {
-                    captureRaw(path: "/Logbook/Entries")
+                    downloadAllDives()
                 } label: {
-                    Label("Capture raw /Logbook/Entries", systemImage: "ladybug")
+                    Label("Download Dives", systemImage: "square.and.arrow.down")
                 }
                 .disabled(busy)
+
+                ForEach(Array(viewModel.dives.enumerated()), id: \.offset) { _, dive in
+                    NavigationLink {
+                        DiveDetailView(dive: dive)
+                    } label: {
+                        HStack {
+                            Text(dive.datetime.formatted(date: .abbreviated, time: .shortened))
+                            Spacer()
+                            Text(String(format: "%.1f m", dive.maxDepth))
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                }
+
+                if viewModel.dives.isEmpty {
+                    Text("Tap Download Dives to enumerate and decode every dive through the standard pipeline.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
             } header: {
-                Text("Diagnostics")
+                Text("Dives")
             } footer: {
-                Text("If List Dives fails, tap this to fetch the raw /Logbook/Entries frame without decoding it, then use Export Raw Capture below and send us the file. This captures the exact bytes even when listing errors out.")
+                Text("Uses dc_device_foreach and the generic parser, so this works for every family this package supports.")
             }
 
-            Section("Custom GET Request") {
-                TextField("/Some/Path", text: $customPath)
-                    .autocorrectionDisabled()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    #endif
-                Button("Send") {
-                    sendRequest(path: customPath)
-                }
-                .disabled(busy || customPath.isEmpty)
-            }
-
-            Section("Download Dive by Logbook ID") {
-                TextField("e.g. 1787752091", text: $logbookID)
-                    #if os(iOS)
-                    .keyboardType(.numberPad)
-                    #endif
-                Button("Download & Decode") {
-                    downloadDive(id: logbookID)
-                }
-                .disabled(busy || logbookID.isEmpty)
-                Text("Downloads and decodes depth, temperature, tank pressure, dive events, GPS, and the dive date/time for this dive.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
-
-            if let profile = decodedProfile {
-                Section("Decoded Profile") {
-                    if let start = profile.startDate {
-                        LabeledContent("Date", value: start.formatted(date: .abbreviated, time: .shortened))
-                    }
-                    LabeledContent("Dive time", value: formatDuration(profile.divetime))
-                    LabeledContent("Max depth", value: String(format: "%.1f m", profile.maxDepth))
-                    LabeledContent("Avg depth", value: String(format: "%.1f m", profile.avgDepth))
-                    if let tmin = profile.temperatureMinimum, let tmax = profile.temperatureMaximum {
-                        LabeledContent("Temperature", value: String(format: "%.1f–%.1f °C", tmin, tmax))
-                    }
-                    ForEach(profile.tanks, id: \.index) { tank in
-                        LabeledContent("Tank \(tank.index)", value: String(format: "%.0f → %.0f bar", tank.beginPressure, tank.endPressure))
-                    }
-                    if let low = profile.gradientFactorLow, let high = profile.gradientFactorHigh {
-                        LabeledContent("Gradient factors", value: "\(low)/\(high)")
-                    }
-                    ForEach(Array(profile.gases.enumerated()), id: \.offset) { idx, gas in
-                        LabeledContent("Gas \(idx + 1)", value: gas.hePercent > 0
-                            ? "O₂ \(gas.o2Percent)% / He \(gas.hePercent)%"
-                            : "O₂ \(gas.o2Percent)%")
-                    }
-                }
-
-                if !profile.events.isEmpty {
-                    Section("Dive Events (\(profile.events.count))") {
-                        ForEach(Array(profile.events.enumerated()), id: \.offset) { _, event in
-                            HStack {
-                                Text(event.label)
-                                Spacer()
-                                Text(formatDuration(event.time))
-                                    .font(.caption).foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                }
-
-                if !profile.depthProfile.isEmpty {
-                    Section("Depth Profile") {
-                        Chart(profile.depthProfile, id: \.time) { sample in
-                            LineMark(x: .value("Time", sample.time), y: .value("Depth", sample.depth))
-                        }
-                        .chartYScale(domain: .automatic(reversed: true))
-                        .frame(height: 180)
-                    }
-                }
-
-                Section("Help Map the Remaining Data") {
-                    Text("Depth, temperature, tank pressure, dive events, GPS, and the dive date/time all decode now. If anything notable happened on this dive (alarm, gas switch, lap button, low tank warning), describe it below — pairing your notes (or an official Suunto app export of this same dive, if you can get one) with the raw capture is what confirms the decode.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    TextField("e.g. \"hit low-tank alarm around 20 min\"", text: $diveNotes, axis: .vertical)
-                        .lineLimit(2...4)
-                }
+            if isNautic {
+                nauticPanel
             }
 
             if busy {
                 Section {
-                    HStack {
-                        ProgressView()
-                        Text("Working…")
-                    }
+                    HStack { ProgressView(); Text("Working…") }
                 }
             }
 
             if let statusMessage {
                 Section("Status") {
-                    Text(statusMessage)
-                        .font(.footnote)
-                }
-            }
-
-            if !lastResponse.isEmpty {
-                Section("Last Response — \(lastLabel) (\(lastResponse.count) bytes)") {
-                    // Bounded preview only: rendering a full decompressed dive
-                    // (tens of KB) as one Text froze the main thread. Export
-                    // Raw Capture still writes every byte.
-                    ScrollView {
-                        Text(hexDump(lastResponse, maxBytes: Self.hexPreviewLimit))
-                            .font(.system(.footnote, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(maxHeight: 240)
-
-                    if lastResponse.count > Self.hexPreviewLimit {
-                        Text("Showing the first \(Self.hexPreviewLimit) of \(lastResponse.count) bytes. Export the raw capture for the rest.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-
-                    Button("Export Raw Capture") {
-                        exportCapture()
-                    }
+                    Text(statusMessage).font(.footnote)
                 }
             }
         }
         .navigationTitle("Device Explorer")
+        .onAppear(perform: detectFamily)
         .sheet(isPresented: Binding(
             get: { shareItems != nil },
             set: { if !$0 { shareItems = nil } }
@@ -223,9 +102,186 @@ struct DeviceExplorerView: View {
         }
     }
 
-    private func listDives() {
+    private var familyLabel: String {
+        guard let family else { return "detecting…" }
+        return isNautic ? "Suunto Nautic/Ocean" : "\(family)"
+    }
+
+    // MARK: - Suunto Nautic advanced panel (RPC transport exploration)
+
+    @ViewBuilder
+    private var nauticPanel: some View {
+        Section("Nautic: Dives by Logbook ID") {
+            Button {
+                listDives()
+            } label: {
+                Label("List Dives (RPC)", systemImage: "arrow.clockwise")
+            }
+            .disabled(busy)
+
+            ForEach(diveIDs, id: \.self) { id in
+                Button {
+                    logbookID = String(id)
+                    downloadDive(id: String(id))
+                } label: {
+                    HStack {
+                        Text(formatDiveDate(id))
+                        Spacer()
+                        Text(String(id)).font(.caption).foregroundColor(.secondary)
+                    }
+                }
+                .disabled(busy)
+            }
+        }
+
+        Section("Nautic: Quick Requests") {
+            ForEach(Self.commonPaths, id: \.self) { path in
+                Button {
+                    sendRequest(path: path)
+                } label: {
+                    Label(path, systemImage: "arrow.up.arrow.down")
+                }
+                .disabled(busy)
+            }
+        }
+
+        Section {
+            Button {
+                captureRaw(path: "/Logbook/Entries")
+            } label: {
+                Label("Capture raw /Logbook/Entries", systemImage: "ladybug")
+            }
+            .disabled(busy)
+        } header: {
+            Text("Nautic: Diagnostics")
+        } footer: {
+            Text("Fetches the raw /Logbook/Entries frame without decoding it, then use Export Raw Capture below and send us the file. Captures the exact bytes even when listing errors out.")
+        }
+
+        Section {
+            TextField("/Some/Path", text: $customPath)
+                .autocorrectionDisabled()
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                #endif
+            Button("Send") { sendRequest(path: customPath) }
+                .disabled(busy || customPath.isEmpty)
+            Button("Capture raw (this path)") { captureRaw(path: customPath) }
+                .disabled(busy || customPath.isEmpty)
+        } header: {
+            Text("Nautic: Custom GET Request")
+        } footer: {
+            Text("\"Send\" does a plain GET. \"Capture raw\" does the full fetch and exports the bytes, for probing resources like /Mem/Logbook/Entries.")
+        }
+
+        Section("Nautic: Download & Decode by ID") {
+            TextField("e.g. 1787752091", text: $logbookID)
+                #if os(iOS)
+                .keyboardType(.numberPad)
+                #endif
+            Button("Download & Decode") { downloadDive(id: logbookID) }
+                .disabled(busy || logbookID.isEmpty)
+        }
+
+        if let profile = decodedProfile {
+            nauticDecodedProfile(profile)
+        }
+
+        if !lastResponse.isEmpty {
+            Section("Last Response — \(lastLabel) (\(lastResponse.count) bytes)") {
+                ScrollView {
+                    Text(hexDump(lastResponse, maxBytes: Self.hexPreviewLimit))
+                        .font(.system(.footnote, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 240)
+
+                if lastResponse.count > Self.hexPreviewLimit {
+                    Text("Showing the first \(Self.hexPreviewLimit) of \(lastResponse.count) bytes. Export the raw capture for the rest.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Button("Export Raw Capture") { exportCapture() }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func nauticDecodedProfile(_ profile: SuuntoNauticExplorer.DecodedProfile) -> some View {
+        Section("Decoded Profile") {
+            if let start = profile.startDate {
+                LabeledContent("Date", value: start.formatted(date: .abbreviated, time: .shortened))
+            }
+            LabeledContent("Dive time", value: formatDuration(profile.divetime))
+            LabeledContent("Max depth", value: String(format: "%.1f m", profile.maxDepth))
+            LabeledContent("Avg depth", value: String(format: "%.1f m", profile.avgDepth))
+            if let low = profile.gradientFactorLow, let high = profile.gradientFactorHigh {
+                LabeledContent("Gradient factors", value: "\(low)/\(high)")
+            }
+            ForEach(profile.tanks, id: \.index) { tank in
+                LabeledContent("Tank \(tank.index)", value: String(format: "%.0f → %.0f bar", tank.beginPressure, tank.endPressure))
+            }
+        }
+
+        if !profile.events.isEmpty {
+            Section("Dive Events (\(profile.events.count))") {
+                ForEach(Array(profile.events.enumerated()), id: \.offset) { _, event in
+                    HStack {
+                        Text(event.label)
+                        Spacer()
+                        Text(formatDuration(event.time)).font(.caption).foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+
+        if !profile.depthProfile.isEmpty {
+            Section("Depth Profile") {
+                Chart(profile.depthProfile, id: \.time) { sample in
+                    LineMark(x: .value("Time", sample.time), y: .value("Depth", sample.depth))
+                }
+                .chartYScale(domain: .automatic(reversed: true))
+                .frame(height: 180)
+            }
+        }
+    }
+
+    // MARK: - Generic download
+
+    private func downloadAllDives() {
+        guard let peripheral = bluetoothManager.connectedDevice else {
+            statusMessage = "No connected device."
+            return
+        }
         busy = true
-        statusMessage = nil
+        statusMessage = "Downloading dives…"
+        DiveLogRetriever.retrieveDiveLogs(
+            from: devicePtr,
+            device: peripheral,
+            viewModel: viewModel,
+            bluetoothManager: bluetoothManager
+        ) { success in
+            DispatchQueue.main.async {
+                busy = false
+                statusMessage = success
+                    ? "Downloaded \(viewModel.dives.count) dive(s)."
+                    : "Download failed: \(viewModel.status)"
+            }
+        }
+    }
+
+    private func detectFamily() {
+        guard family == nil, let name = bluetoothManager.connectedDevice?.name else { return }
+        var dcFamily = DC_FAMILY_NULL
+        var dcModel: UInt32 = 0
+        if get_device_info_from_name(name, &dcFamily, &dcModel) == DC_STATUS_SUCCESS {
+            family = DeviceConfiguration.DeviceFamily(dcFamily: dcFamily)
+        }
+    }
+
+    // MARK: - Suunto Nautic RPC primitives (transport is Suunto-specific)
+
+    private func listDives() {
+        busy = true; statusMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let ids = try SuuntoNauticExplorer.listDives(device: devicePtr)
@@ -252,8 +308,7 @@ struct DeviceExplorerView: View {
     }
 
     private func captureRaw(path: String) {
-        busy = true
-        statusMessage = nil
+        busy = true; statusMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let data = try SuuntoNauticExplorer.fetchRaw(device: devicePtr, path: path)
@@ -273,12 +328,8 @@ struct DeviceExplorerView: View {
     }
 
     private func sendRequest(path: String) {
-        // The logbook-listing endpoints need the fetch sequence
-        // (SuuntoNauticExplorer.fetch); a plain GET returns only the ACK for
-        // them. /System/Mode and other small endpoints answer in the ACK.
         let needsFetch = path == "/Logbook/Entries" || path == "/Logbook/UnsynchronisedLogs"
-        busy = true
-        statusMessage = nil
+        busy = true; statusMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let data = needsFetch
@@ -300,33 +351,49 @@ struct DeviceExplorerView: View {
     }
 
     private func downloadDive(id: String) {
-        busy = true
-        statusMessage = nil
-        decodedProfile = nil
+        busy = true; statusMessage = nil; decodedProfile = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // download() returns the profile with the /Summary SBEM appended,
-                // so decode() surfaces GF/gas via the standard parser fields.
                 let data = try SuuntoNauticExplorer.download(device: devicePtr, logbookID: id)
                 let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
                 DispatchQueue.main.async {
                     lastResponse = data
                     lastLabel = "Download #\(id)"
                     decodedProfile = profile
-                    if profile != nil {
-                        statusMessage = "Decoded logbook entry \(id) (\(data.count) bytes)."
-                    } else {
-                        statusMessage = "Downloaded \(data.count) bytes for \(id), but decoding failed — still worth exporting."
-                    }
+                    statusMessage = profile != nil
+                        ? "Decoded logbook entry \(id) (\(data.count) bytes)."
+                        : "Downloaded \(data.count) bytes for \(id), but decoding failed — still worth exporting."
                     busy = false
                 }
             } catch {
+                let msg = describeDownloadFailure(id: id, error: error)
                 DispatchQueue.main.async {
-                    statusMessage = "Download of \(id) failed: \(error)"
+                    statusMessage = msg
                     busy = false
                 }
             }
         }
+    }
+
+    private func describeDownloadFailure(id: String, error: Error) -> String {
+        var statusText = "\(error)"
+        if case SuuntoNauticExplorer.ExplorerError.requestFailed(let st) = error {
+            statusText = "status \(st.rawValue)"
+        }
+        func probe(_ name: String) -> String {
+            let path = "/Logbook/byId/\(id)/\(name)"
+            if let data = try? SuuntoNauticExplorer.fetch(device: devicePtr, path: path), !data.isEmpty {
+                return "\(name): \(data.count) B"
+            }
+            return "\(name): unavailable"
+        }
+        let summary = probe("Summary")
+        let descriptors = probe("Descriptors")
+        let dataGone = statusText.contains("-9") || statusText.contains("-8")
+        let lead = dataGone
+            ? "Dive #\(id): raw profile (/Data) unavailable (\(statusText)). If this is an older dive, its raw data has been overwritten on the watch and is no longer downloadable over Bluetooth — only the most recent dives stay available."
+            : "Download of \(id) failed: \(statusText)."
+        return "\(lead)\nPer-resource: /Data unavailable, \(summary), \(descriptors)."
     }
 
     private func exportCapture() {
@@ -340,7 +407,6 @@ struct DeviceExplorerView: View {
         }
 
         var items: [Any] = [binURL]
-
         if !diveNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let notesURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(base)_notes.txt")
             let contents = "Notes for \(lastLabel):\n\(diveNotes)\n"
@@ -348,7 +414,6 @@ struct DeviceExplorerView: View {
                 items.append(notesURL)
             }
         }
-
         shareItems = items
     }
 
@@ -357,8 +422,6 @@ struct DeviceExplorerView: View {
         return String(format: "%d:%02d", total / 60, total % 60)
     }
 
-    /// Cap on bytes hexDump renders on screen; a full dive as one Text froze
-    /// the UI. Export still writes every byte.
     private static let hexPreviewLimit = 2048
 
     private func hexDump(_ data: Data, maxBytes: Int = .max) -> String {
@@ -375,6 +438,97 @@ struct DeviceExplorerView: View {
             offset = end
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// Generic decoded-dive detail, driven entirely by the standard `DiveData`
+/// the generic parser produces, so it renders for any device family.
+private struct DiveDetailView: View {
+    let dive: DiveData
+
+    var body: some View {
+        Form {
+            Section("Summary") {
+                LabeledContent("Date", value: dive.datetime.formatted(date: .abbreviated, time: .shortened))
+                LabeledContent("Dive time", value: formatDuration(dive.divetime))
+                LabeledContent("Max depth", value: String(format: "%.1f m", dive.maxDepth))
+                LabeledContent("Avg depth", value: String(format: "%.1f m", dive.avgDepth))
+                if let tmin = dive.minTemperature, let tmax = dive.maxTemperature {
+                    LabeledContent("Temperature", value: String(format: "%.1f–%.1f °C", tmin, tmax))
+                }
+                if let deco = dive.decoModel, let low = deco.gfLow, let high = deco.gfHigh {
+                    LabeledContent("Gradient factors", value: "\(low)/\(high)")
+                }
+            }
+
+            if let tanks = dive.tanks, !tanks.isEmpty {
+                Section("Tanks") {
+                    ForEach(Array(tanks.enumerated()), id: \.offset) { idx, tank in
+                        LabeledContent("Tank \(idx)", value: String(format: "%.0f → %.0f bar", tank.beginPressure, tank.endPressure))
+                    }
+                }
+            }
+
+            if let gases = dive.gasMixes, !gases.isEmpty {
+                Section("Gas Mixes") {
+                    ForEach(Array(gases.enumerated()), id: \.offset) { idx, gas in
+                        let o2 = Int((gas.oxygen * 100).rounded()), he = Int((gas.helium * 100).rounded())
+                        LabeledContent("Gas \(idx + 1)", value: he > 0 ? "O₂ \(o2)% / He \(he)%" : "O₂ \(o2)%")
+                    }
+                }
+            }
+
+            let events = diveEvents
+            if !events.isEmpty {
+                Section("Dive Events (\(events.count))") {
+                    ForEach(Array(events.enumerated()), id: \.offset) { _, e in
+                        HStack {
+                            Text(e.label)
+                            Spacer()
+                            Text(formatDuration(e.time)).font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+
+            if !dive.profile.isEmpty {
+                Section("Depth Profile") {
+                    Chart(Array(dive.profile.enumerated()), id: \.offset) { _, point in
+                        LineMark(x: .value("Time", point.time), y: .value("Depth", point.depth))
+                    }
+                    .chartYScale(domain: .automatic(reversed: true))
+                    .frame(height: 180)
+                }
+            }
+
+            if !vendorKindCounts.isEmpty {
+                Section("Vendor Samples") {
+                    ForEach(vendorKindCounts, id: \.kind) { row in
+                        LabeledContent("Kind \(row.kind)", value: "\(row.count)")
+                    }
+                    Text("Non-standard series delivered through the generic DC_SAMPLE_VENDOR channel.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+        }
+        .navigationTitle(dive.datetime.formatted(date: .abbreviated, time: .shortened))
+    }
+
+    private var diveEvents: [(time: TimeInterval, label: String)] {
+        dive.profile.flatMap { point in
+            point.events.map { (point.time, String(describing: $0)) }
+        }
+    }
+
+    private var vendorKindCounts: [(kind: UInt8, count: Int)] {
+        Dictionary(grouping: dive.vendorSamples.compactMap { $0.data.first }, by: { $0 })
+            .map { (kind: $0.key, count: $0.value.count) }
+            .sorted { $0.kind < $1.kind }
+    }
+
+    private func formatDuration(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds)
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 

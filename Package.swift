@@ -22,9 +22,14 @@ let package = Package(
         .target(
             name: "Clibdivecomputer",
             path: "libdivecomputer",
+            // Exclude everything that isn't a library source. examples/ each
+            // carry their own main(); doc/, m4/ and contrib/ hold no library
+            // code; serial_win32.c is Windows-only.
             exclude: [
                 "doc",
                 "m4",
+                "examples",
+                "contrib",
                 "src/serial_win32.c"
             ],
             publicHeadersPath: "include",

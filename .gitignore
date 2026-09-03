@@ -47,3 +47,6 @@ Package.resolved
 .swiftpm/
 
 Examples/
+# Local, git-ignored regression corpus of real tester dive captures (issue #29).
+# Populate by hand; the corpus test skips gracefully when this dir is empty/absent.
+Tests/LibDCSwiftTests/captures/

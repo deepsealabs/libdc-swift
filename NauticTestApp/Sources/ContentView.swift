@@ -1,6 +1,8 @@
 import SwiftUI
 import CoreBluetooth
 import LibDCSwift
+import LibDCBridge
+import Clibdivecomputer
 
 struct ContentView: View {
     @StateObject private var bluetoothManager = CoreBluetoothManager.sharedManager
@@ -116,7 +118,15 @@ struct ContentView: View {
         // off the main thread, matching the pattern used elsewhere in
         // this package (see Examples/DeviceRow.swift).
         DispatchQueue.global(qos: .userInitiated).async {
-            let forcedModel: (DeviceConfiguration.DeviceFamily, UInt32) = (.suuntoNautic, 0)
+            // Detect the family from the advertised name so any supported device
+            // opens correctly. Fall back to Suunto Nautic (the family with the
+            // richest explorer) when detection can't identify it.
+            var dcFamily = DC_FAMILY_NULL
+            var dcModel: UInt32 = 0
+            let detected = get_device_info_from_name(name, &dcFamily, &dcModel) == DC_STATUS_SUCCESS
+                ? DeviceConfiguration.DeviceFamily(dcFamily: dcFamily).map { ($0, dcModel) }
+                : nil
+            let forcedModel = detected ?? (.suuntoNautic, UInt32(0))
             let success = DeviceConfiguration.openBLEDevice(
                 name: name,
                 deviceAddress: address,
@@ -126,7 +136,7 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 isConnecting = false
                 if !success {
-                    connectError = "Failed to connect/handshake with \(name). This may mean the EVA handshake payload needs updating for this unit — see suunto_nautic.h."
+                    connectError = "Failed to connect/handshake with \(name). For a Suunto Nautic/Ocean this can mean the EVA handshake needs updating for this unit (see suunto_nautic.h)."
                     connectedPeripheralID = nil
                 }
             }
