@@ -315,15 +315,29 @@ final class SuuntoNauticParserTests: XCTestCase {
             }
 
             if let dtm = header["DiveTimeMax"] as? Double, dtm > 0 {
-                // Dive time is the total Diving-state time. It must never exceed
-                // the app's DiveTimeMax and shouldn't grossly undercount it (the
-                // old "longest single span" logic gave ~40%). A few long/
-                // multi-level dives still undercount by 5-30% -- an open
-                // timeline-completeness question (issue #29), so the lower bound
-                // is loose while the upper bound and the depth check stay tight.
+                // Dive time = total time in the Suunto "Diving" DiveState (0x1C).
+                // This matches the app's DiveTimeMax exactly on every COMPLETE
+                // dive in the corpus (investigated for #36: depth-threshold span
+                // and total-submerged-time alternatives were all worse, off by
+                // 10-30 s on the dives that Diving-sum nails, so the DiveState
+                // sum is the right model). Two captures don't match exactly:
+                //  - an INCOMPLETE capture (profile ends well before the app's
+                //    dive time) undercounts because ~a third of the dive simply
+                //    isn't in the .bin -- detected below and exempted, not a bug;
+                //  - one dive (1788090406) is a ~5% outlier where the app counts
+                //    mid-dive Recovering spans its own way. Left as a known limit.
                 XCTAssertLessThanOrEqual(p.divetime, dtm + 3, "\(logid): divetime \(p.divetime) OVER app \(dtm)")
-                XCTAssertGreaterThan(p.divetime, dtm * 0.5, "\(logid): divetime \(p.divetime) grossly under app \(dtm)")
-                if abs(p.divetime - dtm) > 3 { print("  \(logid): divetime \(p.divetime) vs app \(dtm) (undercount)") }
+                let lastSample = p.depthProfile.last?.time ?? 0
+                let incompleteCapture = lastSample < dtm - 60   // profile doesn't reach the app's dive time
+                if incompleteCapture {
+                    if abs(p.divetime - dtm) > 3 {
+                        print("  \(logid): divetime \(p.divetime) vs app \(dtm) -- INCOMPLETE capture (profile ends at \(Int(lastSample))s)")
+                    }
+                } else {
+                    // Complete captures must be within 6% of the app (11/13 are exact).
+                    XCTAssertGreaterThan(p.divetime, dtm * 0.94, "\(logid): divetime \(p.divetime) under app \(dtm) on a complete capture")
+                    if abs(p.divetime - dtm) > 3 { print("  \(logid): divetime \(p.divetime) vs app \(dtm) (outlier)") }
+                }
             }
             if let mda = header["MaxDepthAverage"] as? Double, mda > 0 {
                 XCTAssertEqual(p.maxDepth, mda, accuracy: 2.0, "\(logid): maxDepth \(p.maxDepth) vs app \(mda)")
