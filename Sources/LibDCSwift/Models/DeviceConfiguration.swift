@@ -192,7 +192,7 @@ import LibDCBridge
         }
 
         /// Creates a DeviceFamily instance from libdivecomputer's dc_family_t type
-        init?(dcFamily: dc_family_t) {
+        public init?(dcFamily: dc_family_t) {
             switch dcFamily {
             case DC_FAMILY_SUUNTO_EONSTEEL: self = .suuntoEonSteel
             case DC_FAMILY_SHEARWATER_PETREL: self = .shearwaterPetrel
