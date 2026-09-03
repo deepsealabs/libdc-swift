@@ -22,9 +22,14 @@ let package = Package(
         .target(
             name: "Clibdivecomputer",
             path: "libdivecomputer",
+            // Exclude everything that isn't a library source. examples/ each
+            // carry their own main(); doc/, m4/ and contrib/ hold no library
+            // code; serial_win32.c is Windows-only.
             exclude: [
                 "doc",
                 "m4",
+                "examples",
+                "contrib",
                 "src/serial_win32.c"
             ],
             publicHeadersPath: "include",
@@ -76,7 +81,8 @@ let package = Package(
                 "Models/DeviceFingerprint.swift",
                 "ViewModels/DiveDataViewModel.swift",
                 "Parser/GenericParser.swift",
-                "DiveLogRetriever.swift"
+                "DiveLogRetriever.swift",
+                "SuuntoNauticExplorer.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
@@ -86,6 +92,15 @@ let package = Package(
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("Foundation")
             ]
+        ),
+        .testTarget(
+            name: "LibDCSwiftTests",
+            dependencies: ["LibDCSwift", "LibDCBridge", "Clibdivecomputer"],
+            path: "Tests/LibDCSwiftTests",
+            resources: [
+                .copy("Fixtures/suunto_nautic_1787752091.sbem"),
+                .copy("Fixtures/logbook_entries_multi.bin")
+            ]
         )
     ]
-) 
+)

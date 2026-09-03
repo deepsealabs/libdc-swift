@@ -63,6 +63,20 @@ static void debug_hexdump(const char *prefix, const void *data, size_t size) {
 }
 
 /*--------------------------------------------------------------------
+ * Debug logging toggle
+ *
+ * Off by default. When enabled, the libdivecomputer context runs at
+ * DC_LOGLEVEL_DEBUG (surfacing the protocol hexdumps) and the extra C-side
+ * traces below print. Leave it off for normal use; the host app turns it on
+ * with set_ble_debug_logging(1) when diagnosing a device.
+ *------------------------------------------------------------------*/
+static int g_ble_debug_logging = 0;
+
+void set_ble_debug_logging(int enabled) {
+    g_ble_debug_logging = enabled ? 1 : 0;
+}
+
+/*--------------------------------------------------------------------
  * Creates a BLE iostream instance
  *------------------------------------------------------------------*/
 static dc_status_t ble_iostream_create(dc_iostream_t **out, dc_context_t *context, ble_object_t *bleobj)
@@ -243,18 +257,21 @@ static void ble_device_event_cb(dc_device_t *device, dc_event_type_t event, cons
                 );
                 
                 if (fingerprint && fsize > 0) {
-                    printf("[C] Setting fingerprint on device: ");
-                    for (size_t i = 0; i < fsize; i++) {
-                        printf("0x%02x ", fingerprint[i]);
+                    if (g_ble_debug_logging) {
+                        printf("[C] Setting fingerprint on device: ");
+                        for (size_t i = 0; i < fsize; i++) {
+                            printf("0x%02x ", fingerprint[i]);
+                        }
+                        printf("(size=%zu)\n", fsize);
                     }
-                    printf("(size=%zu)\n", fsize);
 
                     dc_status_t fp_status = dc_device_set_fingerprint(device, fingerprint, fsize);
-                    printf("[C] dc_device_set_fingerprint returned: %d\n", fp_status);
+                    if (g_ble_debug_logging)
+                        printf("[C] dc_device_set_fingerprint returned: %d\n", fp_status);
 
                     devdata->fingerprint = fingerprint;
                     devdata->fsize = fsize;
-                } else {
+                } else if (g_ble_debug_logging) {
                     printf("[C] No fingerprint returned from callback (fingerprint=%p, fsize=%zu)\n",
                            (void*)fingerprint, fsize);
                 }
@@ -347,6 +364,11 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         return rc;
     }
     dc_context_set_logfunc(data->context, dc_log_callback, NULL);
+    // Default level is WARNING, which drops the DEBUG hexdumps (e.g. the
+    // Suunto Nautic handshake/protocol frames). Enable debug logging with
+    // set_ble_debug_logging(1) to surface them when diagnosing a device.
+    dc_context_set_loglevel(data->context,
+        g_ble_debug_logging ? DC_LOGLEVEL_DEBUG : DC_LOGLEVEL_WARNING);
 
     // Get descriptor for the device
     rc = find_descriptor_by_model(&descriptor, family, model);
@@ -512,7 +534,12 @@ static const struct name_pattern name_patterns[] = {
     { "EON Steel", "Suunto", "EON Steel", MATCH_EXACT },
     { "Suunto D5", "Suunto", "D5", MATCH_EXACT },
     { "EON Core", "Suunto", "EON Core", MATCH_EXACT },
-    
+    // EXPERIMENTAL: advertised names are a best guess pending confirmation
+    // from a real device (see suunto_nautic.h in the libdivecomputer
+    // submodule for the full status of this driver).
+    { "Suunto Nautic", "Suunto", "Nautic", MATCH_PREFIX },
+    { "Suunto Ocean", "Suunto", "Ocean", MATCH_PREFIX },
+
     // Scubapro dive computers
     { "G2", "Scubapro", "G2", MATCH_EXACT },
     { "HUD", "Scubapro", "G2 HUD", MATCH_EXACT },
@@ -694,8 +721,10 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     unsigned int model;
     dc_status_t rc;
     
-    // Try stored configuration first if provided
-    if (stored_family != DC_FAMILY_NULL && stored_model != 0) {
+    // Try stored configuration first if provided. Model 0 is legitimate for
+    // families without sub-models (e.g. Suunto Nautic is forced as
+    // (suuntoNautic, 0)); guarding on stored_model != 0 here would skip them.
+    if (stored_family != DC_FAMILY_NULL) {
         rc = open_ble_device(data, address, stored_family, stored_model);
         if (rc == DC_STATUS_SUCCESS) {
             *out_data = data;

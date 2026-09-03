@@ -205,7 +205,9 @@ public class GenericParser {
         diveNumber: Int,
         diveData: UnsafePointer<UInt8>,
         dataSize: Int,
-        context: OpaquePointer? = nil
+        context: OpaquePointer? = nil,
+        fingerprint: Data? = nil,
+        fallbackDate: Date? = nil
     ) throws -> DiveData {
         var parser: OpaquePointer?
         
@@ -224,8 +226,13 @@ public class GenericParser {
         // Get dive time
         var datetime = dc_datetime_t()
         let datetimeStatus = dc_parser_get_datetime(parser, &datetime)
-        
-        guard datetimeStatus == DC_STATUS_SUCCESS else {
+        let haveParserDatetime = (datetimeStatus == DC_STATUS_SUCCESS)
+
+        // Some families don't carry a datetime in the parsed stream (e.g. a
+        // Suunto Nautic dive with no surface GPS fix). The caller can supply a
+        // fallback — typically derived from the dive's fingerprint/id — so the
+        // dive still parses instead of throwing.
+        guard haveParserDatetime || fallbackDate != nil else {
             throw ParserError.datetimeRetrievalFailed(datetimeStatus)
         }
         
@@ -399,6 +406,20 @@ public class GenericParser {
                     )
                 }
 
+            case DC_SAMPLE_VENDOR:
+                // Vendor-specific record: carry it through generically so any
+                // driver using this channel benefits. The bytes are only valid
+                // for the duration of this callback, so copy them.
+                let bytes: Data
+                if let raw = value.vendor.data, value.vendor.size > 0 {
+                    bytes = Data(bytes: raw, count: Int(value.vendor.size))
+                } else {
+                    bytes = Data()
+                }
+                wrapper.data.vendorSamples.append(
+                    DiveData.VendorSample(time: wrapper.data.time, type: value.vendor.type, data: bytes)
+                )
+
             default:
                 break
             }
@@ -485,18 +506,35 @@ public class GenericParser {
             wrapper.data.tempSurface = tempSurf
         }
 
-        // Create date from components
-        var dateComponents = DateComponents()
-        dateComponents.year = Int(datetime.year)
-        dateComponents.month = Int(datetime.month)
-        dateComponents.day = Int(datetime.day)
-        dateComponents.hour = Int(datetime.hour)
-        dateComponents.minute = Int(datetime.minute)
-        dateComponents.second = Int(datetime.second)
-        
-        let calendar = Calendar(identifier: .gregorian)
-        guard let date = calendar.date(from: dateComponents) else {
-            throw ParserError.invalidParameters
+        // Create date from the parser's datetime, or the caller's fallback.
+        let date: Date
+        if haveParserDatetime {
+            var dateComponents = DateComponents()
+            dateComponents.year = Int(datetime.year)
+            dateComponents.month = Int(datetime.month)
+            dateComponents.day = Int(datetime.day)
+            dateComponents.hour = Int(datetime.hour)
+            dateComponents.minute = Int(datetime.minute)
+            dateComponents.second = Int(datetime.second)
+
+            // Most families report the dive's local wall-clock, so the
+            // components are interpreted in the device's local calendar. The
+            // Suunto Nautic is different: its datetime is derived from the GPS
+            // fix and returned as true UTC (dc_datetime_gmtime), so build the
+            // Date in UTC to preserve the correct absolute instant. The watch's
+            // local offset is not in the dive data (it's a device TZ setting the
+            // Suunto app reads separately, see issue #29), so display is left to
+            // localize into the viewer's timezone.
+            var calendar = Calendar(identifier: .gregorian)
+            if family == .suuntoNautic {
+                calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
+            }
+            guard let d = calendar.date(from: dateComponents) else {
+                throw ParserError.invalidParameters
+            }
+            date = d
+        } else {
+            date = fallbackDate!
         }
         
         return DiveData(
@@ -533,10 +571,12 @@ public class GenericParser {
                     time: TimeInterval(deco.time),
                     type: Int(deco.type.rawValue)
                 )
-            }
+            },
+            fingerprint: fingerprint,
+            vendorSamples: wrapper.data.vendorSamples
         )
     }
-    
+
     private static func convertTank(_ tank: dc_tank_t) -> DiveData.Tank {
         return DiveData.Tank(
             volume: tank.volume,

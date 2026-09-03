@@ -265,7 +265,20 @@ public struct DiveData: Identifiable {
     
     // Decompression data
     public var decoStop: DecoStop?
-    
+
+    // Raw fingerprint bytes identifying the specific dive on the computer,
+    // returned by dc_device_foreach's per-dive callback.
+    public var fingerprint: Data?
+
+    // Vendor-specific per-sample data that libdivecomputer has no dedicated
+    // sample type for, delivered through DC_SAMPLE_VENDOR. Each entry is the
+    // raw record the driver emitted (a vendor `type` tag plus opaque bytes) at
+    // a given sample time; consumers that understand a given vendor/type decode
+    // it themselves. Kept generic so any driver using the vendor channel
+    // (e.g. Suunto Nautic battery/IMU/GPS-accuracy/gradient-factors) flows
+    // through the standard pipeline instead of a family-specific bypass.
+    public var vendorSamples: [VendorSample]
+
     public struct Tank {
         public var volume: Double
         public var workingPressure: Double
@@ -291,11 +304,26 @@ public struct DiveData: Identifiable {
         }
     }
     
+    /// A DC_SAMPLE_VENDOR record: an opaque vendor-tagged payload at a sample
+    /// time. `type` is libdivecomputer's `parser_sample_vendor_t` value
+    /// (e.g. SAMPLE_VENDOR_SUUNTO_NAUTIC); `data` is the raw bytes.
+    public struct VendorSample {
+        public let time: TimeInterval
+        public let type: UInt32
+        public let data: Data
+
+        public init(time: TimeInterval, type: UInt32, data: Data) {
+            self.time = time
+            self.type = type
+            self.data = data
+        }
+    }
+
     public struct DecoStop {
         public var depth: Double
         public var time: TimeInterval
         public var type: Int
-        
+
         public init(depth: Double, time: TimeInterval, type: Int) {
             self.depth = depth
             self.time = time
@@ -411,7 +439,9 @@ public struct DiveData: Identifiable {
         setpoint: Double?,
         ppo2Readings: [(sensor: UInt32, value: Double)],
         cns: Double?,
-        decoStop: DecoStop?
+        decoStop: DecoStop?,
+        fingerprint: Data? = nil,
+        vendorSamples: [VendorSample] = []
     ) {
         self.number = number
         self.datetime = datetime
@@ -441,5 +471,7 @@ public struct DiveData: Identifiable {
         self.ppo2Readings = ppo2Readings
         self.cns = cns
         self.decoStop = decoStop
+        self.fingerprint = fingerprint
+        self.vendorSamples = vendorSamples
     }
-} 
+}
