@@ -346,6 +346,19 @@ final class SuuntoNauticParserTests: XCTestCase {
         print("corpus: checked \(bins.count) captures")
     }
 
+    func testOoamDiveEndReasonDecodes() throws {
+        // 0x1D Ooam is a one-shot dive-end reason: [timeDelta:2][Type:1] (no
+        // Active byte, unlike the 0x18-0x1B events). No corpus dive carries one
+        // (they all ended normally), so exercise it synthetically. A depth chunk
+        // makes it a valid dive; the 0x1D chunk carries type 2 = Ceiling broken.
+        var buf = Array("SBEM0103".utf8)
+        buf += [0x16, 141, 0x00, 0x00, 0x00, 0x00, 0x20, 0x41] + [UInt8](repeating: 0, count: 141 - 6) // depth 10 m
+        buf += [0x1D, 3, 0x00, 0x00, 0x02]                                                             // Ooam type 2
+        let p = try SuuntoNauticExplorer.decode(sbemData: Data(buf), logbookID: 1787000000)
+        let ooam = p.events.filter { $0.label.hasPrefix("Ceiling broken") }
+        XCTAssertEqual(ooam.count, 1, "expected one Ooam 'Ceiling broken' event; got \(p.events.map(\.label))")
+    }
+
     func testSidemountSecondTransmitter() throws {
         // A sidemount pair is one cylinder slot with two pressure fields:
         // Pressure at +44 and Pressure2 at +48. Pressure2 only counts as a real

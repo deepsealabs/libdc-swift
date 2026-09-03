@@ -255,6 +255,9 @@ public enum SuuntoNauticExplorer {
                     return [19: "NDL exceeded", 35: "At deco stop", 36: "At deep stop",
                             37: "At safety stop", 38: "Deco stop ahead", 39: "Deep stop ahead",
                             40: "Safety stop ahead"][type]
+                case 0x1D: // Ooam (dive-end reason)
+                    return [1: "Out of battery", 2: "Ceiling broken", 3: "SW crash",
+                            4: "Max depth", 5: "Algorithm changed", 6: "Gauge dive"][type]
                 default:
                     return nil
                 }
