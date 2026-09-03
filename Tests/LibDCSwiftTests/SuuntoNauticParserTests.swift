@@ -96,9 +96,10 @@ final class SuuntoNauticParserTests: XCTestCase {
         }.sorted()
         let median = mags[mags.count / 2]
         XCTAssertEqual(median, 1.0, accuracy: 0.1, "median accel magnitude should be ~1g")
-        // DiveRoute (0x24), ~1.7 Hz, 5 features each.
-        XCTAssertFalse(profile.diveRouteProfile.isEmpty)
-        XCTAssertEqual(profile.diveRouteProfile.first?.features.count, 5)
+        // 2 Hz auxiliary channel (5x int16; not the dive route). On this 195 B
+        // watch it is chunk 0x24; on 141 B watches it is 0x23 (payload 16).
+        XCTAssertFalse(profile.aux2HzProfile.isEmpty)
+        XCTAssertEqual(profile.aux2HzProfile.first?.features.count, 5)
     }
 
     func testDecoAndGradientFactorsDecode() throws {
@@ -300,6 +301,18 @@ final class SuuntoNauticParserTests: XCTestCase {
                   let root = try? JSONSerialization.jsonObject(with: jdata) as? [String: Any],
                   let header = (root["DeviceLog"] as? [String: Any])?["Header"] as? [String: Any]
             else { continue }
+
+            // The high-rate IMU chunk id is firmware-dependent: 0x23 on the
+            // 195 B watches (Vaasa/Nautic), 0x22 on the 141 B ones (Ylivieska/
+            // Nautic S, Porvoo/Ocean). Before the shape-keyed fix (#32) the
+            // 141 B captures decoded ZERO IMU. Those watches always log IMU, so
+            // assert it decodes; 195 B dives can legitimately have none (some are
+            // recorded with motion logging off), so they are not asserted here.
+            if let dev = (header["Device"] as? [String: Any])?["Name"] as? String,
+               dev == "Ylivieska" || dev == "Porvoo" {
+                XCTAssert(p.imuProfile.count > 500,
+                    "\(logid): 141 B watch (\(dev)) decoded no IMU (\(p.imuProfile.count)) -- chunk-id regression")
+            }
 
             if let dtm = header["DiveTimeMax"] as? Double, dtm > 0 {
                 // Dive time is the total Diving-state time. It must never exceed
