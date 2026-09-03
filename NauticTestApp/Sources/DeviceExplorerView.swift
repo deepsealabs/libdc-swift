@@ -92,7 +92,7 @@ struct DeviceExplorerView: View {
                 Text("If List Dives fails, tap this to fetch the raw /Logbook/Entries frame without decoding it, then use Export Raw Capture below and send us the file. This captures the exact bytes even when listing errors out.")
             }
 
-            Section("Custom GET Request") {
+            Section {
                 TextField("/Some/Path", text: $customPath)
                     .autocorrectionDisabled()
                     #if os(iOS)
@@ -106,6 +106,8 @@ struct DeviceExplorerView: View {
                     captureRaw(path: customPath)
                 }
                 .disabled(busy || customPath.isEmpty)
+            } header: {
+                Text("Custom GET Request")
             } footer: {
                 Text("\"Send\" does a plain GET. \"Capture raw\" does the full fetch and exports the bytes, for probing resources like /Mem/Logbook/Entries. Then use Export Raw Capture below.")
             }
@@ -327,12 +329,41 @@ struct DeviceExplorerView: View {
                     busy = false
                 }
             } catch {
+                // The download fetches /Logbook/byId/<id>/Data. A single failure
+                // code (e.g. -9) is opaque, so probe the dive's other resources
+                // individually and report each, which tells "overwritten" (Data
+                // gone, Summary/Descriptors may remain) from "not on the watch".
+                let msg = describeDownloadFailure(id: id, error: error)
                 DispatchQueue.main.async {
-                    statusMessage = "Download of \(id) failed: \(error)"
+                    statusMessage = msg
                     busy = false
                 }
             }
         }
+    }
+
+    /// Build a per-resource failure report for a dive that wouldn't download.
+    /// Runs on a background queue (called from downloadDive's catch).
+    private func describeDownloadFailure(id: String, error: Error) -> String {
+        var statusText = "\(error)"
+        if case SuuntoNauticExplorer.ExplorerError.requestFailed(let st) = error {
+            statusText = "status \(st.rawValue)"
+        }
+        // Probe the small sibling resources (fetchable without decompression).
+        func probe(_ name: String) -> String {
+            let path = "/Logbook/byId/\(id)/\(name)"
+            if let data = try? SuuntoNauticExplorer.fetch(device: devicePtr, path: path), !data.isEmpty {
+                return "\(name): \(data.count) B"
+            }
+            return "\(name): unavailable"
+        }
+        let summary = probe("Summary")
+        let descriptors = probe("Descriptors")
+        let dataGone = statusText.contains("-9") || statusText.contains("-8")
+        let lead = dataGone
+            ? "Dive #\(id): raw profile (/Data) unavailable (\(statusText)). If this is an older dive, its raw data has been overwritten on the watch and is no longer downloadable over Bluetooth — only the most recent dives stay available."
+            : "Download of \(id) failed: \(statusText)."
+        return "\(lead)\nPer-resource: /Data unavailable, \(summary), \(descriptors)."
     }
 
     private func exportCapture() {
