@@ -185,6 +185,15 @@ dc_status_t create_parser_for_device(dc_parser_t **parser, dc_context_t *context
  */
 device_data_t* get_device_data_pointer(void);
 
+/**
+ * Toggle verbose BLE/protocol debug logging (off by default). When enabled,
+ * the libdivecomputer context runs at DC_LOGLEVEL_DEBUG (surfacing protocol
+ * hexdumps) and extra C-side traces print. Enable only when diagnosing a
+ * device; leave off for normal use.
+ * @param enabled: non-zero to enable, 0 to disable
+ */
+void set_ble_debug_logging(int enabled);
+
 #ifdef __cplusplus
 }
 #endif
