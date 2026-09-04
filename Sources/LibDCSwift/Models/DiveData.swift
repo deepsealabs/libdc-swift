@@ -62,7 +62,8 @@ public struct DiveProfilePoint {
     public let time: TimeInterval
     public let depth: Double
     public let temperature: Double?
-    public let pressure: Double?
+    public let pressure: Double?  // Primary (lowest-index) tank; convenience for single-tank dives
+    public let tankPressures: [Int: Double]  // Live pressure (bar) per tank index; holds every transmitter of the sample
     public let po2: Double?  // Oxygen partial pressure
     public let pn2: Double?  // Nitrogen partial pressure
     public let phe: Double?  // Helium partial pressure
@@ -89,6 +90,7 @@ public struct DiveProfilePoint {
         depth: Double,
         temperature: Double? = nil,
         pressure: Double? = nil,
+        tankPressures: [Int: Double] = [:],
         po2: Double? = nil,
         pn2: Double? = nil,
         phe: Double? = nil,
@@ -108,6 +110,7 @@ public struct DiveProfilePoint {
         self.depth = depth
         self.temperature = temperature
         self.pressure = pressure
+        self.tankPressures = tankPressures
         self.po2 = po2
         self.pn2 = pn2
         self.phe = phe

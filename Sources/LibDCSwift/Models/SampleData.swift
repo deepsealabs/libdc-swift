@@ -20,6 +20,21 @@ public struct SampleData {
     
     // Tank pressure data
     var pressure: [(tank: Int, value: Double)] = []  // Tank pressure readings
+
+    // Live pressure per tank index. libdivecomputer fires DC_SAMPLE_PRESSURE once
+    // per transmitter, so one sample can carry readings for several tanks; keeping
+    // a single value dropped every tank but the last (deepsealabs/libdc-swift#41).
+    var currentTankPressures: [Int: Double] = [:]
+
+    // Lowest-index tank's live pressure, for the single-value convenience field.
+    var primaryTankPressure: Double? {
+        currentTankPressures.min(by: { $0.key < $1.key })?.value
+    }
+
+    mutating func recordTankPressure(tank: Int, value: Double) {
+        currentTankPressures[tank] = value
+        pressure.append((tank: tank, value: value))
+    }
     
     // Profile data
     var profile: [DiveProfilePoint] = []  // Detailed dive profile
