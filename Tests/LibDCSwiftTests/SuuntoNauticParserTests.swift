@@ -372,6 +372,55 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(tanks[1].beginPressure, 100, accuracy: 0.5)
     }
 
+    func testMultiGasSummaryDecodesGasesVolumesAndTankLinkage() throws {
+        // Multi-gas (issue #33): the /Summary carries one 45-byte record per
+        // configured gas starting at 0xC7 (O2% @+1, He% @+2, cylinder water
+        // capacity float32 m^3 @+9). The record index == cylinder slot ==
+        // GasNumber, so tank i breathes gas i. Reproduces nandodiver's real
+        // dual-transmitter dive (Air 12 L + NX26 5.7 L, issue #29): two
+        // cylinders in the profile, two gas records in the Summary.
+        func f32le(_ v: Float) -> [UInt8] { withUnsafeBytes(of: v.bitPattern.littleEndian) { Array($0) } }
+
+        // Profile: a 141 B extended-status chunk with slot 0 (150 bar) and
+        // slot 1 (100 bar) -> tank 0 (gas 0) and tank 1 (gas 1).
+        var payload = [UInt8](repeating: 0, count: 141)
+        func putTank(_ i: Int, _ pa: UInt32) {
+            let base = 42 + i * 18
+            payload[base] = UInt8(i)
+            payload[base + 2] = UInt8(pa & 0xff); payload[base + 3] = UInt8((pa >> 8) & 0xff)
+            payload[base + 4] = UInt8((pa >> 16) & 0xff); payload[base + 5] = UInt8((pa >> 24) & 0xff)
+        }
+        putTank(0, 15_000_000)                 // 150 bar
+        putTank(1, 10_000_000)                 // 100 bar
+        payload[42 + 2 * 18] = 2               // slot 2 idx byte, zero pressure (skipped)
+
+        // Summary: gas 0 = Air (21%, 12.0 L), gas 1 = NX26 (26%, 5.7 L).
+        var summary = Array("SBEM0103".utf8) + [UInt8](repeating: 0, count: 0x140)
+        let base = 0xC7, stride = 45
+        summary[base + 0 * stride + 1] = 21    // gas 0 O2%
+        summary[base + 1 * stride + 1] = 26    // gas 1 O2%
+        for (i, litres) in [Float(0.012), Float(0.0057)].enumerated() {
+            let off = base + i * stride + 9
+            summary.replaceSubrange(off..<off + 4, with: f32le(litres))
+        }
+
+        let buf = Array("SBEM0103".utf8) + [0x16, 141] + payload + summary
+        let dive = try parse(Data(buf), logbookID: 1787000000)
+
+        let gases = try XCTUnwrap(dive.gasMixes)
+        XCTAssertEqual(gases.count, 2, "both gas records must decode (stride 45)")
+        XCTAssertEqual(gases[0].oxygen, 0.21, accuracy: 0.001)
+        XCTAssertEqual(gases[1].oxygen, 0.26, accuracy: 0.001)
+
+        let tanks = try XCTUnwrap(dive.tanks)
+        XCTAssertEqual(tanks.count, 2)
+        // Tank i is linked to gas i and carries that gas's cylinder size.
+        XCTAssertEqual(tanks[0].gasMix, 0)
+        XCTAssertEqual(tanks[0].volume, 12.0, accuracy: 0.05)
+        XCTAssertEqual(tanks[1].gasMix, 1)
+        XCTAssertEqual(tanks[1].volume, 5.7, accuracy: 0.05)
+    }
+
     /// Regression corpus: real tester dive captures live in a git-ignored
     /// `captures/` dir next to this file (see .gitignore). Each `<logid>.bin` is
     /// a downloaded profile; an optional `<logid>.json` is the Suunto-app export
@@ -442,6 +491,63 @@ final class SuuntoNauticParserTests: XCTestCase {
             }
             if let mda = header["MaxDepthAverage"] as? Double, mda > 0 {
                 XCTAssertEqual(dive.maxDepth, mda, accuracy: 2.0, "\(logid): maxDepth \(dive.maxDepth) vs app \(mda)")
+            }
+
+            // Dual-transmitter / multi-gas cross-check (issues #33/#34): the app
+            // logs a per-sample Cylinders[] array of {GasNumber, Pressure(Pa),
+            // Pressure2(Pa)}. Each populated (GasNumber, field) is one
+            // transmitter's pressure curve (a sidemount pair is two curves on the
+            // same GasNumber). Build every curve's begin/end and require the
+            // parser to produce one matching tank per curve.
+            if let samples = (root["DeviceLog"] as? [String: Any])?["Samples"] as? [[String: Any]] {
+                var curves: [(gas: Int, begin: Double, end: Double)] = []
+                var curveIndex: [String: Int] = [:]
+                var gasNumbers = Set<Int>()
+                for s in samples {
+                    for c in (s["Cylinders"] as? [[String: Any]]) ?? [] {
+                        guard let gn = c["GasNumber"] as? Int else { continue }
+                        for f in ["Pressure", "Pressure2"] {
+                            guard let pa = c[f] as? Double, pa > 0 else { continue }
+                            let bar = pa / 100_000.0
+                            let key = "\(gn)|\(f)"
+                            if let i = curveIndex[key] { curves[i].end = bar }
+                            else { curveIndex[key] = curves.count; curves.append((gn, bar, bar)) }
+                            gasNumbers.insert(gn)
+                        }
+                    }
+                }
+                // Two captures are the verified #33/#34 acceptance dives (nandodiver:
+                // Air 12 L + NX26 5.7 L, two transmitters) -- assert hard on those.
+                // For the rest of the corpus a tank/curve mismatch is advisory: some
+                // captures are incomplete or have a transmitter the parser doesn't yet
+                // recover (tracked in #34), which shouldn't fail the whole suite.
+                let verifiedMultiTx: Set<String> = ["1788596617", "1788596613"]
+                if !curves.isEmpty, let tanks = dive.tanks {
+                    let hard = verifiedMultiTx.contains(logid)
+                    func check(_ cond: Bool, _ msg: String) {
+                        if hard { XCTAssert(cond, msg) } else if !cond { print("  \(msg) [advisory]") }
+                    }
+                    check(tanks.count == curves.count,
+                        "\(logid): parsed \(tanks.count) tanks, app has \(curves.count) transmitter curves")
+                    // Greedily match each parsed tank to an app curve by pressure.
+                    var remaining = curves
+                    for t in tanks {
+                        if let mi = remaining.firstIndex(where: {
+                            abs($0.begin - t.beginPressure) < 1.5 && abs($0.end - t.endPressure) < 1.5 }) {
+                            remaining.remove(at: mi)
+                        } else {
+                            check(false, "\(logid): tank (begin \(t.beginPressure), end \(t.endPressure)) matches no app cylinder curve")
+                        }
+                    }
+                    // Gas linkage (issue #33): when gas mixes were decoded, the set of
+                    // gas indices the tanks link to must equal the app's distinct
+                    // GasNumbers. (Skipped when the capture has no /Summary and the gas
+                    // is legitimately unknown.)
+                    if tanks.count == curves.count, let gases = dive.gasMixes, !gases.isEmpty {
+                        check(Set(tanks.map { $0.gasMix }) == gasNumbers,
+                            "\(logid): tank->gas links \(Set(tanks.map { $0.gasMix })) vs app gases \(gasNumbers)")
+                    }
+                }
             }
         }
         print("corpus: checked \(bins.count) captures")

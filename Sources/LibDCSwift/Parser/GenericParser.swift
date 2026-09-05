@@ -121,7 +121,8 @@ public class GenericParser {
                 time: data.time,
                 depth: data.depth,
                 temperature: data.temperature,
-                pressure: data.pressure.last?.value,
+                pressure: data.primaryTankPressure,
+                tankPressures: data.currentTankPressures,
                 po2: data.ppo2.last?.value,
                 ndl: ndl,
                 decoStop: decoStop,
@@ -257,10 +258,13 @@ public class GenericParser {
                 wrapper.data.maxDepth = max(wrapper.data.maxDepth, value.depth)
                 
             case DC_SAMPLE_PRESSURE:
-                wrapper.data.pressure.append((
+                // Fired once per transmitter within a sample; record each against
+                // its own tank so multi-transmitter dives (sidemount, CCR) keep
+                // every curve instead of only the last (deepsealabs/libdc-swift#41).
+                wrapper.data.recordTankPressure(
                     tank: Int(value.pressure.tank),
                     value: value.pressure.value
-                ))
+                )
                 
             case DC_SAMPLE_TEMPERATURE:
                 wrapper.data.temperature = value.temperature
