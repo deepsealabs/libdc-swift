@@ -497,12 +497,12 @@ final class SuuntoNauticParserTests: XCTestCase {
             // logs a per-sample Cylinders[] array of {GasNumber, Pressure(Pa),
             // Pressure2(Pa)}. Each populated (GasNumber, field) is one
             // transmitter's pressure curve (a sidemount pair is two curves on the
-            // same GasNumber). Build every curve's begin/end and require the
-            // parser to produce one matching tank per curve.
+            // same GasNumber). A field that reports in only ONE sample is a lone
+            // spurious blip (e.g. 1786263907 has a single 211.4 bar Pressure2 at
+            // sample 7 and never again), not a real transmitter -- the parser
+            // gates those out, so require >=2 readings before counting a curve.
             if let samples = (root["DeviceLog"] as? [String: Any])?["Samples"] as? [[String: Any]] {
-                var curves: [(gas: Int, begin: Double, end: Double)] = []
-                var curveIndex: [String: Int] = [:]
-                var gasNumbers = Set<Int>()
+                var raw: [String: (gas: Int, begin: Double, end: Double, count: Int)] = [:]
                 for s in samples {
                     for c in (s["Cylinders"] as? [[String: Any]]) ?? [] {
                         guard let gn = c["GasNumber"] as? Int else { continue }
@@ -510,12 +510,14 @@ final class SuuntoNauticParserTests: XCTestCase {
                             guard let pa = c[f] as? Double, pa > 0 else { continue }
                             let bar = pa / 100_000.0
                             let key = "\(gn)|\(f)"
-                            if let i = curveIndex[key] { curves[i].end = bar }
-                            else { curveIndex[key] = curves.count; curves.append((gn, bar, bar)) }
-                            gasNumbers.insert(gn)
+                            if var cur = raw[key] { cur.end = bar; cur.count += 1; raw[key] = cur }
+                            else { raw[key] = (gn, bar, bar, 1) }
                         }
                     }
                 }
+                let curves = raw.values.filter { $0.count >= 2 }
+                    .map { (gas: $0.gas, begin: $0.begin, end: $0.end) }
+                let gasNumbers = Set(curves.map { $0.gas })
                 // Two captures are the verified #33/#34 acceptance dives (nandodiver:
                 // Air 12 L + NX26 5.7 L, two transmitters) -- assert hard on those.
                 // For the rest of the corpus a tank/curve mismatch is advisory: some
