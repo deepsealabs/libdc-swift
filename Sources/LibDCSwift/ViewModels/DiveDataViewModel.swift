@@ -153,7 +153,13 @@ public class DiveDataViewModel: ObservableObject {
         case cancelled
         case failed(_ message: String)
         case noNewDives
-        
+        /// Every dive this session parsed to an empty record (no samples, no
+        /// duration) and was skipped -- typically a contended BLE stream on
+        /// the Suunto NG family (the official Suunto app still holds the
+        /// link). Distinct from noNewDives: the fingerprint was NOT advanced,
+        /// so the caller should prompt a retry rather than report success.
+        case emptyRead
+
         public var description: String {
             switch self {
             case .notStarted: return "Not started"
@@ -162,6 +168,7 @@ public class DiveDataViewModel: ObservableObject {
             case .cancelled: return "Download cancelled"
             case .failed(let error): return "Error: \(error)"
             case .noNewDives: return "No new dives found"
+            case .emptyRead: return "Download returned no dive data"
             }
         }
         
@@ -174,6 +181,8 @@ public class DiveDataViewModel: ObservableObject {
             case (.cancelled, .cancelled):
                 return true
             case (.noNewDives, .noNewDives):
+                return true
+            case (.emptyRead, .emptyRead):
                 return true
             case let (.inProgress(count1), .inProgress(count2)):
                 return count1 == count2
