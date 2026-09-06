@@ -22,6 +22,14 @@ public class DiveLogRetriever {
         var storedFingerprint: Data?
         var isCompleted: Bool = false
         var fingerprintMatched: Bool = false  // Track if we stopped due to fingerprint match
+        /// Dives that parsed to an empty/degenerate record (no profile
+        /// samples, ~0 duration) and were skipped. On the Suunto NG family
+        /// this is the signature of a contended BLE stream (the official
+        /// Suunto app still holding the link): enumeration succeeds but the
+        /// data payload comes back empty. Used at completion to withhold the
+        /// fingerprint (so a clean retry re-downloads) and to signal the
+        /// empty-read outcome instead of a false "no new dives".
+        var emptyReadCount: Int = 0
         /// When false, a "download only new" toggle-off — skip loading/comparing
         /// against the stored fingerprint entirely so a full history re-download
         /// isn't cut short by the fingerprint match early-return below.
@@ -37,6 +45,34 @@ public class DiveLogRetriever {
             self.storedFingerprint = storedFingerprint
             self.bluetoothManager = bluetoothManager
             self.useFingerprint = useFingerprint
+        }
+    }
+
+    /// A parsed record with no profile samples AND no meaningful duration is
+    /// an empty read, not a real dive. Both conditions are required so a
+    /// genuine ultra-short dive -- which still carries samples -- is never
+    /// dropped. See `CallbackContext.emptyReadCount`.
+    static func isEmptyRead(_ dive: DiveData) -> Bool {
+        dive.profile.isEmpty && dive.divetime <= 1
+    }
+
+    /// Stable, human-stable name for a libdivecomputer status code, used for
+    /// logging and for `DiveDataViewModel.lastDownloadStatus` (analytics).
+    static func statusName(_ status: dc_status_t) -> String {
+        switch status {
+        case DC_STATUS_SUCCESS:     return "SUCCESS"
+        case DC_STATUS_DONE:        return "DONE"
+        case DC_STATUS_UNSUPPORTED: return "UNSUPPORTED"
+        case DC_STATUS_INVALIDARGS: return "INVALIDARGS"
+        case DC_STATUS_NOMEMORY:    return "NOMEMORY"
+        case DC_STATUS_NODEVICE:    return "NODEVICE"
+        case DC_STATUS_NOACCESS:    return "NOACCESS"
+        case DC_STATUS_IO:          return "IO"
+        case DC_STATUS_TIMEOUT:     return "TIMEOUT"
+        case DC_STATUS_PROTOCOL:    return "PROTOCOL"
+        case DC_STATUS_DATAFORMAT:  return "DATAFORMAT"
+        case DC_STATUS_CANCELLED:   return "CANCELLED"
+        default:                    return "UNKNOWN(\(status))"
         }
     }
 
@@ -166,14 +202,28 @@ public class DiveLogRetriever {
                 fallbackDate: fallbackDate
             )
             
+            // A record with no profile samples AND no duration isn't a real
+            // dive -- it's an empty read. Skip it: don't surface a phantom
+            // dive, don't count it as new, and (via emptyReadCount at
+            // completion) don't advance the fingerprint. logCount still
+            // advances so dive numbers stay unique. Both conditions are
+            // required so a genuine ultra-short dive (which still carries
+            // samples) is never dropped.
+            if isEmptyRead(diveData) {
+                logWarning("⚠️ Skipping empty/degenerate dive #\(context.logCount) (no samples, 0 duration)")
+                context.emptyReadCount += 1
+                context.logCount += 1
+                return 1
+            }
+
             DispatchQueue.main.async {
                 context.viewModel.appendDives([diveData])
                 context.viewModel.updateProgress(count: context.logCount)
             }
-            
+
             context.hasNewDives = true
             context.logCount += 1
-            return 1  
+            return 1
         } catch {
             logError("❌ Failed to parse dive #\(context.logCount): \(error)")
             return 1 
@@ -305,20 +355,7 @@ public class DiveLogRetriever {
 
                 // Log errors for debugging
                 if enumStatus != DC_STATUS_SUCCESS && enumStatus != DC_STATUS_PROTOCOL {
-                    let errorName: String
-                    switch enumStatus {
-                    case DC_STATUS_UNSUPPORTED: errorName = "UNSUPPORTED"
-                    case DC_STATUS_INVALIDARGS: errorName = "INVALIDARGS"
-                    case DC_STATUS_NOMEMORY: errorName = "NOMEMORY"
-                    case DC_STATUS_NODEVICE: errorName = "NODEVICE"
-                    case DC_STATUS_NOACCESS: errorName = "NOACCESS"
-                    case DC_STATUS_IO: errorName = "IO"
-                    case DC_STATUS_TIMEOUT: errorName = "TIMEOUT"
-                    case DC_STATUS_DATAFORMAT: errorName = "DATAFORMAT"
-                    case DC_STATUS_CANCELLED: errorName = "CANCELLED"
-                    default: errorName = "UNKNOWN(\(enumStatus))"
-                    }
-                    logError("❌ Download failed: DC_STATUS_\(errorName)")
+                    logError("❌ Download failed: DC_STATUS_\(statusName(enumStatus))")
                 }
 
                 progressTimer.cancel()
@@ -360,9 +397,9 @@ public class DiveLogRetriever {
 
                 DispatchQueue.main.async {
                     // Determine the outcome of the download
-                    let downloadSucceeded: Bool
-                    let shouldSaveFingerprint: Bool
-                    
+                    var downloadSucceeded: Bool
+                    var shouldSaveFingerprint: Bool
+
                     switch enumStatus {
                     case DC_STATUS_SUCCESS:
                         // Normal successful completion
@@ -397,9 +434,32 @@ public class DiveLogRetriever {
                         shouldSaveFingerprint = false
                     }
                     
+                    // Empty reads override the status-derived outcome: if any
+                    // dive came back empty this session, never advance the
+                    // fingerprint (so a clean retry re-downloads rather than
+                    // reporting "no new dives" forever). When *every* read was
+                    // empty and nothing real arrived, it's a soft failure the
+                    // caller should surface (e.g. "close the Suunto app"),
+                    // distinct from a genuine no-new-dives.
+                    let emptyReadOnly = context.emptyReadCount > 0 && !context.hasNewDives
+                    if context.emptyReadCount > 0 {
+                        shouldSaveFingerprint = false
+                        if emptyReadOnly { downloadSucceeded = false }
+                    }
+
+                    // Record a stable status key for analytics before routing.
+                    viewModel.lastDownloadStatus = emptyReadOnly
+                        ? "emptyRead"
+                        : (downloadSucceeded ? "success" : statusName(enumStatus))
+
                     // Handle the outcome
                     if !downloadSucceeded {
-                        viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(enumStatus)", status: enumStatus)
+                        if emptyReadOnly {
+                            logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
+                            viewModel.updateProgress(.emptyRead)
+                        } else {
+                            viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(enumStatus)", status: enumStatus)
+                        }
                         completion(false)
                     } else {
                         // Download completed successfully
