@@ -56,6 +56,26 @@ public class DiveLogRetriever {
         dive.profile.isEmpty && dive.divetime <= 1
     }
 
+    /// Stable, human-stable name for a libdivecomputer status code, used for
+    /// logging and for `DiveDataViewModel.lastDownloadStatus` (analytics).
+    static func statusName(_ status: dc_status_t) -> String {
+        switch status {
+        case DC_STATUS_SUCCESS:     return "SUCCESS"
+        case DC_STATUS_DONE:        return "DONE"
+        case DC_STATUS_UNSUPPORTED: return "UNSUPPORTED"
+        case DC_STATUS_INVALIDARGS: return "INVALIDARGS"
+        case DC_STATUS_NOMEMORY:    return "NOMEMORY"
+        case DC_STATUS_NODEVICE:    return "NODEVICE"
+        case DC_STATUS_NOACCESS:    return "NOACCESS"
+        case DC_STATUS_IO:          return "IO"
+        case DC_STATUS_TIMEOUT:     return "TIMEOUT"
+        case DC_STATUS_PROTOCOL:    return "PROTOCOL"
+        case DC_STATUS_DATAFORMAT:  return "DATAFORMAT"
+        case DC_STATUS_CANCELLED:   return "CANCELLED"
+        default:                    return "UNKNOWN(\(status))"
+        }
+    }
+
     private static let diveCallbackClosure: @convention(c) (
         UnsafePointer<UInt8>?,
         UInt32,
@@ -335,20 +355,7 @@ public class DiveLogRetriever {
 
                 // Log errors for debugging
                 if enumStatus != DC_STATUS_SUCCESS && enumStatus != DC_STATUS_PROTOCOL {
-                    let errorName: String
-                    switch enumStatus {
-                    case DC_STATUS_UNSUPPORTED: errorName = "UNSUPPORTED"
-                    case DC_STATUS_INVALIDARGS: errorName = "INVALIDARGS"
-                    case DC_STATUS_NOMEMORY: errorName = "NOMEMORY"
-                    case DC_STATUS_NODEVICE: errorName = "NODEVICE"
-                    case DC_STATUS_NOACCESS: errorName = "NOACCESS"
-                    case DC_STATUS_IO: errorName = "IO"
-                    case DC_STATUS_TIMEOUT: errorName = "TIMEOUT"
-                    case DC_STATUS_DATAFORMAT: errorName = "DATAFORMAT"
-                    case DC_STATUS_CANCELLED: errorName = "CANCELLED"
-                    default: errorName = "UNKNOWN(\(enumStatus))"
-                    }
-                    logError("❌ Download failed: DC_STATUS_\(errorName)")
+                    logError("❌ Download failed: DC_STATUS_\(statusName(enumStatus))")
                 }
 
                 progressTimer.cancel()
@@ -439,6 +446,11 @@ public class DiveLogRetriever {
                         shouldSaveFingerprint = false
                         if emptyReadOnly { downloadSucceeded = false }
                     }
+
+                    // Record a stable status key for analytics before routing.
+                    viewModel.lastDownloadStatus = emptyReadOnly
+                        ? "emptyRead"
+                        : (downloadSucceeded ? "success" : statusName(enumStatus))
 
                     // Handle the outcome
                     if !downloadSucceeded {

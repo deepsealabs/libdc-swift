@@ -18,6 +18,11 @@ public class DiveDataViewModel: ObservableObject {
     @Published public var status: String = ""
     @Published public var progress: DownloadProgress = .notStarted
     @Published public var hasNewDives: Bool = false
+    /// Stable status key for the most recent download attempt, for analytics:
+    /// the DC_STATUS name on failure (e.g. "DATAFORMAT", "IO", "TIMEOUT"),
+    /// "emptyRead" when every dive came back empty, or "success". Distinct from
+    /// `status`, which is a localized human message.
+    @Published public var lastDownloadStatus: String = ""
     
     /// Key format: "fingerprint_{deviceType}_{serial}"
     private let fingerprintKeyPrefix = "fingerprint_"
