@@ -510,7 +510,10 @@ final class SuuntoNauticParserTests: XCTestCase {
                             guard let pa = c[f] as? Double, pa > 0 else { continue }
                             let bar = pa / 100_000.0
                             let key = "\(gn)|\(f)"
-                            if var cur = raw[key] { cur.end = bar; cur.count += 1; raw[key] = cur }
+                            // begin = highest reading (a cylinder only loses
+                            // pressure), matching the parser -- so an initial
+                            // pre-pairing dropout doesn't skew the expected begin.
+                            if var cur = raw[key] { cur.end = bar; if bar > cur.begin { cur.begin = bar }; cur.count += 1; raw[key] = cur }
                             else { raw[key] = (gn, bar, bar, 1) }
                         }
                     }
@@ -523,7 +526,10 @@ final class SuuntoNauticParserTests: XCTestCase {
                 // For the rest of the corpus a tank/curve mismatch is advisory: some
                 // captures are incomplete or have a transmitter the parser doesn't yet
                 // recover (tracked in #34), which shouldn't fail the whole suite.
-                let verifiedMultiTx: Set<String> = ["1788596617", "1788596613"]
+                // 1788683271/272: dual-transmitter Air+Air dives where one
+                // transmitter has an initial pre-pairing dropout (~9 bar then
+                // jumps to ~207); begin-pressure must recover to the real max.
+                let verifiedMultiTx: Set<String> = ["1788596617", "1788596613", "1788683271", "1788683272"]
                 if !curves.isEmpty, let tanks = dive.tanks {
                     let hard = verifiedMultiTx.contains(logid)
                     func check(_ cond: Bool, _ msg: String) {
@@ -534,8 +540,12 @@ final class SuuntoNauticParserTests: XCTestCase {
                     // Greedily match each parsed tank to an app curve by pressure.
                     var remaining = curves
                     for t in tanks {
+                        // Begin tolerance is looser than end: begin is a max over
+                        // noisy raw readings that the app lightly smooths (~2 bar
+                        // spread), while end lands on a settled final value. 3 bar
+                        // still catches a dropout-latched begin (e.g. 9 vs 207).
                         if let mi = remaining.firstIndex(where: {
-                            abs($0.begin - t.beginPressure) < 1.5 && abs($0.end - t.endPressure) < 1.5 }) {
+                            abs($0.begin - t.beginPressure) < 3.0 && abs($0.end - t.endPressure) < 1.5 }) {
                             remaining.remove(at: mi)
                         } else {
                             check(false, "\(logid): tank (begin \(t.beginPressure), end \(t.endPressure)) matches no app cylinder curve")
