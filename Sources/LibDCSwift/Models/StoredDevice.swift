@@ -12,16 +12,18 @@ public class StoredDevice: Codable {
    public let model: UInt32
    public let lastConnected: Date
    public var serial: String?  // Hardware serial number for fingerprint tracking
+   public var firmware: String?  // Firmware version reported via DC_EVENT_DEVINFO
 
-   public init(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil) {
+   public init(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil, firmware: String? = nil) {
        self.uuid = uuid
        self.name = name
        self.family = family
        self.model = model
        self.lastConnected = Date()
        self.serial = serial
+       self.firmware = firmware
    }
-   
+
    private enum CodingKeys: String, CodingKey {
        case uuid
        case name
@@ -29,6 +31,7 @@ public class StoredDevice: Codable {
        case model
        case lastConnected
        case serial
+       case firmware
    }
 
    public required init(from decoder: Decoder) throws {
@@ -39,6 +42,7 @@ public class StoredDevice: Codable {
        model = try container.decode(UInt32.self, forKey: .model)
        lastConnected = try container.decode(Date.self, forKey: .lastConnected)
        serial = try container.decodeIfPresent(String.self, forKey: .serial)  // Optional for backward compatibility
+       firmware = try container.decodeIfPresent(String.self, forKey: .firmware)  // Optional for backward compatibility
    }
 
    public func encode(to encoder: Encoder) throws {
@@ -49,6 +53,7 @@ public class StoredDevice: Codable {
        try container.encode(model, forKey: .model)
        try container.encode(lastConnected, forKey: .lastConnected)
        try container.encodeIfPresent(serial, forKey: .serial)
+       try container.encodeIfPresent(firmware, forKey: .firmware)
    }
 }
 
@@ -93,9 +98,10 @@ public class StoredDevice: Codable {
    public func storeDevice(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil) {
        let device = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial)
        if let index = storedDevices.firstIndex(where: { $0.uuid == uuid }) {
-           // Preserve existing serial if new one not provided
+           // Preserve existing serial/firmware if new ones not provided
            let existingSerial = storedDevices[index].serial
-           let deviceWithSerial = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial ?? existingSerial)
+           let existingFirmware = storedDevices[index].firmware
+           let deviceWithSerial = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial ?? existingSerial, firmware: existingFirmware)
            storedDevices[index] = deviceWithSerial
            logDebug("Updated stored device: \(name)")
        } else {
@@ -130,7 +136,7 @@ public class StoredDevice: Codable {
            return false
        }
        let old = storedDevices[index]
-       storedDevices[index] = StoredDevice(uuid: newUUID, name: old.name, family: old.family, model: old.model, serial: old.serial)
+       storedDevices[index] = StoredDevice(uuid: newUUID, name: old.name, family: old.family, model: old.model, serial: old.serial, firmware: old.firmware)
        saveDevices()
        logInfo("Reconciled stored device \(name): UUID \(old.uuid) -> \(newUUID)")
        return true
@@ -142,6 +148,15 @@ public class StoredDevice: Codable {
            storedDevices[index].serial = serial
            saveDevices()
            logDebug("Updated serial for device \(storedDevices[index].name): \(serial)")
+       }
+   }
+
+   /// Updates the firmware version for an existing stored device
+   public func updateDeviceFirmware(uuid: String, firmware: String) {
+       if let index = storedDevices.firstIndex(where: { $0.uuid == uuid }) {
+           storedDevices[index].firmware = firmware
+           saveDevices()
+           logDebug("Updated firmware for device \(storedDevices[index].name): \(firmware)")
        }
    }
    

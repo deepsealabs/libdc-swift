@@ -117,6 +117,13 @@ public class DiveLogRetriever {
                 DeviceStorage.shared.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
             }
 
+            // Firmware version reported alongside serial; a provenance snapshot
+            // for the reading. 0 means the device reported none.
+            let firmwareValue = devicePtr.pointee.devinfo.firmware
+            if firmwareValue != 0 {
+                DeviceStorage.shared.updateDeviceFirmware(uuid: context.deviceUUID, firmware: String(firmwareValue))
+            }
+
             // Now that we have device info, load the stored fingerprint if we don't have it yet
             if context.useFingerprint,
                context.storedFingerprint == nil,
