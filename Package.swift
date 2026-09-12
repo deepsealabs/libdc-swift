@@ -4,8 +4,8 @@ import PackageDescription
 let package = Package(
     name: "LibDCSwift",
     platforms: [
-        .iOS(.v15),
-        .macOS(.v12)
+        .iOS(.v16),
+        .macOS(.v13)
     ],
     products: [
         .library(
@@ -16,6 +16,10 @@ let package = Package(
             name: "LibDCBridge",
             type: .dynamic,
             targets: ["LibDCBridge"]
+        ),
+        .plugin(
+            name: "ClibdcVerGeneratorPlugin",
+            targets: ["ClibdcVerGeneratorPlugin"]
         )
     ],
     targets: [
@@ -92,6 +96,19 @@ let package = Package(
                 .linkedFramework("CoreBluetooth"),
                 .linkedFramework("Foundation")
             ]
+        ),
+        .plugin(
+            name: "ClibdcVerGeneratorPlugin",
+            capability: .command(
+                    intent:  .custom(
+                        verb: "libdc-version-header",
+                        description: "Generate libdivecomputer version.h"
+                    ),
+                    permissions: [
+                        .writeToPackageDirectory(reason: "The plugin generates the libdivecomputer version.h file")
+                    ]
+
+            )
         ),
         .testTarget(
             name: "LibDCSwiftTests",
