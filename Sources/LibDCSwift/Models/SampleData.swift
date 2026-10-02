@@ -67,21 +67,20 @@ public struct SampleData {
     var ppo2: [(sensor: UInt32, value: Double)] = []  // PPO2 readings
     var cns: Double?                    // CNS percentage
     
-    // Events and warnings
-    var event: Event?
-    
-    // Decompression data
+    // Last DC_SAMPLE_DECO the computer reported, kept for the dive-level summary.
     var deco: DecoData?
+
+    // Per-sample state: cleared when a new sample time starts so a value is only
+    // attributed to the sample the computer reported it in.
+    var sampleDeco: DecoData?
+    var events: [DiveEvent] = []
+    var rawEvents: [RawDiveEvent] = []
 
     // Vendor-specific samples (DC_SAMPLE_VENDOR): (time, vendor type, raw bytes)
     var vendorSamples: [DiveData.VendorSample] = []
 
-    public struct Event {
-        let type: parser_sample_event_t  // Event type from libdivecomputer
-        let value: UInt32               // Event specific value
-        let flags: UInt32               // Event flags (begin/end)
-    }
-    
+    public typealias Event = RawDiveEvent
+
     public struct DecoData {
         var type: dc_deco_type_t        // Type of deco stop
         var depth: Double               // Stop depth in meters

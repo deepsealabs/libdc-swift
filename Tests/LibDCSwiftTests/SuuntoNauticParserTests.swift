@@ -241,6 +241,27 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertGreaterThan(gf.map(\.gfSurface).max() ?? 0, 50)
     }
 
+    func testGenericPipelineCarriesEventPayloadsAndDecoTypes() throws {
+        let data = try loadFixture()
+        let dive = try parse(data)
+        let raw = try rawSamples(data)
+
+        // Every event edge lands on a profile point with its payload, and no
+        // event adds a point of its own.
+        let events = dive.profile.flatMap(\.rawEvents)
+        XCTAssertEqual(events.count, 24)
+        XCTAssertEqual(events.map(\.value).sorted(), raw.events.map(\.value).sorted())
+        XCTAssertTrue(events.contains { $0.type == .safetyStop && $0.value == UInt32(0x1B << 8 | 40) })
+        XCTAssertTrue(events.contains { $0.phase == .end })
+
+        // Deco status appears only on the 244 samples that reported it.
+        let decoPoints = dive.profile.filter { $0.decoKind != nil }
+        XCTAssertEqual(decoPoints.count, 244)
+        XCTAssertTrue(decoPoints.contains { $0.decoKind == .decoStop && ($0.decoStop ?? 0) > 0 })
+        XCTAssertTrue(decoPoints.contains { $0.decoKind == .ndl && $0.ndl != nil })
+        XCTAssertTrue(dive.profile.allSatisfy { $0.pn2 == nil && $0.phe == nil })
+    }
+
     func testGenericPipelineDecodesNauticWithVendorChannel() throws {
         let dive = try parse(loadFixture(), logbookID: 1787752091)
         // Standard fields flow through.
