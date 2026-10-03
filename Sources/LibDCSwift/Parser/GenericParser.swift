@@ -104,30 +104,172 @@ public class GenericParser {
         return value.load(as: T.self)
     }
     
-    /// Wrapper class for collecting sample data during parsing
-    private class SampleDataWrapper {
-        /// The collected sample data
+    /// Folds libdivecomputer's sample callbacks into profile points.
+    ///
+    /// libdivecomputer opens each sample with DC_SAMPLE_TIME and then reports that
+    /// sample's values, so a point is only complete when the next time arrives (or
+    /// parsing ends). Repeated DC_SAMPLE_TIME calls with the same time continue the
+    /// same sample.
+    final class SampleAccumulator {
         var data = SampleData()
-        
-        /// Adds a new profile point from current sample data
-        func addProfilePoint() {
-            // Extract deco data
-            let ndl = data.deco?.type == DC_DECO_NDL ? data.deco?.time : nil
-            let decoStop = data.deco?.type == DC_DECO_DECOSTOP ? data.deco?.depth : nil
-            let decoTime = data.deco?.type == DC_DECO_DECOSTOP ? data.deco?.time : nil
-            let tts = data.deco?.tts
+        private var hasOpenSample = false
 
-            let point = DiveProfilePoint(
+        private static let gasMixUnknown = Int(UInt32.max)
+
+        func handle(_ type: dc_sample_type_t, _ value: dc_sample_value_t) {
+            switch type {
+            case DC_SAMPLE_TIME:
+                let time = TimeInterval(value.time) / 1000.0
+                if hasOpenSample && time == data.time { return }
+                closeSample()
+                data.time = time
+                hasOpenSample = true
+                return
+            default:
+                // A value before the first DC_SAMPLE_TIME belongs to a sample at t=0.
+                hasOpenSample = true
+            }
+
+            switch type {
+            case DC_SAMPLE_DEPTH:
+                data.depth = value.depth
+                data.maxDepth = max(data.maxDepth, value.depth)
+
+            case DC_SAMPLE_PRESSURE:
+                // Fired once per transmitter within a sample; record each against
+                // its own tank (deepsealabs/libdc-swift#41).
+                data.recordTankPressure(tank: Int(value.pressure.tank), value: value.pressure.value)
+
+            case DC_SAMPLE_TEMPERATURE:
+                data.temperature = value.temperature
+
+            case DC_SAMPLE_EVENT:
+                recordEvent(RawDiveEvent(
+                    rawType: value.event.type,
+                    value: value.event.value,
+                    flags: value.event.flags,
+                    timeOffset: value.event.time
+                ))
+
+            case DC_SAMPLE_RBT:
+                data.rbt = value.rbt
+
+            case DC_SAMPLE_HEARTBEAT:
+                data.heartbeat = value.heartbeat
+
+            case DC_SAMPLE_BEARING:
+                data.bearing = value.bearing
+
+            case DC_SAMPLE_SETPOINT:
+                data.setpoint = value.setpoint
+
+            case DC_SAMPLE_PPO2:
+                data.ppo2.append((sensor: value.ppo2.sensor, value: value.ppo2.value))
+
+            case DC_SAMPLE_CNS:
+                data.cns = value.cns * 100.0  // Convert to percentage
+
+            case DC_SAMPLE_DECO:
+                let deco = SampleData.DecoData(
+                    type: dc_deco_type_t(rawValue: value.deco.type),
+                    depth: value.deco.depth,
+                    time: value.deco.time,
+                    tts: value.deco.tts
+                )
+                data.deco = deco
+                data.sampleDeco = deco
+
+            case DC_SAMPLE_GASMIX:
+                recordGasMix(Int(value.gasmix))
+
+            case DC_SAMPLE_LOCATION:
+                if data.location == nil {
+                    data.location = DiveData.Location(
+                        latitude: value.location.latitude,
+                        longitude: value.location.longitude,
+                        altitude: value.location.altitude
+                    )
+                }
+
+            case DC_SAMPLE_VENDOR:
+                // The bytes are only valid for the duration of the callback, so copy them.
+                let bytes: Data
+                if let raw = value.vendor.data, value.vendor.size > 0 {
+                    bytes = Data(bytes: raw, count: Int(value.vendor.size))
+                } else {
+                    bytes = Data()
+                }
+                data.vendorSamples.append(
+                    DiveData.VendorSample(time: data.time, type: value.vendor.type, data: bytes)
+                )
+
+            default:
+                break
+            }
+        }
+
+        /// Flushes the sample still open when libdivecomputer stops calling back.
+        func finish() {
+            closeSample()
+        }
+
+        private func recordEvent(_ event: RawDiveEvent) {
+            data.rawEvents.append(event)
+            guard let legacy = event.legacyEvent else { return }
+            // Some computers report both SAMPLE_EVENT_GASCHANGE and DC_SAMPLE_GASMIX for one switch.
+            if legacy == .gasChange && data.events.contains(.gasChange) { return }
+            data.events.append(legacy)
+        }
+
+        private func recordGasMix(_ newGasMix: Int) {
+            // Shearwater sends DC_GASMIX_UNKNOWN for tanks without AI transmitters;
+            // treating it as a real mix would mislabel subsequent points.
+            guard newGasMix != Self.gasMixUnknown else { return }
+            if let previous = data.gasmix, previous != newGasMix, !data.events.contains(.gasChange) {
+                data.events.append(.gasChange)
+            }
+            data.gasmix = newGasMix
+        }
+
+        private func closeSample() {
+            guard hasOpenSample else { return }
+            data.profile.append(makeProfilePoint())
+            data.maxTime = max(data.maxTime, data.time)
+
+            if let temp = data.temperature {
+                data.tempMinimum = min(data.tempMinimum, temp)
+                data.tempMaximum = max(data.tempMaximum, temp)
+                data.lastTemperature = temp
+                if data.tempSurface == 0 {
+                    data.tempSurface = temp
+                }
+            }
+
+            data.events = []
+            data.rawEvents = []
+            data.sampleDeco = nil
+            hasOpenSample = false
+        }
+
+        private func makeProfilePoint() -> DiveProfilePoint {
+            let deco = data.sampleDeco
+            let kind = deco.flatMap { DecoKind(rawValue: $0.type.rawValue) }
+            let isStop = kind != nil && kind != .ndl
+
+            return DiveProfilePoint(
                 time: data.time,
                 depth: data.depth,
                 temperature: data.temperature,
                 pressure: data.primaryTankPressure,
                 tankPressures: data.currentTankPressures,
                 po2: data.ppo2.last?.value,
-                ndl: ndl,
-                decoStop: decoStop,
-                decoTime: decoTime,
-                tts: tts,
+                events: data.events,
+                rawEvents: data.rawEvents,
+                decoKind: kind,
+                ndl: kind == .ndl ? deco?.time : nil,
+                decoStop: isStop ? deco?.depth : nil,
+                decoTime: isStop ? deco?.time : nil,
+                tts: deco?.tts,
                 currentGas: data.gasmix,
                 cns: data.cns,
                 rbt: data.rbt,
@@ -135,37 +277,17 @@ public class GenericParser {
                 bearing: data.bearing,
                 setpoint: data.setpoint
             )
-            data.profile.append(point)
-            
-            // Update maximum time
-            data.maxTime = max(data.maxTime, data.time)
-            
-            // Track temperature ranges
-            if let temp = data.temperature {
-                data.tempMinimum = min(data.tempMinimum, temp)
-                data.tempMaximum = max(data.tempMaximum, temp)
-                data.lastTemperature = temp
-                // Store surface temperature if not set
-                if data.tempSurface == 0 {
-                    data.tempSurface = temp
-                }
-            }
         }
-        
-        /// Adds tank information to the sample data
-        /// - Parameter tank: Tank information from the dive computer
+
         func addTank(_ tank: dc_tank_t) {
             data.tanks.append(GenericParser.convertTank(tank))
         }
-        
-        /// Sets the decompression model used for the dive
-        /// - Parameter model: Decompression model information
+
         func setDecoModel(_ model: dc_decomodel_t) {
             data.decoModel = GenericParser.convertDecoModel(model)
         }
 
-        /// Calculates time-weighted average depth from profile data
-        /// - Returns: Average depth in meters, or 0 if profile is empty
+        /// Time-weighted average depth (trapezoidal), or 0 for an empty profile.
         func calculateAverageDepth() -> Double {
             guard data.profile.count >= 2 else {
                 return data.profile.first?.depth ?? 0
@@ -173,23 +295,17 @@ public class GenericParser {
 
             var weightedSum: Double = 0
             var totalTime: TimeInterval = 0
-
-            // Calculate time-weighted average using trapezoidal rule
             for i in 0..<(data.profile.count - 1) {
-                let currentPoint = data.profile[i]
-                let nextPoint = data.profile[i + 1]
-
-                let timeInterval = nextPoint.time - currentPoint.time
-                let avgDepthSegment = (currentPoint.depth + nextPoint.depth) / 2.0
-
-                weightedSum += avgDepthSegment * timeInterval
-                totalTime += timeInterval
+                let current = data.profile[i]
+                let next = data.profile[i + 1]
+                let interval = next.time - current.time
+                weightedSum += (current.depth + next.depth) / 2.0 * interval
+                totalTime += interval
             }
-
             return totalTime > 0 ? weightedSum / totalTime : 0
         }
     }
-    
+
     /// Parses raw dive data into a structured DiveData object
     /// - Parameters:
     ///   - family: The family of the dive computer
@@ -237,206 +353,21 @@ public class GenericParser {
             throw ParserError.datetimeRetrievalFailed(datetimeStatus)
         }
         
-        let wrapper = SampleDataWrapper()
-        
-        // Convert wrapper to UnsafeMutableRawPointer
+        let wrapper = SampleAccumulator()
         let wrapperPtr = UnsafeMutableRawPointer(Unmanaged.passRetained(wrapper).toOpaque())
-        
+
         let sampleCallback: dc_sample_callback_t = { type, valuePtr, userData in
-            guard let userData = userData,
-                  let value = valuePtr?.pointee else { return }
-            
-            let wrapper = Unmanaged<SampleDataWrapper>.fromOpaque(userData).takeUnretainedValue()
-            
-            switch type {
-            case DC_SAMPLE_TIME:
-                wrapper.data.time = TimeInterval(value.time) / 1000.0
-                wrapper.addProfilePoint()
-                
-            case DC_SAMPLE_DEPTH:
-                wrapper.data.depth = value.depth
-                wrapper.data.maxDepth = max(wrapper.data.maxDepth, value.depth)
-                
-            case DC_SAMPLE_PRESSURE:
-                // Fired once per transmitter within a sample; record each against
-                // its own tank so multi-transmitter dives (sidemount, CCR) keep
-                // every curve instead of only the last (deepsealabs/libdc-swift#41).
-                wrapper.data.recordTankPressure(
-                    tank: Int(value.pressure.tank),
-                    value: value.pressure.value
-                )
-                
-            case DC_SAMPLE_TEMPERATURE:
-                wrapper.data.temperature = value.temperature
-                
-            case DC_SAMPLE_EVENT:
-                let eventType = value.event.type
-                var events: [DiveEvent] = []
-                
-                switch eventType {
-                case SAMPLE_EVENT_ASCENT.rawValue:
-                    events.append(.ascent)
-                case SAMPLE_EVENT_VIOLATION.rawValue:
-                    events.append(.violation)
-                case SAMPLE_EVENT_DECOSTOP.rawValue:
-                    events.append(.decoStop)
-                case SAMPLE_EVENT_GASCHANGE.rawValue:
-                    events.append(.gasChange)
-                case SAMPLE_EVENT_BOOKMARK.rawValue:
-                    events.append(.bookmark)
-                case SAMPLE_EVENT_SAFETYSTOP.rawValue:
-                    events.append(.safetyStop(mandatory: false))
-                case SAMPLE_EVENT_SAFETYSTOP_MANDATORY.rawValue:
-                    events.append(.safetyStop(mandatory: true))
-                case SAMPLE_EVENT_CEILING.rawValue:
-                    events.append(.ceiling)
-                case SAMPLE_EVENT_PO2.rawValue:
-                    events.append(.po2)
-                case SAMPLE_EVENT_DEEPSTOP.rawValue:
-                    events.append(.deepStop)
-                default:
-                    break
-                }
-                
-                // Add the events to the current point with all available data
-                let ndl = wrapper.data.deco?.type == DC_DECO_NDL ? wrapper.data.deco?.time : nil
-                let decoStop = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.depth : nil
-                let decoTime = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.time : nil
-                let tts = wrapper.data.deco?.tts
-
-                let point = DiveProfilePoint(
-                    time: wrapper.data.time,
-                    depth: wrapper.data.depth,
-                    temperature: wrapper.data.temperature,
-                    pressure: wrapper.data.pressure.last?.value,
-                    po2: wrapper.data.ppo2.last?.value,
-                    events: events,
-                    ndl: ndl,
-                    decoStop: decoStop,
-                    decoTime: decoTime,
-                    tts: tts,
-                    currentGas: wrapper.data.gasmix,
-                    cns: wrapper.data.cns,
-                    rbt: wrapper.data.rbt,
-                    heartbeat: wrapper.data.heartbeat,
-                    bearing: wrapper.data.bearing,
-                    setpoint: wrapper.data.setpoint
-                )
-                wrapper.data.profile.append(point)
-                
-            case DC_SAMPLE_RBT:
-                wrapper.data.rbt = value.rbt
-                
-            case DC_SAMPLE_HEARTBEAT:
-                wrapper.data.heartbeat = value.heartbeat
-                
-            case DC_SAMPLE_BEARING:
-                wrapper.data.bearing = value.bearing
-                
-            case DC_SAMPLE_SETPOINT:
-                wrapper.data.setpoint = value.setpoint
-                
-            case DC_SAMPLE_PPO2:
-                wrapper.data.ppo2.append((
-                    sensor: value.ppo2.sensor,
-                    value: value.ppo2.value
-                ))
-                
-            case DC_SAMPLE_CNS:
-                wrapper.data.cns = value.cns * 100.0  // Convert to percentage
-                
-            case DC_SAMPLE_DECO:
-                wrapper.data.deco = SampleData.DecoData(
-                    type: dc_deco_type_t(rawValue: value.deco.type),
-                    depth: value.deco.depth,
-                    time: value.deco.time,
-                    tts: value.deco.tts
-                )
-                
-            case DC_SAMPLE_GASMIX:
-                let gasMixUnknown = Int(UInt32.max)
-                let newGasMix = Int(value.gasmix)
-                // Synthesize a gasChange event when the active gas mix changes.
-                // Skip DC_GASMIX_UNKNOWN (0xFFFFFFFF), which Shearwater sends for tanks
-                // without AI transmitters — treating it as a real mix would poison the
-                // current-gas tracker and mislabel subsequent profile points.
-                if newGasMix != gasMixUnknown,
-                   let previousGas = wrapper.data.gasmix,
-                   newGasMix != previousGas {
-                    // Dedup: some computers emit both SAMPLE_EVENT_GASCHANGE and
-                    // DC_SAMPLE_GASMIX at the same timestamp. If the most recent profile
-                    // point already carries a .gasChange event at this time, skip.
-                    let alreadyHasGasChangeAtThisTime =
-                        wrapper.data.profile.last?.time == wrapper.data.time &&
-                        wrapper.data.profile.last?.events.contains(.gasChange) == true
-                    if !alreadyHasGasChangeAtThisTime {
-                        let ndl = wrapper.data.deco?.type == DC_DECO_NDL ? wrapper.data.deco?.time : nil
-                        let decoStop = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.depth : nil
-                        let decoTime = wrapper.data.deco?.type == DC_DECO_DECOSTOP ? wrapper.data.deco?.time : nil
-                        let tts = wrapper.data.deco?.tts
-                        let point = DiveProfilePoint(
-                            time: wrapper.data.time,
-                            depth: wrapper.data.depth,
-                            temperature: wrapper.data.temperature,
-                            pressure: wrapper.data.pressure.last?.value,
-                            po2: wrapper.data.ppo2.last?.value,
-                            events: [.gasChange],
-                            ndl: ndl,
-                            decoStop: decoStop,
-                            decoTime: decoTime,
-                            tts: tts,
-                            currentGas: newGasMix,
-                            cns: wrapper.data.cns,
-                            rbt: wrapper.data.rbt,
-                            heartbeat: wrapper.data.heartbeat,
-                            bearing: wrapper.data.bearing,
-                            setpoint: wrapper.data.setpoint
-                        )
-                        wrapper.data.profile.append(point)
-                    }
-                }
-                // Only update the previous-gas tracker when the new mix is real —
-                // don't poison it with DC_GASMIX_UNKNOWN.
-                if newGasMix != gasMixUnknown {
-                    wrapper.data.gasmix = newGasMix
-                }
-
-            case DC_SAMPLE_LOCATION:
-                if wrapper.data.location == nil {
-                    wrapper.data.location = DiveData.Location(
-                        latitude: value.location.latitude,
-                        longitude: value.location.longitude,
-                        altitude: value.location.altitude
-                    )
-                }
-
-            case DC_SAMPLE_VENDOR:
-                // Vendor-specific record: carry it through generically so any
-                // driver using this channel benefits. The bytes are only valid
-                // for the duration of this callback, so copy them.
-                let bytes: Data
-                if let raw = value.vendor.data, value.vendor.size > 0 {
-                    bytes = Data(bytes: raw, count: Int(value.vendor.size))
-                } else {
-                    bytes = Data()
-                }
-                wrapper.data.vendorSamples.append(
-                    DiveData.VendorSample(time: wrapper.data.time, type: value.vendor.type, data: bytes)
-                )
-
-            default:
-                break
-            }
+            guard let userData = userData, let value = valuePtr?.pointee else { return }
+            Unmanaged<SampleAccumulator>.fromOpaque(userData).takeUnretainedValue().handle(type, value)
         }
-        
+
         let samplesStatus = dc_parser_samples_foreach(parser, sampleCallback, wrapperPtr)
-        
-        // Release the wrapper after we're done
-        Unmanaged<SampleDataWrapper>.fromOpaque(wrapperPtr).release()
+        Unmanaged<SampleAccumulator>.fromOpaque(wrapperPtr).release()
         guard samplesStatus == DC_STATUS_SUCCESS else {
             throw ParserError.sampleProcessingFailed(samplesStatus)
         }
-        
+        wrapper.finish()
+
         // Get gas mix information
         if let gasmixCount: UInt32 = getField(parser, type: DC_FIELD_GASMIX_COUNT) {
             for i in 0..<gasmixCount {
@@ -581,7 +512,7 @@ public class GenericParser {
         )
     }
 
-    private static func convertTank(_ tank: dc_tank_t) -> DiveData.Tank {
+    fileprivate static func convertTank(_ tank: dc_tank_t) -> DiveData.Tank {
         return DiveData.Tank(
             volume: tank.volume,
             workingPressure: tank.workpressure,
@@ -607,7 +538,7 @@ public class GenericParser {
         }
     }
     
-    private static func convertDecoModel(_ model: dc_decomodel_t) -> DiveData.DecoModel {
+    fileprivate static func convertDecoModel(_ model: dc_decomodel_t) -> DiveData.DecoModel {
         let type: DiveData.DecoModel.DecoType
         
         switch model.type {

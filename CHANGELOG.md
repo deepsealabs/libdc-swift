@@ -4,6 +4,18 @@ All notable changes to LibDCSwift will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- `RawDiveEvent` on `DiveProfilePoint.rawEvents`: every `DC_SAMPLE_EVENT` with its payload (`rawType`/`type`, `value`, `flags`, `phase` begin/end, `timeOffset`), including types `DiveEvent` has no case for
+- `DecoKind` on `DiveProfilePoint.decoKind`: NDL, safety stop, deco stop or deep stop, from `DC_SAMPLE_DECO`
+
+### Changed
+- GenericParser closes a profile point when the next `DC_SAMPLE_TIME` arrives (or parsing ends), so depth, events and deco land on the sample they were reported in instead of the following timestamp
+- Repeated `DC_SAMPLE_TIME` callbacks with the same time continue one sample instead of adding duplicate points
+- Events no longer append an extra profile point; they attach to their sample
+- Deco fields are only set on samples where the computer reported `DC_SAMPLE_DECO`; safety and deep stops now fill `decoStop`/`decoTime`
+- `SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY` and `SAMPLE_EVENT_GASCHANGE2` map to their `DiveEvent` cases
+
 ## [1.7.0] - 2026-07-14
 ### Changed
 - Synced vendored libdivecomputer to upstream HEAD (`8e564eb`, `v0.9.0-74-g8e564eb`):

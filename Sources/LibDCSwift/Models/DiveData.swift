@@ -58,6 +58,144 @@ public enum DiveEvent: Hashable {
     }
 }
 
+/// An event exactly as libdivecomputer reported it through `DC_SAMPLE_EVENT`.
+///
+/// `DiveEvent` is a lossy, payload-free summary kept for compatibility; this
+/// carries the full payload (type, value, flags) and covers every event type,
+/// including ones `DiveEvent` has no case for.
+public struct RawDiveEvent: Hashable {
+    /// libdivecomputer's `parser_sample_event_t`, as a Swift enum.
+    public enum EventType: Hashable {
+        case none
+        case decoStop
+        case rbt
+        case ascent
+        case ceiling
+        case workload
+        case transmitter
+        case violation
+        case bookmark
+        case surface
+        case safetyStop
+        case gasChange
+        case safetyStopVoluntary
+        case safetyStopMandatory
+        case deepStop
+        case ceilingSafetyStop
+        /// Also libdivecomputer's `SAMPLE_EVENT_UNKNOWN`, which aliases `SAMPLE_EVENT_FLOOR`.
+        case floor
+        case diveTime
+        case maxDepth
+        case olf
+        case po2
+        case airTime
+        case rgbm
+        case heading
+        case tissueLevel
+        case gasChange2
+        /// A type newer than this build knows about.
+        case unknown(UInt32)
+
+        public init(rawValue: UInt32) {
+            switch rawValue {
+            case SAMPLE_EVENT_NONE.rawValue: self = .none
+            case SAMPLE_EVENT_DECOSTOP.rawValue: self = .decoStop
+            case SAMPLE_EVENT_RBT.rawValue: self = .rbt
+            case SAMPLE_EVENT_ASCENT.rawValue: self = .ascent
+            case SAMPLE_EVENT_CEILING.rawValue: self = .ceiling
+            case SAMPLE_EVENT_WORKLOAD.rawValue: self = .workload
+            case SAMPLE_EVENT_TRANSMITTER.rawValue: self = .transmitter
+            case SAMPLE_EVENT_VIOLATION.rawValue: self = .violation
+            case SAMPLE_EVENT_BOOKMARK.rawValue: self = .bookmark
+            case SAMPLE_EVENT_SURFACE.rawValue: self = .surface
+            case SAMPLE_EVENT_SAFETYSTOP.rawValue: self = .safetyStop
+            case SAMPLE_EVENT_GASCHANGE.rawValue: self = .gasChange
+            case SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY.rawValue: self = .safetyStopVoluntary
+            case SAMPLE_EVENT_SAFETYSTOP_MANDATORY.rawValue: self = .safetyStopMandatory
+            case SAMPLE_EVENT_DEEPSTOP.rawValue: self = .deepStop
+            case SAMPLE_EVENT_CEILING_SAFETYSTOP.rawValue: self = .ceilingSafetyStop
+            case SAMPLE_EVENT_FLOOR.rawValue: self = .floor
+            case SAMPLE_EVENT_DIVETIME.rawValue: self = .diveTime
+            case SAMPLE_EVENT_MAXDEPTH.rawValue: self = .maxDepth
+            case SAMPLE_EVENT_OLF.rawValue: self = .olf
+            case SAMPLE_EVENT_PO2.rawValue: self = .po2
+            case SAMPLE_EVENT_AIRTIME.rawValue: self = .airTime
+            case SAMPLE_EVENT_RGBM.rawValue: self = .rgbm
+            case SAMPLE_EVENT_HEADING.rawValue: self = .heading
+            case SAMPLE_EVENT_TISSUELEVEL.rawValue: self = .tissueLevel
+            case SAMPLE_EVENT_GASCHANGE2.rawValue: self = .gasChange2
+            default: self = .unknown(rawValue)
+            }
+        }
+    }
+
+    /// Whether the event marks the start or end of a condition (`SAMPLE_FLAGS_BEGIN`/`END`).
+    public enum Phase: Hashable {
+        case none
+        case begin
+        case end
+    }
+
+    /// Raw `parser_sample_event_t` value.
+    public let rawType: UInt32
+    /// Type-specific payload; meaning varies by event type and vendor.
+    public let value: UInt32
+    /// Raw `parser_sample_flags_t` bits.
+    public let flags: UInt32
+    /// The event's own `time` field (seconds); only a few drivers set it, most leave 0.
+    public let timeOffset: UInt32
+
+    public var type: EventType { EventType(rawValue: rawType) }
+
+    public var phase: Phase {
+        if flags & SAMPLE_FLAGS_BEGIN.rawValue != 0 { return .begin }
+        if flags & SAMPLE_FLAGS_END.rawValue != 0 { return .end }
+        return .none
+    }
+
+    /// The compatibility `DiveEvent` for this type, or nil when it has no case.
+    public var legacyEvent: DiveEvent? {
+        switch type {
+        case .ascent: return .ascent
+        case .violation: return .violation
+        case .decoStop: return .decoStop
+        case .gasChange, .gasChange2: return .gasChange
+        case .bookmark: return .bookmark
+        case .safetyStop, .safetyStopVoluntary: return .safetyStop(mandatory: false)
+        case .safetyStopMandatory: return .safetyStop(mandatory: true)
+        case .ceiling: return .ceiling
+        case .po2: return .po2
+        case .deepStop: return .deepStop
+        default: return nil
+        }
+    }
+
+    public init(rawType: UInt32, value: UInt32, flags: UInt32, timeOffset: UInt32 = 0) {
+        self.rawType = rawType
+        self.value = value
+        self.flags = flags
+        self.timeOffset = timeOffset
+    }
+}
+
+/// What a `DC_SAMPLE_DECO` sample describes (libdivecomputer's `dc_deco_type_t`).
+public enum DecoKind: Hashable {
+    case ndl
+    case safetyStop
+    case decoStop
+    case deepStop
+
+    public init?(rawValue: UInt32) {
+        switch rawValue {
+        case DC_DECO_NDL.rawValue: self = .ndl
+        case DC_DECO_SAFETYSTOP.rawValue: self = .safetyStop
+        case DC_DECO_DECOSTOP.rawValue: self = .decoStop
+        case DC_DECO_DEEPSTOP.rawValue: self = .deepStop
+        default: return nil
+        }
+    }
+}
+
 public struct DiveProfilePoint {
     public let time: TimeInterval
     public let depth: Double
@@ -65,14 +203,19 @@ public struct DiveProfilePoint {
     public let pressure: Double?  // Primary (lowest-index) tank; convenience for single-tank dives
     public let tankPressures: [Int: Double]  // Live pressure (bar) per tank index; holds every transmitter of the sample
     public let po2: Double?  // Oxygen partial pressure
-    public let pn2: Double?  // Nitrogen partial pressure
-    public let phe: Double?  // Helium partial pressure
+    // No dive computer reports inert-gas partial pressures; the parser never sets
+    // these. Derive them from the gas mix instead.
+    public let pn2: Double?
+    public let phe: Double?
     public let events: [DiveEvent]
+    /// Every `DC_SAMPLE_EVENT` reported in this sample, with its payload.
+    public let rawEvents: [RawDiveEvent]
 
-    // Deco data
-    public let ndl: UInt32?           // No-decompression limit (seconds)
-    public let decoStop: Double?      // Deco stop depth (meters)
-    public let decoTime: UInt32?      // Deco stop time (seconds)
+    // Deco data: only set on samples where the computer reported DC_SAMPLE_DECO.
+    public let decoKind: DecoKind?    // What the deco sample describes
+    public let ndl: UInt32?           // No-decompression limit (seconds); set when decoKind == .ndl
+    public let decoStop: Double?      // Stop depth (meters); set for safety, deco and deep stops
+    public let decoTime: UInt32?      // Stop time (seconds); set for safety, deco and deep stops
     public let tts: UInt32?           // Time to surface (seconds)
 
     // Gas data
@@ -95,6 +238,8 @@ public struct DiveProfilePoint {
         pn2: Double? = nil,
         phe: Double? = nil,
         events: [DiveEvent] = [],
+        rawEvents: [RawDiveEvent] = [],
+        decoKind: DecoKind? = nil,
         ndl: UInt32? = nil,
         decoStop: Double? = nil,
         decoTime: UInt32? = nil,
@@ -115,6 +260,8 @@ public struct DiveProfilePoint {
         self.pn2 = pn2
         self.phe = phe
         self.events = events
+        self.rawEvents = rawEvents
+        self.decoKind = decoKind
         self.ndl = ndl
         self.decoStop = decoStop
         self.decoTime = decoTime
