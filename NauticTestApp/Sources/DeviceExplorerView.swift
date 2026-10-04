@@ -12,6 +12,7 @@ import Clibdivecomputer
 struct DeviceExplorerView: View {
     let devicePtr: UnsafeMutablePointer<device_data_t>
     @ObservedObject var bluetoothManager: CoreBluetoothManager
+    @EnvironmentObject private var autoDownload: AutoDownloadController
     @StateObject private var viewModel = DiveDataViewModel()
 
     @State private var family: DeviceConfiguration.DeviceFamily?
@@ -77,6 +78,7 @@ struct DeviceExplorerView: View {
             }
 
             if isNautic {
+                autoDownloadPanel
                 nauticPanel
             }
 
@@ -105,6 +107,22 @@ struct DeviceExplorerView: View {
     private var familyLabel: String {
         guard let family else { return "detecting…" }
         return isNautic ? "Suunto Nautic/Ocean" : "\(family)"
+    }
+
+    // MARK: - Auto download
+
+    @ViewBuilder
+    private var autoDownloadPanel: some View {
+        if let name = bluetoothManager.connectedDevice?.name,
+           let device = AutoDownloadController.storedDevice(named: name) {
+            Section {
+                AutoDownloadToggle(device: device, controller: autoDownload)
+            } header: {
+                Text("Auto download")
+            } footer: {
+                Text("Turning this on hands the connection to auto download: it lists the watch, downloads new dives, and reconnects by itself. You'll land on its live log, which you can share from there.")
+            }
+        }
     }
 
     // MARK: - Suunto Nautic advanced panel (RPC transport exploration)
