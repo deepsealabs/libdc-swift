@@ -131,9 +131,8 @@ final class SuuntoNauticParserTests: XCTestCase {
         return collector
     }
 
-    /// Read a single scalar `DC_FIELD_*` off the C parser (the generic pipeline
-    /// derives divetime/avgdepth from samples instead of the field, so tests
-    /// that guard the field value read it directly).
+    /// Read a single scalar `DC_FIELD_*` off the C parser, for tests that
+    /// guard the raw field value rather than the pipeline's resolved one.
     private func field<T>(_ data: Data, _ field: dc_field_type_t, flags: UInt32 = 0, into value: inout T) -> Bool {
         var parser: OpaquePointer?
         let status = data.withUnsafeBytes { raw -> dc_status_t in
@@ -156,6 +155,11 @@ final class SuuntoNauticParserTests: XCTestCase {
         let dive = try parse(data)
         // Dive time = total time in the Diving state (single-span here = 1922 s).
         XCTAssertEqual(diveTimeField(data), 1922, accuracy: 1)
+        // The pipeline reports that, not the last sample (post-dive surface logging).
+        XCTAssertEqual(dive.divetime, 1922, accuracy: 1)
+        XCTAssertLessThan(dive.divetime, dive.profile.last?.time ?? 0)
+        // App DepthAverage = 21.51 m.
+        XCTAssertEqual(dive.avgDepth, 21.51, accuracy: 0.3)
         // Depth, in metres.
         XCTAssertEqual(dive.maxDepth, 33.11, accuracy: 0.05)
         // Sampled profile is present, with temperature.
@@ -510,6 +514,14 @@ final class SuuntoNauticParserTests: XCTestCase {
                     if abs(divetime - dtm) > 3 { print("  \(logid): divetime \(divetime) vs app \(dtm) (outlier)") }
                 }
             }
+            // The pipeline's dive time is the watch's, not the last sample's.
+            XCTAssertEqual(dive.divetime, divetime, accuracy: 1, "\(logid): pipeline divetime \(dive.divetime) vs field \(divetime)")
+            // Average depth only means something on a capture that reaches the end of the dive.
+            if let avg = header["DepthAverage"] as? Double, avg > 0,
+               let dtm = header["DiveTimeMax"] as? Double, (dive.profile.last?.time ?? 0) >= dtm - 60 {
+                XCTAssertEqual(dive.avgDepth, avg, accuracy: 1.0, "\(logid): avgDepth \(dive.avgDepth) vs app \(avg)")
+            }
+            print("  \(logid): divetime \(Int(dive.divetime)) s (last sample \(Int(dive.profile.last?.time ?? 0)) s, app \(header["DiveTimeMax"] ?? "-")), avgDepth \(String(format: "%.2f", dive.avgDepth)) (app \(header["DepthAverage"] ?? "-")), maxDepth \(String(format: "%.2f", dive.maxDepth)) (app \(header["MaxDepthAverage"] ?? "-"))")
             if let mda = header["MaxDepthAverage"] as? Double, mda > 0 {
                 XCTAssertEqual(dive.maxDepth, mda, accuracy: 2.0, "\(logid): maxDepth \(dive.maxDepth) vs app \(mda)")
             }

@@ -265,4 +265,45 @@ final class GenericParserSampleTests: XCTestCase {
         XCTAssertNil(p.pn2)
         XCTAssertNil(p.phe)
     }
+
+    // MARK: - Dive time / average depth resolution
+
+    func testDivetimePrefersTheComputerField() {
+        // Suunto Ocean 1787752091: samples run to ~37 min, the watch says 1922 s.
+        XCTAssertEqual(GenericParser.resolveDivetime(field: 1922, sampleSpan: 2220), 1922)
+    }
+
+    func testDivetimeFallsBackWhenFieldMissingOrZero() {
+        XCTAssertEqual(GenericParser.resolveDivetime(field: nil, sampleSpan: 2220), 2220)
+        XCTAssertEqual(GenericParser.resolveDivetime(field: 0, sampleSpan: 2220), 2220)
+    }
+
+    func testDivetimeFallsBackWhenFieldOverrunsTheSamples() {
+        XCTAssertEqual(GenericParser.resolveDivetime(field: 2281, sampleSpan: 2220), 2220)
+        // Whole-minute dive times may round a little past the last sample.
+        XCTAssertEqual(GenericParser.resolveDivetime(field: 2280, sampleSpan: 2220), 2280)
+    }
+
+    func testDivetimeUsesFieldWhenThereAreNoSamples() {
+        XCTAssertEqual(GenericParser.resolveDivetime(field: 1800, sampleSpan: 0), 1800)
+    }
+
+    func testAverageDepthPrefersPlausibleField() {
+        XCTAssertEqual(GenericParser.resolveAverageDepth(field: 21.5, maxDepth: 33.1, sampled: 18.0), 21.5)
+        XCTAssertEqual(GenericParser.resolveAverageDepth(field: nil, maxDepth: 33.1, sampled: 18.0), 18.0)
+        XCTAssertEqual(GenericParser.resolveAverageDepth(field: 0, maxDepth: 33.1, sampled: 18.0), 18.0)
+        XCTAssertEqual(GenericParser.resolveAverageDepth(field: 40, maxDepth: 33.1, sampled: 18.0), 18.0)
+    }
+
+    func testSampledAverageDepthStopsAtDiveTime() {
+        // 10 m for 100 s, then 100 s logged at the surface after the dive.
+        for (t, d) in [(0.0, 10.0), (100.0, 10.0), (100.0, 10.0), (101.0, 0.0), (200.0, 0.0)] {
+            time(t); depth(d)
+        }
+        acc.finish()
+        XCTAssertEqual(acc.calculateAverageDepth(upTo: 100), 10, accuracy: 0.001)
+        XCTAssertLessThan(acc.calculateAverageDepth(), 6)
+        // A limit between samples interpolates the partial interval.
+        XCTAssertEqual(acc.calculateAverageDepth(upTo: 100.5), (10 * 100 + 7.5 * 0.5) / 100.5, accuracy: 0.001)
+    }
 }

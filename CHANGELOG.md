@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suunto Nautic/Ocean: `/Summary` pages drop their 11-byte header and CRC, so no bytes are lost at page boundaries (#57)
 - Suunto Nautic/Ocean: every `/Logbook/Entries` page is listed (`StartAfterId`), so the newest dives on page 2+ are downloaded (#61)
 - Suunto Nautic/Ocean: downloads are checked against the size the watch lists; `SuuntoNauticExplorer.download` throws `incompleteDownload` on a mismatch (#58)
+- Dive time comes from the computer's `DC_FIELD_DIVETIME` instead of the last sample time, which counted post-dive surface logging (a Suunto Ocean dive timed at 1922 s by the watch came out as 37 min); falls back to the sample span when the field is missing or runs more than 60 s past the samples
+- Average depth comes from `DC_FIELD_AVGDEPTH` when plausible, else the sampled mean clipped to the dive time
 - DC Tester: a failed download suggests reconnecting first and only calls a dive gone when `/Logbook/Entries` no longer lists it; Capture raw on a `/Summary` path fetches every page (#56)
 
 ## [1.7.0] - 2026-07-14

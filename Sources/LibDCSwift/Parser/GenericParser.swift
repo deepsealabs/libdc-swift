@@ -288,7 +288,8 @@ public class GenericParser {
         }
 
         /// Time-weighted average depth (trapezoidal), or 0 for an empty profile.
-        func calculateAverageDepth() -> Double {
+        /// Time-weighted mean depth over the samples up to `limit` seconds.
+        func calculateAverageDepth(upTo limit: TimeInterval = .infinity) -> Double {
             guard data.profile.count >= 2 else {
                 return data.profile.first?.depth ?? 0
             }
@@ -297,9 +298,15 @@ public class GenericParser {
             var totalTime: TimeInterval = 0
             for i in 0..<(data.profile.count - 1) {
                 let current = data.profile[i]
-                let next = data.profile[i + 1]
-                let interval = next.time - current.time
-                weightedSum += (current.depth + next.depth) / 2.0 * interval
+                guard current.time < limit else { break }
+                var nextTime = data.profile[i + 1].time
+                var nextDepth = data.profile[i + 1].depth
+                if nextTime > limit {
+                    nextDepth = current.depth + (nextDepth - current.depth) * (limit - current.time) / (nextTime - current.time)
+                    nextTime = limit
+                }
+                let interval = nextTime - current.time
+                weightedSum += (current.depth + nextDepth) / 2.0 * interval
                 totalTime += interval
             }
             return totalTime > 0 ? weightedSum / totalTime : 0
@@ -367,6 +374,12 @@ public class GenericParser {
             throw ParserError.sampleProcessingFailed(samplesStatus)
         }
         wrapper.finish()
+
+        let divetime = resolveDivetime(field: getField(parser, type: DC_FIELD_DIVETIME), sampleSpan: wrapper.data.maxTime)
+        let avgDepth = resolveAverageDepth(
+            field: getField(parser, type: DC_FIELD_AVGDEPTH),
+            maxDepth: wrapper.data.maxDepth,
+            sampled: wrapper.calculateAverageDepth(upTo: divetime))
 
         // Get gas mix information
         if let gasmixCount: UInt32 = getField(parser, type: DC_FIELD_GASMIX_COUNT) {
@@ -476,8 +489,8 @@ public class GenericParser {
             number: diveNumber,
             datetime: date,
             maxDepth: wrapper.data.maxDepth,
-            avgDepth: wrapper.calculateAverageDepth(),
-            divetime: wrapper.data.maxTime,
+            avgDepth: avgDepth,
+            divetime: divetime,
             temperature: wrapper.data.tempMinimum,
             profile: wrapper.data.profile,
             tankPressure: wrapper.data.pressure.map { $0.value },
@@ -510,6 +523,26 @@ public class GenericParser {
             fingerprint: fingerprint,
             vendorSamples: wrapper.data.vendorSamples
         )
+    }
+
+    /// Last-sample time overcounts on computers that keep logging at the
+    /// surface after the dive (Suunto Nautic/Ocean), so prefer the computer's
+    /// own dive time when it fits inside the samples.
+    static func resolveDivetime(field: UInt32?, sampleSpan: TimeInterval) -> TimeInterval {
+        // Covers dive times stored in whole minutes, which round past the last sample.
+        let slack: TimeInterval = 60
+        guard let field, field > 0 else { return sampleSpan }
+        let divetime = TimeInterval(field)
+        if sampleSpan > 0 && divetime > sampleSpan + slack { return sampleSpan }
+        return divetime
+    }
+
+    /// The computer's own average depth, unless it's implausible against the
+    /// sampled max depth; otherwise the sampled mean over the dive time.
+    static func resolveAverageDepth(field: Double?, maxDepth: Double, sampled: Double) -> Double {
+        guard let field, field > 0, field.isFinite else { return sampled }
+        if maxDepth > 0 && field > maxDepth + 0.5 { return sampled }
+        return field
     }
 
     fileprivate static func convertTank(_ tank: dc_tank_t) -> DiveData.Tank {
