@@ -171,7 +171,7 @@ struct DeviceExplorerView: View {
         } header: {
             Text("Nautic: Custom GET Request")
         } footer: {
-            Text("\"Send\" does a plain GET. \"Capture raw\" does the full fetch and exports the bytes, for probing resources like /Mem/Logbook/Entries.")
+            Text("\"Send\" does a plain GET. \"Capture raw\" does the full fetch and exports the bytes, for probing resources like /Mem/Logbook/Entries. For /Logbook/byId/<id>/Summary it fetches every page.")
         }
 
         Section("Nautic: Download & Decode by ID") {
@@ -307,15 +307,27 @@ struct DeviceExplorerView: View {
         return formatter.string(from: date)
     }
 
+    /// The logbook id in a `/Logbook/byId/<id>/Summary` path.
+    private func summaryLogbookID(_ path: String) -> String? {
+        let parts = path.split(separator: "/")
+        guard parts.count == 4, parts[0] == "Logbook", parts[1] == "byId", parts[3] == "Summary" else { return nil }
+        return String(parts[2])
+    }
+
     private func captureRaw(path: String) {
         busy = true; statusMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let data = try SuuntoNauticExplorer.fetchRaw(device: devicePtr, path: path)
+                // /Summary is paged: fetch every page so no transfer is left half-done.
+                let summaryID = summaryLogbookID(path)
+                let data = try summaryID.map { try SuuntoNauticExplorer.downloadSummary(device: devicePtr, logbookID: $0) }
+                    ?? SuuntoNauticExplorer.fetchRaw(device: devicePtr, path: path)
                 DispatchQueue.main.async {
                     lastResponse = data
                     lastLabel = "RAW \(path)"
-                    statusMessage = "Captured \(data.count) raw bytes for \(path). Tap Export Raw Capture below and send us the file."
+                    statusMessage = summaryID != nil
+                        ? "Captured all \(data.count) /Summary data bytes for \(path). Tap Export Raw Capture below and send us the file."
+                        : "Captured \(data.count) raw bytes for \(path). Tap Export Raw Capture below and send us the file."
                     busy = false
                 }
             } catch {
@@ -365,6 +377,15 @@ struct DeviceExplorerView: View {
                         : "Downloaded \(data.count) bytes for \(id), but decoding failed — still worth exporting."
                     busy = false
                 }
+            } catch SuuntoNauticExplorer.ExplorerError.incompleteDownload(let data) {
+                let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
+                DispatchQueue.main.async {
+                    lastResponse = data
+                    lastLabel = "Download #\(id) (incomplete)"
+                    decodedProfile = profile
+                    statusMessage = "Incomplete download of \(id): \(data.count) bytes don't add up to the size the watch lists, so the end of the dive is probably missing. Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
+                    busy = false
+                }
             } catch {
                 let msg = describeDownloadFailure(id: id, error: error)
                 DispatchQueue.main.async {
@@ -375,25 +396,24 @@ struct DeviceExplorerView: View {
         }
     }
 
+    /// A failed download usually means stale session state (a transfer left
+    /// half-finished), which a reconnect clears. Only call the dive gone when
+    /// /Logbook/Entries no longer lists it.
     private func describeDownloadFailure(id: String, error: Error) -> String {
         var statusText = "\(error)"
         if case SuuntoNauticExplorer.ExplorerError.requestFailed(let st) = error {
             statusText = "status \(st.rawValue)"
         }
-        func probe(_ name: String) -> String {
-            let path = "/Logbook/byId/\(id)/\(name)"
-            if let data = try? SuuntoNauticExplorer.fetch(device: devicePtr, path: path), !data.isEmpty {
-                return "\(name): \(data.count) B"
-            }
-            return "\(name): unavailable"
+        let lead = "Download of \(id) failed (\(statusText)). Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
+        guard let listed = try? SuuntoNauticExplorer.listDives(device: devicePtr) else {
+            return lead
         }
-        let summary = probe("Summary")
-        let descriptors = probe("Descriptors")
-        let dataGone = statusText.contains("-9") || statusText.contains("-8")
-        let lead = dataGone
-            ? "Dive #\(id): raw profile (/Data) unavailable (\(statusText)). If this is an older dive, its raw data has been overwritten on the watch and is no longer downloadable over Bluetooth — only the most recent dives stay available."
-            : "Download of \(id) failed: \(statusText)."
-        return "\(lead)\nPer-resource: /Data unavailable, \(summary), \(descriptors)."
+        if let numericID = UInt32(id), !listed.contains(numericID) {
+            return "\(lead)\nDive #\(id) is no longer listed in /Logbook/Entries, so the watch no longer has it to download over Bluetooth."
+        }
+        let summary = (try? SuuntoNauticExplorer.downloadSummary(device: devicePtr, logbookID: id))
+            .map { "/Summary: \($0.count) B" } ?? "/Summary: unavailable"
+        return "\(lead)\nThe watch still lists dive #\(id). \(summary)."
     }
 
     private func exportCapture() {
