@@ -86,7 +86,11 @@ let package = Package(
                 "ViewModels/DiveDataViewModel.swift",
                 "Parser/GenericParser.swift",
                 "DiveLogRetriever.swift",
-                "SuuntoNauticExplorer.swift"
+                "SuuntoNauticExplorer.swift",
+                "AutoSync/AutoSyncPolicy.swift",
+                "AutoSync/NauticSyncLink.swift",
+                "AutoSync/NauticAutoSync.swift",
+                "AutoSync/CoreBluetoothNauticConnector.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
