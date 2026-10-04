@@ -99,6 +99,11 @@ public enum SuuntoNauticExplorer {
         guard let dcDevice = devicePtr.pointee.device else {
             throw ExplorerError.notConnected
         }
+        return try listDives(dcDevice: dcDevice)
+    }
+
+    /// `listDives(device:)` on an already-open `dc_device_t`.
+    public static func listDives(dcDevice: OpaquePointer) throws -> [UInt32] {
         guard let buffer = dc_buffer_new(0) else {
             throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
         }
@@ -113,8 +118,7 @@ public enum SuuntoNauticExplorer {
             throw ExplorerError.requestFailed(status)
         }
 
-        let data = dataFromBuffer(buffer)
-        let bytes = [UInt8](data)
+        let bytes = [UInt8](dataFromBuffer(buffer))
         var ids: [UInt32] = []
         var i = 0
         while i + 4 <= bytes.count {
@@ -133,7 +137,11 @@ public enum SuuntoNauticExplorer {
         guard let dcDevice = devicePtr.pointee.device else {
             throw ExplorerError.notConnected
         }
+        return try download(dcDevice: dcDevice, logbookID: logbookID)
+    }
 
+    /// `download(device:logbookID:)` on an already-open `dc_device_t`.
+    public static func download(dcDevice: OpaquePointer, logbookID: String) throws -> Data {
         guard let buffer = dc_buffer_new(0) else {
             throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
         }
@@ -148,6 +156,105 @@ public enum SuuntoNauticExplorer {
         }
 
         return dataFromBuffer(buffer)
+    }
+
+    // MARK: - Value subscriptions
+
+    /// A Whiteboard-encoded value as the watch sends it: `[type:u16 LE][value]`.
+    public struct WhiteboardValue: Equatable, CustomStringConvertible {
+        public let type: UInt16
+        public let payload: Data
+
+        public init(type: UInt16, payload: Data) {
+            self.type = type
+            self.payload = payload
+        }
+
+        /// Parses `[type:u16 LE][value...]`; notifications carry a trailing pad byte, which is ignored.
+        public init?(encoded data: Data) {
+            let bytes = [UInt8](data)
+            guard bytes.count >= 2 else { return nil }
+            type = UInt16(bytes[0]) | (UInt16(bytes[1]) << 8)
+            payload = Data(bytes[2...])
+        }
+
+        /// Integer value for the bool/int types (1 bool, 2/3 int8/uint8, 4/5 int16/uint16, 6/7 int32/uint32, 8 int64).
+        public var integerValue: Int? {
+            let b = [UInt8](payload)
+            func le(_ n: Int) -> UInt64? {
+                guard b.count >= n else { return nil }
+                return (0..<n).reduce(UInt64(0)) { $0 | (UInt64(b[$1]) << (8 * UInt64($1))) }
+            }
+            switch type {
+            case 1, 3: return le(1).map { Int($0) }
+            case 2: return le(1).map { Int(Int8(truncatingIfNeeded: $0)) }
+            case 4: return le(2).map { Int(Int16(truncatingIfNeeded: $0)) }
+            case 5: return le(2).map { Int($0) }
+            case 6: return le(4).map { Int(Int32(truncatingIfNeeded: $0)) }
+            case 7: return le(4).map { Int($0) }
+            case 8: return le(8).map { Int(Int64(bitPattern: $0)) }
+            default: return nil
+            }
+        }
+
+        public var description: String {
+            if let v = integerValue { return "\(v)" }
+            return "type \(type): " + payload.map { String(format: "%02X", $0) }.joined(separator: " ")
+        }
+    }
+
+    /// A live subscription; `handle` identifies its notifications.
+    public struct Subscription: Equatable {
+        public let path: String
+        public let handle: [UInt8]
+        public let initialValue: WhiteboardValue?
+
+        /// Notifications address a resource by the last two handle bytes; the first differs between the GET reply and the pushed frames.
+        public func matches(_ other: [UInt8]) -> Bool {
+            handle.count == 3 && other.count == 3 && handle[1] == other[1] && handle[2] == other[2]
+        }
+    }
+
+    public struct Notification: Equatable {
+        public let handle: [UInt8]
+        public let value: WhiteboardValue?
+    }
+
+    /// Subscribes to a value resource such as `/Logbook/UnsynchronisedLogs`
+    /// (count of logs the Suunto app hasn't synced) or `/Sync/BusyState`.
+    public static func subscribe(dcDevice: OpaquePointer, path: String) throws -> Subscription {
+        guard let buffer = dc_buffer_new(0) else {
+            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
+        }
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        let status = suunto_nautic_device_subscribe(dcDevice, path, &handle, buffer)
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+        return Subscription(path: path, handle: handle, initialValue: WhiteboardValue(encoded: dataFromBuffer(buffer)))
+    }
+
+    public static func unsubscribe(dcDevice: OpaquePointer, _ subscription: Subscription) throws {
+        let status = suunto_nautic_device_unsubscribe(dcDevice, subscription.handle)
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+    }
+
+    /// Waits up to `timeoutMs` for the next pushed value; nil on timeout.
+    public static func waitForNotification(dcDevice: OpaquePointer, timeoutMs: UInt32) throws -> Notification? {
+        guard let buffer = dc_buffer_new(0) else {
+            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
+        }
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        let status = suunto_nautic_device_wait_notification(dcDevice, timeoutMs, &handle, buffer)
+        if status == DC_STATUS_TIMEOUT { return nil }
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+        return Notification(handle: handle, value: WhiteboardValue(encoded: dataFromBuffer(buffer)))
     }
 
     /// Download a dive's whole `/Summary` (every page, data bytes only): raw,
