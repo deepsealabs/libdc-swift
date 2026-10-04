@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NauticAutoSync`: hands-off Suunto Nautic/Ocean download. Waits for the watch, downloads only dives whose logbook id isn't synced yet, listens for the watch's `/Logbook/UnsynchronisedLogs` and `/Sync/BusyState` pushes while connected, and reconnects under a `ReconnectPolicy` that mirrors the Suunto app (4 s retry, 20/96 attempt caps, 120 min cool-down, loop detection), resuming with the dives still missing (#45)
 - `SuuntoNauticExplorer.subscribe`/`unsubscribe`/`waitForNotification` and `dc_device_t` overloads of `listDives`/`download`
 - DC Tester: Auto download switch on the device list and the Nautic device screen, with a live log that can be shared or copied as plain text
+- `DiveDataViewModel.lastDownloadInterruption`: set when a download delivered some dives and then failed, so the app can say "some dives couldn't be downloaded, reconnect and sync again"
 
 ### Changed
 - GenericParser closes a profile point when the next `DC_SAMPLE_TIME` arrives (or parsing ends), so depth, events and deco land on the sample they were reported in instead of the following timestamp
@@ -20,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY` and `SAMPLE_EVENT_GASCHANGE2` map to their `DiveEvent` cases
 
 ### Fixed
+- Suunto Nautic/Ocean: `dc_device_foreach` no longer skips a dive whose download fails (a dropped link, an empty read of a listed dive) and reports success. It stops at that dive with the error, having delivered only the newer dives, so the stored fingerprint can't move past dives that were never fetched. Entries listed with no data are still skipped
+- `retrieveDiveLogs` never reads a Suunto Nautic/Ocean `PROTOCOL` failure as "no new dives"
 - Suunto Nautic/Ocean: dives over ~1.14 MB compressed are no longer cut short at 4096 stream frames, losing the ascent and safety stop (#60)
 - Suunto Nautic/Ocean: each dive stream is closed with `STREAM_STOP`, and a GET's reply must echo its message id, so a leftover stream chunk can't make the `/Summary` fetch 404 (#59)
 - Suunto Nautic/Ocean: `/Summary` pages drop their 11-byte header and CRC, so no bytes are lost at page boundaries (#57)

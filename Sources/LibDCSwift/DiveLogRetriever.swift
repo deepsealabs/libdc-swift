@@ -56,6 +56,55 @@ public class DiveLogRetriever {
         dive.profile.isEmpty && dive.divetime <= 1
     }
 
+    /// What a finished `dc_device_foreach` means for the caller and for the
+    /// stored fingerprint.
+    struct DownloadOutcome: Equatable {
+        var succeeded: Bool
+        var saveFingerprint: Bool
+        /// Some dives arrived, then the download failed: the rest are still on
+        /// the device and a later sync must fetch them.
+        var interrupted: Bool
+        var emptyReadOnly: Bool
+    }
+
+    /// Fingerprint rule: the stored fingerprint only advances when the whole
+    /// enumeration succeeded. Drivers walk newest-first, so on any error the
+    /// dives that did arrive are all newer than the failed one; storing any of
+    /// their fingerprints would make the next sync stop before the gap. On
+    /// error the old fingerprint is kept and the next sync re-walks from it
+    /// (re-delivering the dives this session already got; hosts dedupe them).
+    static func outcome(status: dc_status_t, family: dc_family_t, fingerprintMatched: Bool,
+                        hasNewDives: Bool, hadStoredFingerprint: Bool, emptyReadCount: Int) -> DownloadOutcome {
+        var succeeded: Bool
+        var saveFingerprint = false
+
+        switch status {
+        case DC_STATUS_SUCCESS:
+            succeeded = true
+            saveFingerprint = hasNewDives
+        case DC_STATUS_PROTOCOL where fingerprintMatched:
+            succeeded = true
+        case DC_STATUS_PROTOCOL where !hasNewDives && hadStoredFingerprint && family != DC_FAMILY_SUUNTO_NAUTIC:
+            // Legacy leniency for drivers that end a no-new-dives walk with
+            // PROTOCOL. The Nautic driver only returns PROTOCOL for a real
+            // failure (a refused stream), so it is never read as "no new dives".
+            succeeded = true
+        default:
+            succeeded = false
+        }
+
+        // An empty read never advances the fingerprint, so a clean retry
+        // re-downloads; all-empty is a soft failure (e.g. "close the Suunto app").
+        let emptyReadOnly = emptyReadCount > 0 && !hasNewDives
+        if emptyReadCount > 0 {
+            saveFingerprint = false
+            if emptyReadOnly { succeeded = false }
+        }
+
+        return DownloadOutcome(succeeded: succeeded, saveFingerprint: saveFingerprint,
+                               interrupted: !succeeded && hasNewDives, emptyReadOnly: emptyReadOnly)
+    }
+
     /// Stable, human-stable name for a libdivecomputer status code, used for
     /// logging and for `DiveDataViewModel.lastDownloadStatus` (analytics).
     static func statusName(_ status: dc_status_t) -> String {
@@ -402,68 +451,34 @@ public class DiveLogRetriever {
                     }
                 }
 
+                let family = dc_device_get_type(dcDevice)
                 DispatchQueue.main.async {
-                    // Determine the outcome of the download
-                    var downloadSucceeded: Bool
-                    var shouldSaveFingerprint: Bool
-
-                    switch enumStatus {
-                    case DC_STATUS_SUCCESS:
-                        // Normal successful completion
-                        downloadSucceeded = true
-                        shouldSaveFingerprint = context.hasNewDives
-                        
-                    case DC_STATUS_PROTOCOL:
-                        // Protocol error - could be genuine error OR early termination from callback
-                        if context.fingerprintMatched {
-                            // We stopped because we found matching fingerprint (no new dives)
-                            downloadSucceeded = true
-                            shouldSaveFingerprint = false  // Don't update fingerprint if no new dives
-                        } else if context.hasNewDives {
-                            // We got some dives but then hit protocol error - partial download
-                            logWarning("⚠️ Protocol error after downloading \(context.logCount - 1) dive(s)")
-                            downloadSucceeded = false
-                            shouldSaveFingerprint = false  // Don't save partial download fingerprint
-                        } else if context.storedFingerprint != nil {
-                            // Protocol error with fingerprint but no dives downloaded
-                            downloadSucceeded = true
-                            shouldSaveFingerprint = false
-                        } else {
-                            // Protocol error before getting any dives - genuine error
-                            logError("❌ Protocol error before downloading any dives")
-                            downloadSucceeded = false
-                            shouldSaveFingerprint = false
-                        }
-                        
-                    default:
-                        // Any other error status
-                        downloadSucceeded = false
-                        shouldSaveFingerprint = false
-                    }
-                    
-                    // Empty reads override the status-derived outcome: if any
-                    // dive came back empty this session, never advance the
-                    // fingerprint (so a clean retry re-downloads rather than
-                    // reporting "no new dives" forever). When *every* read was
-                    // empty and nothing real arrived, it's a soft failure the
-                    // caller should surface (e.g. "close the Suunto app"),
-                    // distinct from a genuine no-new-dives.
-                    let emptyReadOnly = context.emptyReadCount > 0 && !context.hasNewDives
-                    if context.emptyReadCount > 0 {
-                        shouldSaveFingerprint = false
-                        if emptyReadOnly { downloadSucceeded = false }
-                    }
+                    let outcome = DiveLogRetriever.outcome(status: enumStatus, family: family,
+                                                           fingerprintMatched: context.fingerprintMatched,
+                                                           hasNewDives: context.hasNewDives,
+                                                           hadStoredFingerprint: context.storedFingerprint != nil,
+                                                           emptyReadCount: context.emptyReadCount)
+                    let downloadSucceeded = outcome.succeeded
+                    let shouldSaveFingerprint = outcome.saveFingerprint
+                    let emptyReadOnly = outcome.emptyReadOnly
 
                     // Record a stable status key for analytics before routing.
                     viewModel.lastDownloadStatus = emptyReadOnly
                         ? "emptyRead"
                         : (downloadSucceeded ? "success" : statusName(enumStatus))
+                    viewModel.lastDownloadInterruption = outcome.interrupted
+                        ? DiveDataViewModel.DownloadInterruption(status: statusName(enumStatus),
+                                                                 divesDownloaded: context.logCount - 1 - context.emptyReadCount)
+                        : nil
 
                     // Handle the outcome
                     if !downloadSucceeded {
                         if emptyReadOnly {
                             logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
                             viewModel.updateProgress(.emptyRead)
+                        } else if outcome.interrupted {
+                            logWarning("⚠️ Download interrupted after \(context.logCount - 1) dive(s): DC_STATUS_\(statusName(enumStatus)); fingerprint kept")
+                            viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: enumStatus)
                         } else {
                             viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(enumStatus)", status: enumStatus)
                         }

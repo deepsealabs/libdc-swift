@@ -23,6 +23,22 @@ public class DiveDataViewModel: ObservableObject {
     /// "emptyRead" when every dive came back empty, or "success". Distinct from
     /// `status`, which is a localized human message.
     @Published public var lastDownloadStatus: String = ""
+    /// Set when the most recent download delivered some dives and then failed
+    /// (e.g. the BLE link dropped). The stored fingerprint was not advanced, so
+    /// syncing again fetches the dives that are missing; nil otherwise.
+    @Published public var lastDownloadInterruption: DownloadInterruption?
+
+    public struct DownloadInterruption: Equatable {
+        /// DC_STATUS name of the failure, e.g. "IO" or "TIMEOUT".
+        public let status: String
+        /// Dives delivered before the failure.
+        public let divesDownloaded: Int
+
+        public init(status: String, divesDownloaded: Int) {
+            self.status = status
+            self.divesDownloaded = divesDownloaded
+        }
+    }
     
     /// Key format: "fingerprint_{deviceType}_{serial}"
     private let fingerprintKeyPrefix = "fingerprint_"
@@ -385,6 +401,7 @@ public class DiveDataViewModel: ObservableObject {
         DispatchQueue.main.async {
             self.progress = .notStarted
             self.status = ""
+            self.lastDownloadInterruption = nil
         }
     }
 }
