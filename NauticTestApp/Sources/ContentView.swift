@@ -6,6 +6,8 @@ import Clibdivecomputer
 
 struct ContentView: View {
     @StateObject private var bluetoothManager = CoreBluetoothManager.sharedManager
+    @EnvironmentObject private var autoDownload: AutoDownloadController
+    @State private var showAutoDownload = false
 
     @State private var isConnecting = false
     @State private var connectError: String?
@@ -17,6 +19,8 @@ struct ContentView: View {
                 experimentalBanner
 
                 List {
+                    autoDownloadSection
+
                     Section {
                         if bluetoothManager.discoveredPeripherals.isEmpty {
                             Text(bluetoothManager.isScanning ? "Scanning…" : "No devices found yet.")
@@ -28,7 +32,9 @@ struct ContentView: View {
                     } header: {
                         Text("Discovered Devices")
                     } footer: {
-                        Text("Looking for BLE service 61353090-8231-49cc-b57a-886370740041 (Suunto Nautic/Ocean) alongside every other dive computer this package recognizes.")
+                        Text(autoDownload.isActive
+                             ? "Turn auto download off to connect manually; it holds the Bluetooth link while it runs."
+                             : "Looking for BLE service 61353090-8231-49cc-b57a-886370740041 (Suunto Nautic/Ocean) alongside every other dive computer this package recognizes.")
                     }
 
                     if let connectError {
@@ -60,14 +66,48 @@ struct ContentView: View {
                     DeviceExplorerView(devicePtr: devicePtr, bluetoothManager: bluetoothManager)
                 }
             }
+            .navigationDestination(isPresented: $showAutoDownload) {
+                AutoDownloadView(controller: autoDownload)
+            }
+            .onChange(of: autoDownload.deviceName) { name in
+                // Turning it on from the device screen pops that screen; land on the live log instead.
+                if name != nil {
+                    connectedPeripheralID = nil
+                    showAutoDownload = true
+                }
+            }
         }
     }
 
     private var explorerBinding: Binding<Bool> {
         Binding(
-            get: { connectedPeripheralID != nil && bluetoothManager.hasValidDeviceDataPtr() },
+            get: { connectedPeripheralID != nil && bluetoothManager.hasValidDeviceDataPtr() && !autoDownload.isActive },
             set: { if !$0 { connectedPeripheralID = nil } }
         )
+    }
+
+    @ViewBuilder
+    private var autoDownloadSection: some View {
+        Section {
+            let devices = AutoDownloadController.nauticDevices
+            if devices.isEmpty {
+                Text("Connect to your Suunto Nautic/Ocean once (Scan, then Connect). It then shows up here with an Auto download switch.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            ForEach(devices, id: \.name) { device in
+                AutoDownloadToggle(device: device, controller: autoDownload)
+            }
+            Button {
+                showAutoDownload = true
+            } label: {
+                Label("Live log and actions", systemImage: "list.bullet.rectangle")
+            }
+        } header: {
+            Text("Auto download")
+        } footer: {
+            Text("Keeps looking for the watch, downloads only dives it hasn't got yet, and reconnects by itself if the link drops. Works with the app in the background.")
+        }
     }
 
     private var experimentalBanner: some View {
@@ -100,7 +140,7 @@ struct ContentView: View {
                 Button("Connect") {
                     connect(to: peripheral)
                 }
-                .disabled(isConnecting)
+                .disabled(isConnecting || autoDownload.isActive)
             }
         }
     }

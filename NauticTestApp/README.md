@@ -24,7 +24,11 @@ for the reverse-engineering thread this is based on.
 1. Open the app, tap **Scan**, connect to your dive computer.
 2. On the Device Explorer screen, tap **List Dives** and pick one — it
    downloads and decodes automatically.
-3. If anything looks wrong, use **Export Raw Capture** (with a note
+3. To try auto download, flip **Auto download** on (device list, or the
+   device screen while connected). It finds the watch, downloads new dives
+   and reconnects by itself; **Live log and actions** shows what it's doing
+   and **Share log** exports it as text.
+4. If anything looks wrong, use **Export Raw Capture** (with a note
    describing what happened on the dive) and send it back — raw captures
    are what extend and validate support.
 

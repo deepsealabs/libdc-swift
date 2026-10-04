@@ -62,6 +62,19 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var refuseStreams = 0
         /// Drop this many bytes off the end of every /Data stream (a short download).
         var truncateStreamBy = 0
+        /// How many /Data streams `truncateStreamBy` applies to.
+        var truncatedStreams = Int.max
+        /// Lose the link after this many chunks of the next /Data stream.
+        var dropAfterChunks: Int?
+        /// Value resources the watch can be subscribed to.
+        var unsyncedCount: UInt16 = 0
+        var busy: UInt8 = 0
+        private(set) var linkUp = true
+        private(set) var drops = 0
+        private(set) var connects = 0
+        private(set) var subscribed: [String: [UInt8]] = [:]
+        private(set) var subscribeCount = 0
+        private let lock = NSLock()
 
         private(set) var getPaths: [String] = []
         private(set) var summaryOffsets: [UInt32] = []
@@ -80,8 +93,48 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         init(dives: [FakeDive]) { self.dives = dives }
 
-        // Host -> watch bytes (HDLC-encoded).
-        func hostWrote(_ bytes: UnsafeRawBufferPointer) {
+        /// A fresh link: whatever was in flight on the old one is gone.
+        func reconnect() {
+            lock.lock(); defer { lock.unlock() }
+            linkUp = true
+            rx.removeAll(); rxIndex = 0
+            rxDecode.removeAll(); rxInFrame = false; rxEscaped = false
+            pendingDataPath = nil
+            subscribed.removeAll()
+            connects += 1
+        }
+
+        func dropLink() {
+            lock.lock(); defer { lock.unlock() }
+            linkUp = false
+            drops += 1
+        }
+
+        func mutate(_ body: (FakeWatch) -> Void) {
+            lock.lock(); defer { lock.unlock() }
+            body(self)
+        }
+
+        /// Pushes the current value of a subscribed resource, as the watch does when it changes.
+        func notify(_ path: String) {
+            lock.lock(); defer { lock.unlock() }
+            guard let h = subscribed[path] else { return }
+            let body = value(for: path)
+            let content = [0x00, 0x00] + h + [0x01, 0x80, 0x00] + body + [0x00] + Self.crc
+            send([0xA5, 0x01] + Self.u16(content.count - 6) + content)
+        }
+
+        private func value(for path: String) -> [UInt8] {
+            path == "/Sync/BusyState" ? [0x03, 0x00, busy] : [0x05, 0x00] + Self.u16(Int(unsyncedCount))
+        }
+
+        private static let valuePaths: Set<String> = ["/Logbook/UnsynchronisedLogs", "/Sync/BusyState"]
+
+        // Host -> watch bytes (HDLC-encoded). False once the link is down.
+        @discardableResult
+        func hostWrote(_ bytes: UnsafeRawBufferPointer) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard linkUp else { return false }
             for b in bytes {
                 if b == 0x7E {
                     if rxInFrame && !rxDecode.isEmpty { handle(rxDecode) }
@@ -95,12 +148,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 rxDecode.append(rxEscaped ? b ^ 0x20 : b)
                 rxEscaped = false
             }
+            return true
         }
 
-        // Watch -> host bytes.
-        func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int {
+        // Watch -> host bytes; nil once the link is down and nothing is left in flight.
+        func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int? {
+            lock.lock(); defer { lock.unlock() }
             let n = min(size, rx.count - rxIndex)
-            guard n > 0 else { return 0 }
+            guard n > 0 else { return linkUp ? 0 : nil }
             rx.withUnsafeBufferPointer { buffer.copyMemory(from: $0.baseAddress! + rxIndex, byteCount: n) }
             rxIndex += n
             if rxIndex == rx.count { rx.removeAll(keepingCapacity: true); rxIndex = 0 }
@@ -156,6 +211,18 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 send([0xA5, 0x02, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + Self.crc)
             case 0x0B: // FETCH1
                 break
+            case 0x10 where handles[Array(f[6...8])].map(Self.valuePaths.contains) == true: // subscribe to a value
+                let h = Array(f[6...8])
+                let path = handles[h]!
+                subscribed[path] = h
+                subscribeCount += 1
+                let content = msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + value(for: path) + Self.crc
+                send([0xA5, 0x08] + Self.u16(content.count - 6) + content)
+            case 0x11 where handles[Array(f[6...8])].map(Self.valuePaths.contains) == true: // unsubscribe a value
+                let h = Array(f[6...8])
+                subscribed[handles[h]!] = nil
+                let content = msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00] + Self.crc
+                send([0xA5, 0x09] + Self.u16(content.count - 6) + content)
             case 0x10: // FETCH2: stream the pending /Data
                 guard let path = pendingDataPath, let dive = dive(for: path) else { return }
                 if refuseStreams > 0 {
@@ -165,11 +232,21 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 }
                 streamsServed += 1
                 send([0xA5, 0x08, 0x08, 0x00, 0x00, 0x00, 0xF0, 0x24, 0x0E, 0x01, 0x80, 0x00] + Self.u16(200))
-                let bytes = dive.compressed.dropLast(truncateStreamBy)
+                let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
+                if truncate > 0 { truncatedStreams -= 1 }
+                let bytes = dive.compressed.dropLast(truncate)
                 var i = bytes.startIndex
+                var sent = 0
                 while i < bytes.endIndex {
+                    if let limit = dropAfterChunks, sent == limit {
+                        dropAfterChunks = nil
+                        linkUp = false
+                        drops += 1
+                        return
+                    }
                     let j = min(i + mdsPayloadSize, bytes.endIndex)
                     send(chunkFrame(bytes[i..<j]))
+                    sent += 1
                     i = j
                 }
             case 0x11: // STREAM_STOP
@@ -236,15 +313,29 @@ final class SuuntoNauticTransportTests: XCTestCase {
     }
 
     private var sessions: [Session] = []
+    private let sessionsLock = NSLock()
 
     override func tearDown() {
-        for s in sessions {
-            if let d = s.device { dc_device_close(d) }
-            if let io = s.iostream { dc_iostream_close(io) }
-            if let c = s.context { dc_context_free(c) }
-        }
+        sessionsLock.lock()
+        let open = sessions
         sessions.removeAll()
+        sessionsLock.unlock()
+        open.forEach(Self.close)
         super.tearDown()
+    }
+
+    private static func close(_ s: Session) {
+        if let d = s.device { dc_device_close(d) }
+        if let io = s.iostream { dc_iostream_close(io) }
+        if let c = s.context { dc_context_free(c) }
+    }
+
+    private func close(device: OpaquePointer) {
+        sessionsLock.lock()
+        let index = sessions.firstIndex { $0.device == device }
+        let session = index.map { sessions.remove(at: $0) }
+        sessionsLock.unlock()
+        session.map(Self.close)
     }
 
     private static func watch(_ userdata: UnsafeMutableRawPointer?) -> FakeWatch {
@@ -253,18 +344,26 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
     private func open(_ watch: FakeWatch) throws -> OpaquePointer {
         let s = Session(watch: watch)
+        sessionsLock.lock()
         sessions.append(s)
+        sessionsLock.unlock()
         XCTAssertEqual(dc_context_new(&s.context), DC_STATUS_SUCCESS)
 
         var cbs = dc_custom_cbs_t()
         cbs.set_timeout = { _, _ in DC_STATUS_SUCCESS }
         cbs.read = { userdata, data, size, actual in
-            let n = SuuntoNauticTransportTests.watch(userdata).hostRead(into: data!, size: size)
+            guard let n = SuuntoNauticTransportTests.watch(userdata).hostRead(into: data!, size: size) else {
+                actual?.pointee = 0
+                return DC_STATUS_IO
+            }
             actual?.pointee = n
             return n == 0 ? DC_STATUS_TIMEOUT : DC_STATUS_SUCCESS
         }
         cbs.write = { userdata, data, size, actual in
-            SuuntoNauticTransportTests.watch(userdata).hostWrote(UnsafeRawBufferPointer(start: data, count: size))
+            guard SuuntoNauticTransportTests.watch(userdata).hostWrote(UnsafeRawBufferPointer(start: data, count: size)) else {
+                actual?.pointee = 0
+                return DC_STATUS_IO
+            }
             actual?.pointee = size
             return DC_STATUS_SUCCESS
         }
@@ -454,5 +553,249 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(data, dive.decompressed + dive.summary)
         XCTAssertEqual(watch.streamsServed, 1)
+    }
+
+    // MARK: - Auto download: reconnect, resume, no duplicates
+
+    /// Opens a fresh driver session on the same fake watch for every connect, like a real reconnect.
+    private final class FakeConnector: NauticSyncConnector {
+        let watch: FakeWatch
+        let openSession: () throws -> OpaquePointer
+        let closeSession: (OpaquePointer) -> Void
+        private let lock = NSLock()
+        private var _connects = 0
+        var connects: Int { lock.lock(); defer { lock.unlock() }; return _connects }
+
+        init(watch: FakeWatch, open: @escaping () throws -> OpaquePointer, close: @escaping (OpaquePointer) -> Void) {
+            self.watch = watch
+            openSession = open
+            closeSession = close
+        }
+
+        func waitUntilPresent(timeout: TimeInterval?) async throws -> Bool { true }
+
+        func connect() throws -> NauticSyncLink {
+            lock.lock(); _connects += 1; lock.unlock()
+            watch.reconnect()
+            return DCDeviceNauticLink(device: try openSession(), onClose: closeSession)
+        }
+
+        func simulateDrop() {
+            watch.dropLink()
+        }
+    }
+
+    /// Virtual time: sleeps return at once and are recorded.
+    private final class VirtualClock {
+        private let lock = NSLock()
+        private var current = Date(timeIntervalSince1970: 1_800_000_000)
+        private var recorded: [TimeInterval] = []
+        var sleeps: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return recorded }
+
+        private func advance(_ seconds: TimeInterval) {
+            lock.lock(); defer { lock.unlock() }
+            current = current.addingTimeInterval(seconds)
+            recorded.append(seconds)
+        }
+
+        var environment: NauticAutoSync.Environment {
+            NauticAutoSync.Environment(now: { [self] in
+                lock.lock(); defer { lock.unlock() }
+                return current
+            }, sleep: { [self] seconds in
+                advance(seconds)
+                try Task.checkCancellation()
+                await Task.yield()
+            })
+        }
+    }
+
+    private final class EventLog {
+        private let lock = NSLock()
+        private var items: [NauticAutoSync.Event] = []
+        var all: [NauticAutoSync.Event] { lock.lock(); defer { lock.unlock() }; return items }
+        func append(_ e: NauticAutoSync.Event) { lock.lock(); items.append(e); lock.unlock() }
+    }
+
+    private func makeAutoSync(_ watch: FakeWatch, store: AutoSyncStore = InMemoryAutoSyncStore(),
+                              configure: (inout NauticAutoSync.Configuration) -> Void = { _ in })
+        -> (NauticAutoSync, FakeConnector, VirtualClock, EventLog) {
+        let connector = FakeConnector(watch: watch, open: { [unowned self] in try self.open(watch) },
+                                      close: { [unowned self] in self.close(device: $0) })
+        var config = NauticAutoSync.Configuration()
+        config.refreshInterval = nil
+        configure(&config)
+        let clock = VirtualClock()
+        let sync = NauticAutoSync(deviceKey: "Suunto Nautic test", connector: connector, store: store,
+                                  configuration: config, environment: clock.environment)
+        let log = EventLog()
+        Task { for await event in sync.events { log.append(event) } }
+        return (sync, connector, clock, log)
+    }
+
+    private func waitFor(_ log: EventLog, timeout: TimeInterval = 20, _ done: ([NauticAutoSync.Event]) -> Bool) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !done(log.all) {
+            if Date() > deadline { return XCTFail("timed out; events: \(log.all)") }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
+    private func stopAndWait(_ sync: NauticAutoSync, _ log: EventLog) async {
+        sync.stop()
+        await waitFor(log) { $0.contains(.state(.stopped)) }
+    }
+
+    private static func dives(_ events: [NauticAutoSync.Event]) -> [NauticAutoSync.DownloadedDive] {
+        events.compactMap { if case .dive(let d) = $0 { return d } else { return nil } }
+    }
+
+    private static func completedSyncs(_ events: [NauticAutoSync.Event]) -> [NauticAutoSync.SyncSummary] {
+        events.compactMap { if case .syncCompleted(let s) = $0 { return s } else { return nil } }
+    }
+
+    func testAutoSyncReconnectsAfterADropMidDataAndResumes() async throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_000_000 + UInt32($0) * 7200, profileBytes: 6000) }
+        let watch = FakeWatch(dives: dives)
+        let store = InMemoryAutoSyncStore()
+        let (sync, connector, clock, log) = makeAutoSync(watch, store: store)
+
+        // First dive downloads, then the link dies two chunks into the second.
+        var streams = 0
+        sync.onDive = { _ in
+            streams += 1
+            if streams == 1 { watch.mutate { $0.dropAfterChunks = 2 } }
+        }
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let delivered = Self.dives(events)
+        XCTAssertEqual(delivered.map(\.id), dives.map(\.id), "oldest first, each dive exactly once")
+        for (dive, fake) in zip(delivered, dives) {
+            XCTAssertEqual(dive.data, Data(fake.decompressed + fake.summary))
+            XCTAssertTrue(dive.isComplete)
+        }
+        XCTAssertEqual(delivered[1].attempts, 2, "the dive the link died on is fetched again from the start")
+        XCTAssertEqual(watch.drops, 1)
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertTrue(events.contains(.state(.reconnecting(attempt: 1, delay: 4))))
+        XCTAssertTrue(clock.sleeps.contains(4))
+        XCTAssertEqual(store.syncedIDs(device: sync.deviceKey), Set(dives.map(\.id)))
+        XCTAssertEqual(Self.completedSyncs(events).first?.downloaded, dives.map(\.id))
+    }
+
+    func testAutoSyncReconnectsToRetryAnIncompleteDive() async throws {
+        let dive = FakeDive(id: 1_789_100_000, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.truncateStreamBy = 300
+        watch.truncatedStreams = 2 // the driver's own retry also comes back short
+        let (sync, connector, _, log) = makeAutoSync(watch)
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let delivered = Self.dives(log.all)
+        XCTAssertEqual(delivered.count, 1)
+        XCTAssertEqual(delivered.first?.isComplete, true)
+        XCTAssertEqual(delivered.first?.data, Data(dive.decompressed + dive.summary))
+        XCTAssertEqual(connector.connects, 2)
+    }
+
+    func testAutoSyncKeepsAPersistentlyShortDiveOnceRetriesRunOut() async throws {
+        let dive = FakeDive(id: 1_789_200_000, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.truncateStreamBy = 300
+        let (sync, connector, _, log) = makeAutoSync(watch) { $0.retriesPerDive = 1 }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let delivered = Self.dives(log.all)
+        XCTAssertEqual(delivered.count, 1, "delivered once, never duplicated")
+        XCTAssertEqual(delivered.first?.isComplete, false)
+        XCTAssertEqual(delivered.first?.attempts, 2)
+        XCTAssertEqual(connector.connects, 2)
+    }
+
+    func testAutoSyncSkipsDivesAlreadySynced() async throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_300_000 + UInt32($0) * 7200, profileBytes: 600, summaryBytes: 100) }
+        let watch = FakeWatch(dives: dives)
+        let store = InMemoryAutoSyncStore()
+        store.markSynced([dives[0].id, dives[1].id], device: "Suunto Nautic test")
+        let (sync, _, _, log) = makeAutoSync(watch, store: store)
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        XCTAssertEqual(Self.dives(log.all).map(\.id), [dives[2].id])
+        XCTAssertEqual(watch.streamsServed, 1)
+    }
+
+    func testUnsynchronisedLogsNotificationTriggersASync() async throws {
+        let first = FakeDive(id: 1_789_400_000, profileBytes: 600, summaryBytes: 100)
+        let second = FakeDive(id: 1_789_410_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [first])
+        watch.unsyncedCount = 1
+        let (sync, connector, _, log) = makeAutoSync(watch)
+
+        sync.start()
+        await waitFor(log) { events in
+            guard let done = events.firstIndex(where: { if case .syncCompleted = $0 { return true } else { return false } }) else { return false }
+            return events[done...].contains(.state(.watching))
+        }
+        XCTAssertNotNil(watch.subscribed["/Logbook/UnsynchronisedLogs"], "subscribed again after the download")
+        XCTAssertNotNil(watch.subscribed["/Sync/BusyState"])
+
+        watch.mutate {
+            $0.dives.append(second)
+            $0.unsyncedCount = 2
+        }
+        watch.notify("/Logbook/UnsynchronisedLogs")
+        await waitFor(log) { Self.completedSyncs($0).count == 2 }
+        await stopAndWait(sync, log)
+
+        XCTAssertEqual(Self.dives(log.all).map(\.id), [first.id, second.id])
+        XCTAssertEqual(Self.completedSyncs(log.all).last?.downloaded, [second.id])
+        XCTAssertEqual(connector.connects, 1, "the trigger is handled on the same connection")
+    }
+
+    func testBusyWatchDefersTheSync() async throws {
+        let dive = FakeDive(id: 1_789_500_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        watch.busy = 1
+        let (sync, _, _, log) = makeAutoSync(watch)
+
+        sync.start()
+        await waitFor(log) { $0.contains(.state(.watchBusy)) }
+        XCTAssertFalse(watch.getPaths.contains("/Logbook/Entries"), "nothing is listed while the watch is busy")
+
+        watch.mutate { $0.busy = 0 }
+        watch.notify("/Sync/BusyState")
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        XCTAssertEqual(Self.dives(log.all).map(\.id), [dive.id])
+    }
+
+    func testSimulatedDropDuringIdleReconnects() async throws {
+        let dive = FakeDive(id: 1_789_600_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, _, log) = makeAutoSync(watch)
+
+        sync.start()
+        await waitFor(log) { $0.contains(.state(.watching)) }
+        watch.mutate { $0.dives.append(FakeDive(id: 1_789_610_000, profileBytes: 600, summaryBytes: 100)) }
+        sync.simulateDrop()
+        await waitFor(log) { Self.completedSyncs($0).count == 2 }
+        await stopAndWait(sync, log)
+
+        XCTAssertEqual(Self.dives(log.all).map(\.id), [dive.id, 1_789_610_000], "a reconnect always re-lists")
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertEqual(watch.drops, 1)
     }
 }
