@@ -382,26 +382,35 @@ struct DeviceExplorerView: View {
 
     private func downloadDive(id: String) {
         busy = true; statusMessage = nil; decodedProfile = nil
+        let listed = diveIDs
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let data = try SuuntoNauticExplorer.download(device: devicePtr, logbookID: id)
                 let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
+                let owner = foreignOwner(of: data, requested: id, listed: listed)
                 DispatchQueue.main.async {
                     lastResponse = data
-                    lastLabel = "Download #\(id)"
+                    lastLabel = downloadLabel(id: id, owner: owner, incomplete: false)
                     decodedProfile = profile
-                    statusMessage = profile != nil
-                        ? "Decoded logbook entry \(id) (\(data.count) bytes)."
-                        : "Downloaded \(data.count) bytes for \(id), but decoding failed — still worth exporting."
+                    if let owner {
+                        statusMessage = "Requested dive \(id), but the \(data.count) bytes received are \(owner). Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
+                    } else {
+                        statusMessage = profile != nil
+                            ? "Decoded logbook entry \(id) (\(data.count) bytes)."
+                            : "Downloaded \(data.count) bytes for \(id), but decoding failed — still worth exporting."
+                    }
                     busy = false
                 }
             } catch SuuntoNauticExplorer.ExplorerError.incompleteDownload(let data) {
                 let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
+                let owner = foreignOwner(of: data, requested: id, listed: listed)
                 DispatchQueue.main.async {
                     lastResponse = data
-                    lastLabel = "Download #\(id) (incomplete)"
+                    lastLabel = downloadLabel(id: id, owner: owner, incomplete: true)
                     decodedProfile = profile
-                    statusMessage = "Incomplete download of \(id): \(data.count) bytes don't add up to the size the watch lists, so the end of the dive is probably missing. Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
+                    let what = owner.map { "the \(data.count) bytes received are \($0), not the dive requested" }
+                        ?? "\(data.count) bytes don't add up to the size the watch lists, so the end of the dive is probably missing"
+                    statusMessage = "Incomplete download of \(id): \(what). Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
                     busy = false
                 }
             } catch {
@@ -412,6 +421,24 @@ struct DeviceExplorerView: View {
                 }
             }
         }
+    }
+
+    private func downloadLabel(id: String, owner: String?, incomplete: Bool) -> String {
+        let notes = [owner.map { "bytes are \($0)" }, incomplete ? "incomplete" : nil].compactMap { $0 }
+        return notes.isEmpty ? "Download #\(id)" : "Download #\(id) (\(notes.joined(separator: ", ")))"
+    }
+
+    /// Describes whose bytes these are when they aren't the requested dive's, e.g. "dive #1787752091's".
+    /// Nil when they match the request or the profile has no GPS start to tell by.
+    private func foreignOwner(of data: Data, requested id: String, listed: [UInt32]) -> String? {
+        guard let requested = UInt32(id),
+              let start = (try? SuuntoNauticExplorer.decode(sbemData: data))?.startDate else { return nil }
+        if abs(start.timeIntervalSince1970 - TimeInterval(requested)) <= 120 { return nil }
+        let candidates = listed.isEmpty ? ((try? SuuntoNauticExplorer.listDives(device: devicePtr)) ?? []) : listed
+        if let owner = SuuntoNauticExplorer.owningLogbookID(of: data, among: candidates) {
+            return "dive #\(owner)'s"
+        }
+        return "from a dive starting \(start.formatted(date: .abbreviated, time: .shortened))"
     }
 
     /// A failed download usually means stale session state (a transfer left

@@ -158,6 +158,17 @@ public enum SuuntoNauticExplorer {
         return dataFromBuffer(buffer)
     }
 
+    /// The listed dive a download's bytes belong to, matched on the profile's
+    /// GPS-anchored start time (a logbook id is the dive's UNIX start). Nil when
+    /// the profile has no GPS fix or no listed id is within `tolerance`.
+    public static func owningLogbookID(of sbemData: Data, among listed: [UInt32], tolerance: TimeInterval = 120) -> UInt32? {
+        guard let start = (try? decode(sbemData: sbemData))?.startDate?.timeIntervalSince1970 else { return nil }
+        return listed
+            .map { (id: $0, gap: abs(TimeInterval($0) - start)) }
+            .filter { $0.gap <= tolerance }
+            .min { $0.gap < $1.gap }?.id
+    }
+
     // MARK: - Value subscriptions
 
     /// A Whiteboard-encoded value as the watch sends it: `[type:u16 LE][value]`.

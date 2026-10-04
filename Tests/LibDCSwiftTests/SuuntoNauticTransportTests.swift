@@ -21,7 +21,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         init(id: UInt32, profileBytes: Int, summaryBytes: Int = 2036) {
             self.id = id
             var profile = Array("SBEM0103".utf8)
-            profile += (0..<max(0, profileBytes - profile.count)).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) }
+            let seed = Int(id % 251)
+            profile += (0..<max(0, profileBytes - profile.count)).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7 &+ seed) }
             decompressed = profile
             compressed = FakeDive.heatshrinkLiterals(profile)
             var s = Array("SBEM0103".utf8)
@@ -90,6 +91,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
         private(set) var entriesStartAfter: [UInt32?] = []
         private(set) var streamStops = 0
         private(set) var streamsServed = 0
+        private(set) var releases = 0
+        /// Paths of the /Data streams served, in order.
+        private(set) var streamedPaths: [String] = []
 
         private var rx: [UInt8] = []
         private var rxIndex = 0
@@ -98,7 +102,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
         private var rxEscaped = false
         private var handles: [[UInt8]: String] = [:]
         private var nextHandle: UInt8 = 0x10
-        private var pendingDataPath: String?
+        /// Per-id resources resolve into a slot (00 or 10) bound to that id until a 0x0B release, as on the real watch.
+        private var heldSlots: Set<[UInt8]> = []
+
+        /// Handles of per-id resources still bound (not yet released).
+        var heldIdHandles: [String] {
+            lock.lock(); defer { lock.unlock() }
+            return heldSlots.compactMap { handles[$0] }.sorted()
+        }
 
         init(dives: [FakeDive]) { self.dives = dives }
 
@@ -108,7 +119,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
             linkUp = true
             rx.removeAll(); rxIndex = 0
             rxDecode.removeAll(); rxInFrame = false; rxEscaped = false
-            pendingDataPath = nil
+            heldSlots.removeAll()
             subscribed.removeAll()
             connects += 1
         }
@@ -208,18 +219,19 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 let pathLen = Int(f[9])
                 let path = String(decoding: f[10..<(10 + pathLen)], as: UTF8.self)
                 getPaths.append(path)
-                let h: [UInt8] = [0xF0, 0x24, nextHandle]
-                nextHandle &+= 1
+                let h = resolve(path)
                 handles[h] = path
-                if path.hasSuffix("/Data") { pendingDataPath = path }
                 if path.hasSuffix("/Summary") && leftoverChunksBeforeSummaryAck > 0 {
                     for _ in 0..<leftoverChunksBeforeSummaryAck { send(chunkFrame(ArraySlice(repeating: 0xEE, count: 40))) }
                     leftoverChunksBeforeSummaryAck = 0
                 }
                 // Real ACK: A5 02 08 00 <msgid> F0 24 00 01 80 00 C8 00 <crc>.
                 send([0xA5, 0x02, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + Self.crc)
-            case 0x0B: // FETCH1
-                break
+            case 0x0B: // release a resolved handle
+                let h = Array(f[6...8])
+                releases += 1
+                heldSlots.remove(h)
+                send([0xA5, 0x03, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + Self.crc)
             case 0x10 where handles[Array(f[6...8])].map(Self.valuePaths.contains) == true: // subscribe to a value
                 let h = Array(f[6...8])
                 let path = handles[h]!
@@ -232,15 +244,17 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 subscribed[handles[h]!] = nil
                 let content = msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00] + Self.crc
                 send([0xA5, 0x09] + Self.u16(content.count - 6) + content)
-            case 0x10: // FETCH2: stream the pending /Data
-                guard let path = pendingDataPath, let dive = dive(for: path) else { return }
+            case 0x10: // subscribe to a /Data handle: stream the dive bound to it
+                let h = Array(f[6...8])
+                guard let path = handles[h], path.hasSuffix("/Data"), let dive = dive(for: path) else { return }
                 if refuseStreams > 0 {
                     refuseStreams -= 1
-                    send([0xA5, 0x08, 0x08, 0x00, 0x00, 0x00, 0xF0, 0x24, 0x0E, 0x01, 0x80, 0x00] + Self.u16(423))
+                    send([0xA5, 0x08, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(423))
                     return
                 }
                 streamsServed += 1
-                send([0xA5, 0x08, 0x08, 0x00, 0x00, 0x00, 0xF0, 0x24, 0x0E, 0x01, 0x80, 0x00] + Self.u16(200))
+                streamedPaths.append(path)
+                send([0xA5, 0x08, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200))
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
                 let bytes = dive.compressed.dropLast(truncate)
@@ -258,9 +272,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     sent += 1
                     i = j
                 }
-            case 0x11: // STREAM_STOP
+            case 0x11: // unsubscribe a /Data handle; the resolution stays bound until released
                 streamStops += 1
-                pendingDataPath = nil
                 send([0xA5, 0x09, 0x02, 0x00] + msgid)
             case 0x0D: // fetch on a handle
                 let h = Array(f[6...8])
@@ -287,6 +300,26 @@ final class SuuntoNauticTransportTests: XCTestCase {
             default:
                 break
             }
+        }
+
+        /// Static paths get a fresh F0 handle. A per-id path (/Logbook/byId/<id>/<res>) gets the
+        /// resource's 00 slot, or its 10 slot while 00 is still bound, rebinding 10 when both are.
+        private func resolve(_ path: String) -> [UInt8] {
+            let parts = path.split(separator: "/")
+            guard parts.count == 4, parts[0] == "Logbook", parts[1] == "byId" else {
+                defer { nextHandle &+= 1 }
+                return [0xF0, 0x24, nextHandle]
+            }
+            let resource: UInt8 = switch parts[3] {
+            case "Data": 0x0E
+            case "Descriptors": 0x0F
+            case "Summary": 0x12
+            default: 0x10
+            }
+            let slot0: [UInt8] = [0x00, 0x24, resource]
+            let h: [UInt8] = heldSlots.contains(slot0) ? [0x10, 0x24, resource] : slot0
+            heldSlots.insert(h)
+            return h
         }
 
         private func dive(for path: String) -> FakeDive? {
@@ -641,6 +674,42 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(data, dive.decompressed + dive.summary)
         XCTAssertEqual(watch.streamsServed, 1)
+    }
+
+    // MARK: - #29: a by-id download streams the dive it asked for
+
+    func testByIdDownloadAfterAnotherOnTheSameLinkReturnsTheRequestedDive() throws {
+        // urbamax's two dives: same /Summary size, so only the profile tells them apart.
+        let a = FakeDive(id: 1_787_752_091, profileBytes: 5000, summaryBytes: 2338)
+        let b = FakeDive(id: 1_788_616_918, profileBytes: 6000, summaryBytes: 2338)
+        let watch = FakeWatch(dives: [a, b])
+        let device = try open(watch)
+
+        let (statusA, dataA) = download(device, id: a.id)
+        XCTAssertEqual(statusA, DC_STATUS_SUCCESS)
+        XCTAssertEqual(dataA, a.decompressed + a.summary)
+
+        let (statusB, dataB) = download(device, id: b.id)
+        XCTAssertEqual(statusB, DC_STATUS_SUCCESS)
+        XCTAssertEqual(dataB, b.decompressed + b.summary, "dive B's request must not come back with dive A's profile")
+        XCTAssertFalse(dataB.starts(with: a.decompressed))
+
+        XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(a.id)/Data", "/Logbook/byId/\(b.id)/Data"])
+        XCTAssertEqual(watch.heldIdHandles, [], "every per-id resolution is released")
+    }
+
+    func testForeachOfSeveralDivesStreamsEachOnce() throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_000_000 + UInt32($0) * 7_200, profileBytes: 3000 + $0 * 500) }
+        let watch = FakeWatch(dives: dives)
+        let device = try open(watch)
+
+        let (status, got) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        let newestFirst = dives.sorted { $0.id > $1.id }
+        XCTAssertEqual(got.map(\.fingerprint), newestFirst.map(\.id))
+        XCTAssertEqual(got.map(\.data), newestFirst.map { $0.decompressed + $0.summary })
+        XCTAssertEqual(watch.streamedPaths, newestFirst.map { "/Logbook/byId/\($0.id)/Data" })
+        XCTAssertEqual(watch.heldIdHandles, [])
     }
 
     // MARK: - Auto download: reconnect, resume, no duplicates
