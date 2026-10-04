@@ -18,6 +18,7 @@ struct DeviceExplorerView: View {
     @State private var family: DeviceConfiguration.DeviceFamily?
     @State private var busy = false
     @State private var statusMessage: String?
+    @State private var ignoreFingerprint = false
 
     // Suunto Nautic advanced panel state.
     @State private var customPath: String = "/System/Mode"
@@ -53,6 +54,8 @@ struct DeviceExplorerView: View {
                     Label("Download Dives", systemImage: "square.and.arrow.down")
                 }
                 .disabled(busy)
+                Toggle("Download all (ignore fingerprint)", isOn: $ignoreFingerprint)
+                    .disabled(busy)
 
                 ForEach(Array(viewModel.dives.enumerated()), id: \.offset) { _, dive in
                     NavigationLink {
@@ -276,13 +279,18 @@ struct DeviceExplorerView: View {
             from: devicePtr,
             device: peripheral,
             viewModel: viewModel,
-            bluetoothManager: bluetoothManager
+            bluetoothManager: bluetoothManager,
+            useFingerprint: !ignoreFingerprint
         ) { success in
             DispatchQueue.main.async {
                 busy = false
-                statusMessage = success
-                    ? "Downloaded \(viewModel.dives.count) dive(s)."
-                    : "Download failed: \(viewModel.status)"
+                if !success {
+                    statusMessage = "Download failed: \(viewModel.status)"
+                } else if viewModel.progress == .noNewDives {
+                    statusMessage = "No new dives since the last download. Turn on Download all to fetch every dive again."
+                } else {
+                    statusMessage = "Downloaded \(viewModel.dives.count) dive(s)."
+                }
             }
         }
     }

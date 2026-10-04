@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SuuntoNauticExplorer.owningLogbookID(of:among:)`: which listed dive a download's bytes belong to, from the profile's GPS start time
 - DC Tester: a by-id download whose bytes belong to another dive says so in the status and the Last Response header, which always name the id requested
 - `DiveDataViewModel.lastDownloadInterruption`: set when a download delivered some dives and then failed, so the app can say "some dives couldn't be downloaded, reconnect and sync again"
+- `NauticAutoSync.Configuration.connectTimeout` (25 s): a connect attempt that hasn't finished is cancelled (`NauticSyncConnector.cancelConnect()`), the `watchUnreachable` event fires with a "press a button on the watch" hint, and the sync falls back to scanning; DC Tester shows the hint in its status (#29)
+- DC Tester: "Download all (ignore fingerprint)" switch next to Download Dives
 
 ### Changed
 - GenericParser closes a profile point when the next `DC_SAMPLE_TIME` arrives (or parsing ends), so depth, events and deco land on the sample they were reported in instead of the following timestamp
@@ -33,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suunto Nautic/Ocean: downloads are checked against the size the watch lists; `SuuntoNauticExplorer.download` throws `incompleteDownload` on a mismatch (#58)
 - Dive time comes from the computer's `DC_FIELD_DIVETIME` instead of the last sample time, which counted post-dive surface logging (a Suunto Ocean dive timed at 1922 s by the watch came out as 37 min); falls back to the sample span when the field is missing or runs more than 60 s past the samples
 - Average depth comes from `DC_FIELD_AVGDEPTH` when plausible, else the sampled mean clipped to the dive time
+- Suunto Nautic/Ocean: the sync trigger subscription comes back after an automatic reconnect that followed a drop mid-download. Message ids now carry on from the previous connection instead of restarting at 1 (the watch can keep a dropped link's session and leave a repeated request unanswered); an unanswered subscription is retried 3 times 2 s apart and again later instead of being given up for the session; unsubscribing releases a per-id handle, and a 00 slot left bound by a dropped link is released when a GET lands on the 10 slot (#29)
+- Suunto Nautic/Ocean: dive time is truncated like the Suunto app's (4680.5 s is 78:00, not 78:01), and dive time and max depth come from the watch's own values in the `/Summary` when they agree with the profile; max depth was the deepest logged sample, 0.2-0.3 m shallower than the app (#29)
+- `retrieveDiveLogs(useFingerprint: false)` clears a fingerprint an earlier download on the same connection set
+- DC Tester: Download Dives says "No new dives since the last download" instead of "Downloaded 0 dive(s)" when the fingerprint stops it
 - DC Tester: a failed download suggests reconnecting first and only calls a dive gone when `/Logbook/Entries` no longer lists it; Capture raw on a `/Summary` path fetches every page (#56)
 
 ## [1.7.0] - 2026-07-14

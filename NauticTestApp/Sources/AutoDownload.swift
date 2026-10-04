@@ -23,6 +23,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
     @Published private(set) var state: NauticAutoSync.State = .stopped
     @Published private(set) var log: [LogLine] = []
     @Published private(set) var dives: [Dive] = []
+    /// Set when a connect timed out; cleared once the watch is connected again.
+    @Published private(set) var unreachableHint: String?
 
     private var autoSync: NauticAutoSync?
     private let defaults = UserDefaults.standard
@@ -136,6 +138,10 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         switch event {
         case .state(let newState):
             state = newState
+            switch newState {
+            case .listing, .downloading, .watching, .watchBusy, .stopped: unreachableHint = nil
+            default: break
+            }
             append("State: \(Self.describe(newState))")
         case .log(let message):
             append(message)
@@ -147,6 +153,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
             append("Downloaded dive \(dive.id) (\(dive.data.count) bytes, \(dive.isComplete ? "complete" : "INCOMPLETE"), attempt \(dive.attempts)): \(summary)")
         case .diveFailed(let id, let reason):
             append("Dive \(id) failed: \(reason)")
+        case .watchUnreachable:
+            unreachableHint = "Watch not reachable. It may be asleep: press a button on the watch."
         case .syncCompleted(let summary):
             append("Sync done: \(summary.downloaded.count) new of \(summary.listed) on the watch" +
                    (summary.failed.isEmpty ? "" : ", failed: \(summary.failed.map(String.init).joined(separator: ", "))"))
@@ -213,7 +221,7 @@ struct AutoDownloadToggle: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Auto download").font(.headline)
                 Text(controller.isEnabled(for: device)
-                     ? AutoDownloadController.describe(controller.state).capitalizingFirstLetter
+                     ? controller.unreachableHint ?? AutoDownloadController.describe(controller.state).capitalizingFirstLetter
                      : device.name)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -232,6 +240,11 @@ struct AutoDownloadView: View {
             Section("Status") {
                 Text(AutoDownloadController.describe(controller.state).capitalizingFirstLetter)
                     .font(.headline)
+                if let hint = controller.unreachableHint {
+                    Label(hint, systemImage: "hand.tap")
+                        .font(.callout)
+                        .foregroundColor(.orange)
+                }
                 if let name = controller.deviceName {
                     LabeledContent("Watch", value: name)
                 }
