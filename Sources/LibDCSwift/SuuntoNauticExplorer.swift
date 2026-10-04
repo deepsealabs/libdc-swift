@@ -24,6 +24,9 @@ public enum SuuntoNauticExplorer {
     public enum ExplorerError: Error {
         case notConnected
         case requestFailed(dc_status_t)
+        /// The download doesn't match the size `/Logbook/Entries` lists for the
+        /// dive, so it is most likely truncated. The bytes received are attached.
+        case incompleteDownload(Data)
     }
 
     /// Issue a raw GET request to an arbitrary RPC endpoint path, e.g.
@@ -137,6 +140,30 @@ public enum SuuntoNauticExplorer {
         defer { dc_buffer_free(buffer) }
 
         let status = suunto_nautic_device_download(dcDevice, logbookID, buffer)
+        if status == DC_STATUS_DATAFORMAT, dc_buffer_get_size(buffer) > 0 {
+            throw ExplorerError.incompleteDownload(dataFromBuffer(buffer))
+        }
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+
+        return dataFromBuffer(buffer)
+    }
+
+    /// Download a dive's whole `/Summary` (every page, data bytes only): raw,
+    /// uncompressed SBEM0103. A plain `fetch` of it returns only the first page
+    /// and leaves the rest of the transfer pending on the watch.
+    public static func downloadSummary(device devicePtr: UnsafeMutablePointer<device_data_t>, logbookID: String) throws -> Data {
+        guard let dcDevice = devicePtr.pointee.device else {
+            throw ExplorerError.notConnected
+        }
+
+        guard let buffer = dc_buffer_new(0) else {
+            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
+        }
+        defer { dc_buffer_free(buffer) }
+
+        let status = suunto_nautic_device_download_summary(dcDevice, logbookID, buffer)
         guard status == DC_STATUS_SUCCESS else {
             throw ExplorerError.requestFailed(status)
         }
