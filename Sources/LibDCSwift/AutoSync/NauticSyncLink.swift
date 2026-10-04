@@ -22,11 +22,18 @@ public protocol NauticSyncConnector: AnyObject {
     func connect() throws -> NauticSyncLink
     /// Breaks the current link the way a real drop would.
     func simulateDrop()
+    /// Abandons a `connect()` still in progress, which then returns or throws soon after.
+    func cancelConnect()
+}
+
+public extension NauticSyncConnector {
+    func cancelConnect() {}
 }
 
 public enum NauticAutoSyncError: Error, Equatable {
     case connectFailed(String)
     case deviceNotFound
+    case connectTimedOut
 }
 
 /// `NauticSyncLink` over an open `dc_device_t`, through the Nautic driver.

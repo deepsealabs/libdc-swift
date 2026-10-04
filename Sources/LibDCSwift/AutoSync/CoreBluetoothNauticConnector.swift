@@ -99,6 +99,18 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
         }
     }
 
+    /// iOS never times out a pending connect; cancelling it makes the open's wait for the link fail.
+    public func cancelConnect() {
+        let manager = self.manager
+        let address = currentAddress
+        DispatchQueue.main.async {
+            let known = UUID(uuidString: address).flatMap { manager.centralManager.retrievePeripherals(withIdentifiers: [$0]).first }
+            guard let peripheral = manager.peripheral ?? known else { return }
+            logInfo("[NauticAutoSync] Cancelling the pending connection to \(peripheral.name ?? address)")
+            manager.centralManager.cancelPeripheralConnection(peripheral)
+        }
+    }
+
     public func simulateDrop() {
         let manager = self.manager
         DispatchQueue.main.async {
