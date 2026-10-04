@@ -30,6 +30,15 @@ final class SuuntoNauticTransportTests: XCTestCase {
             listedSize = UInt32(compressed.count + summary.count)
         }
 
+        /// An empty/aborted logbook entry: listed with size 0, no profile data.
+        init(emptyID id: UInt32) {
+            self.id = id
+            compressed = []
+            summary = []
+            decompressed = []
+            listedSize = 0
+        }
+
         /// Literal-only Heatshrink stream (tag bit 1 + 8 data bits, MSB first),
         /// valid for any window/lookahead setting.
         static func heatshrinkLiterals(_ input: [UInt8]) -> [UInt8] {
@@ -401,15 +410,18 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
     private final class Downloads {
         var dives: [(fingerprint: UInt32, data: [UInt8])] = []
+        var onDive: ((Int) -> Void)?
     }
 
-    private func foreach(_ device: OpaquePointer, fingerprint: UInt32? = nil) -> (dc_status_t, [(fingerprint: UInt32, data: [UInt8])]) {
+    private func foreach(_ device: OpaquePointer, fingerprint: UInt32? = nil,
+                         onDive: ((Int) -> Void)? = nil) -> (dc_status_t, [(fingerprint: UInt32, data: [UInt8])]) {
         if var fp = fingerprint?.littleEndian {
             withUnsafeBytes(of: &fp) { raw in
                 _ = dc_device_set_fingerprint(device, raw.bindMemory(to: UInt8.self).baseAddress, 4)
             }
         }
         let downloads = Downloads()
+        downloads.onDive = onDive
         let ptr = Unmanaged.passRetained(downloads).toOpaque()
         defer { Unmanaged<Downloads>.fromOpaque(ptr).release() }
         let status = dc_device_foreach(device, { data, size, fp, fpSize, userdata in
@@ -417,6 +429,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
             var id: UInt32 = 0
             if let fp, fpSize == 4 { id = SuuntoNauticTransportTests.le32(Array(UnsafeBufferPointer(start: fp, count: 4)), 0) }
             d.dives.append((id, Array(UnsafeBufferPointer(start: data, count: Int(size)))))
+            d.onDive?(d.dives.count)
             return 1
         }, ptr)
         return (status, downloads.dives)
@@ -542,6 +555,81 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status, dives) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(dives.count, 1)
+    }
+
+    // MARK: - foreach never moves the fingerprint past a dive it did not deliver
+
+    func testLinkDropMidDataStopsForeachAtTheGapAndTheNextSyncFillsIt() throws {
+        let synced = FakeDive(id: 1_789_700_000, profileBytes: 6000)
+        let new = (1...3).map { FakeDive(id: 1_789_700_000 + UInt32($0) * 7200, profileBytes: 6000) }
+        let watch = FakeWatch(dives: [synced] + new)
+        var storedFingerprint = synced.id
+
+        // Newest dive arrives, then the link dies two chunks into the next one's /Data.
+        let first = try open(watch)
+        let (status, delivered) = foreach(first, fingerprint: storedFingerprint) { n in
+            if n == 1 { watch.mutate { $0.dropAfterChunks = 2 } }
+        }
+        XCTAssertEqual(status, DC_STATUS_IO, "a dive that failed to download is an error, not a skip")
+        XCTAssertEqual(delivered.map(\.fingerprint), [new[2].id], "nothing older than the gap is delivered")
+        XCTAssertEqual(delivered.first?.data, new[2].decompressed + new[2].summary)
+        XCTAssertEqual(watch.drops, 1)
+
+        let afterFirst = DiveLogRetriever.outcome(status: status, family: DC_FAMILY_SUUNTO_NAUTIC, fingerprintMatched: false,
+                                                  hasNewDives: true, hadStoredFingerprint: true, emptyReadCount: 0)
+        XCTAssertFalse(afterFirst.saveFingerprint)
+        XCTAssertTrue(afterFirst.interrupted)
+        if afterFirst.saveFingerprint, let newest = delivered.first { storedFingerprint = newest.fingerprint }
+        XCTAssertEqual(storedFingerprint, synced.id, "the fingerprint stays behind the gap")
+        close(device: first)
+
+        watch.reconnect()
+        let streamsBefore = watch.streamsServed
+        let second = try open(watch)
+        let (status2, delivered2) = foreach(second, fingerprint: storedFingerprint)
+        XCTAssertEqual(status2, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered2.map(\.fingerprint), new.map(\.id).reversed(), "every new dive, stopping at the stored fingerprint")
+        for (got, fake) in zip(delivered2, new.reversed()) {
+            XCTAssertEqual(got.data, fake.decompressed + fake.summary)
+        }
+        XCTAssertEqual(watch.streamsServed - streamsBefore, 3, "the already-synced dive is not downloaded again")
+
+        // A host keyed by fingerprint ends up with each dive exactly once.
+        var host: [UInt32: [UInt8]] = [:]
+        for dive in delivered + delivered2 { host[dive.fingerprint] = dive.data }
+        XCTAssertEqual(Set(host.keys), Set(new.map(\.id)))
+        XCTAssertEqual(delivered.count + delivered2.count - host.count, 1,
+                       "only the dive the interrupted session already delivered comes again")
+
+        let afterSecond = DiveLogRetriever.outcome(status: status2, family: DC_FAMILY_SUUNTO_NAUTIC, fingerprintMatched: false,
+                                                   hasNewDives: true, hadStoredFingerprint: true, emptyReadCount: 0)
+        XCTAssertTrue(afterSecond.saveFingerprint)
+        XCTAssertEqual(delivered2.first?.fingerprint, new[2].id, "the fingerprint now advances to the newest dive")
+    }
+
+    func testEmptyReadOfAListedDiveIsAGapNotASkip() throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_800_000 + UInt32($0) * 7200, profileBytes: 4000) }
+        let watch = FakeWatch(dives: dives)
+        let device = try open(watch)
+
+        // The second dive's stream comes back empty although the listing says it has data.
+        let (status, delivered) = foreach(device) { n in
+            if n == 1 { watch.mutate { $0.truncateStreamBy = 1_000_000 } }
+        }
+        XCTAssertNotEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dives[2].id])
+    }
+
+    func testEmptyLogbookEntryIsSkipped() throws {
+        let older = FakeDive(id: 1_789_900_000, profileBytes: 4000)
+        let empty = FakeDive(emptyID: 1_789_907_200)
+        let newer = FakeDive(id: 1_789_914_400, profileBytes: 4000)
+        let watch = FakeWatch(dives: [older, empty, newer])
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS, "an entry with nothing to download is not a gap")
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, older.id])
     }
 
     func testCompleteDownloadById() throws {
