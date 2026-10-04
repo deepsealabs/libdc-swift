@@ -380,6 +380,10 @@ public class GenericParser {
             field: getField(parser, type: DC_FIELD_AVGDEPTH),
             maxDepth: wrapper.data.maxDepth,
             sampled: wrapper.calculateAverageDepth(upTo: divetime))
+        // Other families keep the sampled maximum; their field semantics aren't verified.
+        let maxDepth = family == .suuntoNautic
+            ? resolveMaxDepth(field: getField(parser, type: DC_FIELD_MAXDEPTH), sampled: wrapper.data.maxDepth)
+            : wrapper.data.maxDepth
 
         // Get gas mix information
         if let gasmixCount: UInt32 = getField(parser, type: DC_FIELD_GASMIX_COUNT) {
@@ -488,7 +492,7 @@ public class GenericParser {
         return DiveData(
             number: diveNumber,
             datetime: date,
-            maxDepth: wrapper.data.maxDepth,
+            maxDepth: maxDepth,
             avgDepth: avgDepth,
             divetime: divetime,
             temperature: wrapper.data.tempMinimum,
@@ -543,6 +547,13 @@ public class GenericParser {
         guard let field, field > 0, field.isFinite else { return sampled }
         if maxDepth > 0 && field > maxDepth + 0.5 { return sampled }
         return field
+    }
+
+    /// The computer's own maximum, which can sit between samples, when it is
+    /// close to the sampled maximum; otherwise the sampled maximum.
+    static func resolveMaxDepth(field: Double?, sampled: Double) -> Double {
+        guard let field, field > 0, field.isFinite, sampled > 0 else { return sampled }
+        return field >= sampled - 0.5 && field <= sampled + 3 ? field : sampled
     }
 
     fileprivate static func convertTank(_ tank: dc_tank_t) -> DiveData.Tank {

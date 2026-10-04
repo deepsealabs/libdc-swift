@@ -126,4 +126,12 @@ final class NauticAutoSyncPolicyTests: XCTestCase {
         XCTAssertTrue(subscription.matches([0xF0, 0x24, 0x0E]))
         XCTAssertFalse(subscription.matches([0xF0, 0x24, 0x0D]))
     }
+
+    func testConnectAttemptsAndTriggerRetriesAreBounded() {
+        let config = NauticAutoSync.Configuration()
+        XCTAssertEqual(config.connectTimeout, 25, "a pending connect to a sleeping watch can otherwise sit for minutes")
+        XCTAssertEqual(config.triggerSubscribeRetries, 3)
+        XCTAssertEqual(config.triggerSubscribeRetryDelay, 2)
+        XCTAssertEqual(config.triggerResubscribeInterval, 5 * 60)
+    }
 }

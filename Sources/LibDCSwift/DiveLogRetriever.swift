@@ -405,6 +405,11 @@ public class DiveLogRetriever {
                 if useFingerprint {
                     devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
                     devicePtr.pointee.lookup_fingerprint = fingerprintLookup
+                } else {
+                    // An earlier download on this connection may have set one on the device.
+                    devicePtr.pointee.fingerprint_context = nil
+                    devicePtr.pointee.lookup_fingerprint = nil
+                    dc_device_set_fingerprint(dcDevice, nil, 0)
                 }
                 
                 let enumStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)

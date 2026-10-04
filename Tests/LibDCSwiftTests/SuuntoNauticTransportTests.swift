@@ -79,6 +79,16 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// Value resources the watch can be subscribed to.
         var unsyncedCount: UInt16 = 0
         var busy: UInt8 = 0
+        /// A dropped link leaves the watch's session behind: bound slots, subscriptions and the
+        /// requests it saw recently, of which an identical repeat goes unanswered as a retransmit.
+        /// Models the reconnects in #29 whose trigger subscription timed out; a clean close ends the session.
+        var keepsSessionAcrossDrops = false
+        /// Value resources resolve into 00/10 slots like per-id ones, and a GET with both bound
+        /// goes unanswered. Real watches answer them with static F0 handles.
+        var valueSlots = false
+        /// GETs of a value resource to leave unanswered.
+        var unansweredValueGets = 0
+        private(set) var ignoredRequests = 0
         private(set) var linkUp = true
         private(set) var drops = 0
         private(set) var connects = 0
@@ -104,6 +114,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         private var nextHandle: UInt8 = 0x10
         /// Per-id resources resolve into a slot (00 or 10) bound to that id until a 0x0B release, as on the real watch.
         private var heldSlots: Set<[UInt8]> = []
+        private var recentRequests: [[UInt8]] = []
 
         /// Handles of per-id resources still bound (not yet released).
         var heldIdHandles: [String] {
@@ -111,16 +122,25 @@ final class SuuntoNauticTransportTests: XCTestCase {
             return heldSlots.compactMap { handles[$0] }.sorted()
         }
 
+        /// Slots still bound per value resource (valueSlots only).
+        func heldValueSlots(_ path: String) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return heldSlots.filter { handles[$0] == path }.count
+        }
+
         init(dives: [FakeDive]) { self.dives = dives }
 
         /// A fresh link: whatever was in flight on the old one is gone.
         func reconnect() {
             lock.lock(); defer { lock.unlock() }
+            if !(keepsSessionAcrossDrops && !linkUp) {
+                heldSlots.removeAll()
+                subscribed.removeAll()
+                recentRequests.removeAll()
+            }
             linkUp = true
             rx.removeAll(); rxIndex = 0
             rxDecode.removeAll(); rxInFrame = false; rxEscaped = false
-            heldSlots.removeAll()
-            subscribed.removeAll()
             connects += 1
         }
 
@@ -148,7 +168,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
             path == "/Sync/BusyState" ? [0x03, 0x00, busy] : [0x05, 0x00] + Self.u16(Int(unsyncedCount))
         }
 
-        private static let valuePaths: Set<String> = ["/Logbook/UnsynchronisedLogs", "/Sync/BusyState"]
+        private static let valueHandles: [String: [UInt8]] = ["/Logbook/UnsynchronisedLogs": [0x24, 0x0D], "/Sync/BusyState": [0x4C, 0x00]]
+        private static var valuePaths: Set<String> { Set(valueHandles.keys) }
 
         // Host -> watch bytes (HDLC-encoded). False once the link is down.
         @discardableResult
@@ -212,6 +233,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
         private func handle(_ f: [UInt8]) {
             guard f.count >= 6, f[0] == 0xA5 else { return }
             let msgid = Array(f[4...5])
+            if f[1] != 0x12 {
+                if keepsSessionAcrossDrops && recentRequests.contains(f) {
+                    ignoredRequests += 1
+                    return
+                }
+                recentRequests.append(f)
+                if recentRequests.count > 64 { recentRequests.removeFirst() }
+            }
             switch f[1] {
             case 0x12: // EVA hello
                 send([0xA5, 0x13, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02])
@@ -219,7 +248,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 let pathLen = Int(f[9])
                 let path = String(decoding: f[10..<(10 + pathLen)], as: UTF8.self)
                 getPaths.append(path)
-                let h = resolve(path)
+                if Self.valuePaths.contains(path) && unansweredValueGets > 0 {
+                    unansweredValueGets -= 1
+                    return
+                }
+                guard let h = resolve(path) else { return }
                 handles[h] = path
                 if path.hasSuffix("/Summary") && leftoverChunksBeforeSummaryAck > 0 {
                     for _ in 0..<leftoverChunksBeforeSummaryAck { send(chunkFrame(ArraySlice(repeating: 0xEE, count: 40))) }
@@ -302,9 +335,17 @@ final class SuuntoNauticTransportTests: XCTestCase {
             }
         }
 
-        /// Static paths get a fresh F0 handle. A per-id path (/Logbook/byId/<id>/<res>) gets the
-        /// resource's 00 slot, or its 10 slot while 00 is still bound, rebinding 10 when both are.
-        private func resolve(_ path: String) -> [UInt8] {
+        /// Static paths get a fresh F0 handle; the value resources their fixed ones from the Suunto
+        /// app captures. A per-id path (/Logbook/byId/<id>/<res>) gets the resource's 00 slot, or its
+        /// 10 slot while 00 is still bound, rebinding 10 when both are.
+        private func resolve(_ path: String) -> [UInt8]? {
+            if let value = Self.valueHandles[path] {
+                guard valueSlots else { return [0xF0] + value }
+                let slot0 = [0x00] + value, slot1 = [0x10] + value
+                guard let h = [slot0, slot1].first(where: { !heldSlots.contains($0) }) else { return nil }
+                heldSlots.insert(h)
+                return h
+            }
             let parts = path.split(separator: "/")
             guard parts.count == 4, parts[0] == "Logbook", parts[1] == "byId" else {
                 defer { nextHandle &+= 1 }
@@ -721,7 +762,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let closeSession: (OpaquePointer) -> Void
         private let lock = NSLock()
         private var _connects = 0
+        private var _presenceChecks = 0
+        private var _cancels = 0
+        private let cancelled = DispatchSemaphore(value: 0)
+        /// Connect attempts that hang, like a pending CoreBluetooth connect to a sleeping watch, until cancelled.
+        var hangingConnects = 0
         var connects: Int { lock.lock(); defer { lock.unlock() }; return _connects }
+        var presenceChecks: Int { lock.lock(); defer { lock.unlock() }; return _presenceChecks }
+        var cancels: Int { lock.lock(); defer { lock.unlock() }; return _cancels }
 
         init(watch: FakeWatch, open: @escaping () throws -> OpaquePointer, close: @escaping (OpaquePointer) -> Void) {
             self.watch = watch
@@ -729,16 +777,36 @@ final class SuuntoNauticTransportTests: XCTestCase {
             closeSession = close
         }
 
-        func waitUntilPresent(timeout: TimeInterval?) async throws -> Bool { true }
+        func waitUntilPresent(timeout: TimeInterval?) async throws -> Bool {
+            countPresenceCheck()
+            return true
+        }
+
+        private func countPresenceCheck() {
+            lock.lock(); _presenceChecks += 1; lock.unlock()
+        }
 
         func connect() throws -> NauticSyncLink {
-            lock.lock(); _connects += 1; lock.unlock()
+            lock.lock()
+            _connects += 1
+            let hang = hangingConnects > 0
+            if hang { hangingConnects -= 1 }
+            lock.unlock()
+            if hang {
+                _ = cancelled.wait(timeout: .now() + 10)
+                throw NauticAutoSyncError.connectFailed("could not open")
+            }
             watch.reconnect()
             return DCDeviceNauticLink(device: try openSession(), onClose: closeSession)
         }
 
         func simulateDrop() {
             watch.dropLink()
+        }
+
+        func cancelConnect() {
+            lock.lock(); _cancels += 1; lock.unlock()
+            cancelled.signal()
         }
     }
 
@@ -805,6 +873,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
     private static func dives(_ events: [NauticAutoSync.Event]) -> [NauticAutoSync.DownloadedDive] {
         events.compactMap { if case .dive(let d) = $0 { return d } else { return nil } }
+    }
+
+    private static func logs(_ events: [NauticAutoSync.Event]) -> [String] {
+        events.compactMap { if case .log(let m) = $0 { return m } else { return nil } }
     }
 
     private static func completedSyncs(_ events: [NauticAutoSync.Event]) -> [NauticAutoSync.SyncSummary] {
@@ -954,5 +1026,112 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(Self.dives(log.all).map(\.id), [dive.id, 1_789_610_000], "a reconnect always re-lists")
         XCTAssertEqual(connector.connects, 2)
         XCTAssertEqual(watch.drops, 1)
+    }
+
+    // MARK: - #29: sync trigger after an automatic reconnect
+
+    func testTriggerSubscriptionSurvivesAReconnectAfterADropMidData() async throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_700_000 + UInt32($0) * 7200, profileBytes: 6000) }
+        let watch = FakeWatch(dives: dives)
+        watch.keepsSessionAcrossDrops = true
+        // No retries: the reconnect's first subscription must be answered.
+        let (sync, connector, _, log) = makeAutoSync(watch) { $0.triggerSubscribeRetries = 0 }
+
+        var streams = 0
+        sync.onDive = { _ in
+            streams += 1
+            if streams == 1 { watch.mutate { $0.dropAfterChunks = 2 } }
+        }
+        sync.start()
+        await waitFor(log) { events in
+            guard let done = events.firstIndex(where: { if case .syncCompleted = $0 { return true } else { return false } }) else { return false }
+            return events[done...].contains(.state(.watching))
+        }
+        await stopAndWait(sync, log)
+
+        let messages = Self.logs(log.all)
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertEqual(watch.drops, 1)
+        XCTAssertEqual(watch.ignoredRequests, 0, "no request repeats one the watch saw before the drop")
+        XCTAssertFalse(messages.contains { $0.hasPrefix("No sync trigger") }, "\(messages)")
+        let reconnected = try XCTUnwrap(messages.lastIndex(of: "Connected"))
+        XCTAssertTrue(messages[reconnected...].contains { $0.hasPrefix("Listening for sync triggers") })
+        XCTAssertEqual(Self.dives(log.all).map(\.id), dives.map(\.id))
+    }
+
+    func testUnansweredTriggerSubscriptionIsRetried() async throws {
+        let dive = FakeDive(id: 1_789_710_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        watch.unansweredValueGets = 1
+        let (sync, connector, clock, log) = makeAutoSync(watch)
+
+        sync.start()
+        await waitFor(log) { $0.contains(.state(.watching)) }
+        XCTAssertNotNil(watch.subscribed["/Logbook/UnsynchronisedLogs"])
+        XCTAssertNotNil(watch.subscribed["/Sync/BusyState"])
+        await stopAndWait(sync, log)
+
+        let messages = Self.logs(log.all)
+        XCTAssertTrue(messages.contains { $0.hasPrefix("Sync trigger subscription failed (TIMEOUT); retrying (1 of 3)") }, "\(messages)")
+        XCTAssertFalse(messages.contains { $0.hasPrefix("No sync trigger") })
+        XCTAssertTrue(clock.sleeps.contains(2))
+        XCTAssertEqual(connector.connects, 1)
+        XCTAssertEqual(watch.subscribed, [:], "stopping unsubscribes")
+    }
+
+    func testTriggerSlotsLeftByADroppedLinkAreReleasedOnReconnect() async throws {
+        let first = FakeDive(id: 1_789_720_000, profileBytes: 600, summaryBytes: 100)
+        let second = FakeDive(id: 1_789_730_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [first])
+        watch.keepsSessionAcrossDrops = true
+        watch.valueSlots = true
+        let (sync, connector, _, log) = makeAutoSync(watch)
+
+        sync.start()
+        await waitFor(log) { $0.contains(.state(.watching)) }
+        sync.simulateDrop()
+        await waitFor(log) { events in Self.logs(events).filter { $0.hasPrefix("Listening for sync triggers") }.count >= 3 }
+        await waitFor(log) { Self.completedSyncs($0).count == 2 }
+        await waitFor(log) { $0.last == .state(.watching) }
+        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 1, "the dropped link's slot was released")
+        XCTAssertEqual(watch.heldValueSlots("/Sync/BusyState"), 1)
+
+        watch.mutate {
+            $0.dives.append(second)
+            $0.unsyncedCount = 1
+        }
+        watch.notify("/Logbook/UnsynchronisedLogs")
+        await waitFor(log) { Self.completedSyncs($0).count == 3 }
+        await stopAndWait(sync, log)
+
+        XCTAssertEqual(Self.dives(log.all).map(\.id), [first.id, second.id])
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertFalse(Self.logs(log.all).contains { $0.hasPrefix("No sync trigger") })
+        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 0, "unsubscribing releases the slot")
+    }
+
+    // MARK: - #29: a connect attempt that never completes
+
+    func testConnectTimeoutCancelsThePendingConnectAndFallsBackToScanning() async throws {
+        let dive = FakeDive(id: 1_789_740_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch) { $0.connectTimeout = 0.3 }
+        connector.hangingConnects = 1
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertTrue(events.contains(.watchUnreachable(after: 0.3)))
+        XCTAssertTrue(messages.contains("No connection after 0 s: \(NauticAutoSync.unreachableHint)"), "\(messages)")
+        XCTAssertTrue(messages.contains("Connect failed: timed out"))
+        XCTAssertEqual(connector.cancels, 1)
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertGreaterThanOrEqual(connector.presenceChecks, 2, "looks for the watch again before retrying")
+        XCTAssertTrue(events.contains(.state(.reconnecting(attempt: 2, delay: 4))))
+        XCTAssertTrue(clock.sleeps.contains(4))
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
     }
 }

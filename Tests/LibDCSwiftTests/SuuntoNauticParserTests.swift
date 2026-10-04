@@ -148,13 +148,27 @@ final class SuuntoNauticParserTests: XCTestCase {
         var v: UInt32 = 0; _ = field(data, DC_FIELD_DIVETIME, into: &v); return v
     }
 
+    private func maxDepthField(_ data: Data) -> Double {
+        var v: Double = 0; _ = field(data, DC_FIELD_MAXDEPTH, into: &v); return v
+    }
+
+    private static func appDate(_ string: String) -> Date? {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.date(from: string)
+    }
+
+    private static func hasSummary(_ data: Data) -> Bool {
+        data.dropFirst(8).range(of: Data("SBEM0103".utf8)) != nil
+    }
+
     // MARK: - Tests
 
     func testDecodeProfileFields() throws {
         let data = try loadFixture()
         let dive = try parse(data)
-        // Dive time = total time in the Diving state (single-span here = 1922 s).
-        XCTAssertEqual(diveTimeField(data), 1922, accuracy: 1)
+        // Dive time = total time in the Diving state, truncated (app DiveTime 1921.5 s).
+        XCTAssertEqual(diveTimeField(data), 1921, accuracy: 1)
         // The pipeline reports that, not the last sample (post-dive surface logging).
         XCTAssertEqual(dive.divetime, 1922, accuracy: 1)
         XCTAssertLessThan(dive.divetime, dive.profile.last?.time ?? 0)
@@ -341,6 +355,42 @@ final class SuuntoNauticParserTests: XCTestCase {
         let dive = try parse(Data(buf), logbookID: 1787000000)
         XCTAssertEqual(dive.decoModel?.gfLow, 40)       // was 85 before the fix
         XCTAssertEqual(dive.decoModel?.gfHigh, 85)      // was 40 before the fix
+    }
+
+    // MARK: - #29: dive time and max depth as the Suunto app shows them
+
+    /// The fixture's own summary layout: [first record][dive record], with the
+    /// app's DiveTime and Depth.Max at payload offsets 321 and 330 of the dive record.
+    private static func summary(divetime: Float, maxDepth: Float) -> [UInt8] {
+        func record(_ id: UInt8, _ payload: [UInt8]) -> [UInt8] {
+            [id, 0xFF] + withUnsafeBytes(of: UInt32(payload.count).littleEndian, Array.init) + payload
+        }
+        func f32(_ v: Float) -> [UInt8] { withUnsafeBytes(of: v.bitPattern.littleEndian, Array.init) }
+        var dive = [UInt8](repeating: 0, count: 370)
+        dive.replaceSubrange(321..<325, with: f32(divetime))
+        dive.replaceSubrange(330..<334, with: f32(maxDepth))
+        return Array("SBEM0103".utf8) + record(33, [UInt8](repeating: 0, count: 561)) + record(37, dive) + [0xB8, 0xAE, 0xA4, 0x0B]
+    }
+
+    func testSummaryDiveTimeAndMaxDepthWin() throws {
+        // 1787752091: app DiveTime 1921.5 s (shown 32:01) and Depth.Max 33.12 m; samples peak at 33.11 m.
+        let data = try loadFixture() + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12))
+        XCTAssertEqual(diveTimeField(data), 1921, "truncated, as the app shows it")
+        XCTAssertEqual(maxDepthField(data), 33.12, accuracy: 0.001)
+        let dive = try parse(data, logbookID: 1787752091)
+        XCTAssertEqual(dive.divetime, 1921)
+        XCTAssertEqual(dive.maxDepth, 33.12, accuracy: 0.001)
+    }
+
+    func testImplausibleSummaryFallsBackToTheProfile() throws {
+        let fixture = try loadFixture()
+        let farDepth = fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 50))
+        XCTAssertEqual(maxDepthField(farDepth), 33.11, accuracy: 0.01, "a max far off the samples is ignored")
+        XCTAssertEqual(diveTimeField(farDepth), 1921)
+
+        let otherDive = fixture + Data(Self.summary(divetime: 4680.5, maxDepth: 33.12))
+        XCTAssertEqual(maxDepthField(otherDive), 33.11, accuracy: 0.01, "a record whose dive time disagrees isn't trusted")
+        XCTAssertEqual(diveTimeField(otherDive), diveTimeField(fixture))
     }
 
     func testExtendedStatusVariableLength() throws {
@@ -532,6 +582,17 @@ final class SuuntoNauticParserTests: XCTestCase {
             print("  \(logid): divetime \(Int(dive.divetime)) s (last sample \(Int(dive.profile.last?.time ?? 0)) s, app \(header["DiveTimeMax"] ?? "-")), avgDepth \(String(format: "%.2f", dive.avgDepth)) (app \(header["DepthAverage"] ?? "-")), maxDepth \(String(format: "%.2f", dive.maxDepth)) (app \(header["MaxDepthAverage"] ?? "-"))")
             if let mda = header["MaxDepthAverage"] as? Double, mda > 0 {
                 XCTAssertEqual(dive.maxDepth, mda, accuracy: 2.0, "\(logid): maxDepth \(dive.maxDepth) vs app \(mda)")
+            }
+            // With the /Summary appended, dive time and max depth are the watch's own, as the app shows them.
+            // A JSON copied from another watch's recording of the same dive starts on another second; skip it.
+            let sameDive = (header["DateTime"] as? String).flatMap(Self.appDate).map { UInt32($0.timeIntervalSince1970.rounded(.down)) == id } ?? false
+            if sameDive, Self.hasSummary(data), let appTime = header["DiveTime"] as? Double,
+               let appMax = (header["Depth"] as? [String: Any])?["Max"] as? Double,
+               (dive.profile.last?.time ?? 0) >= appTime {
+                XCTAssertEqual(divetime, appTime.rounded(.down), "\(logid): divetime \(divetime) vs app \(appTime) truncated")
+                XCTAssertEqual(maxDepthField(data), appMax, accuracy: 0.005, "\(logid): maxDepth field vs app \(appMax)")
+                XCTAssertEqual(dive.maxDepth, appMax, accuracy: 0.005, "\(logid): pipeline maxDepth vs app \(appMax)")
+                print("  \(logid): summary dive time \(Int(divetime)) s, max depth \(String(format: "%.2f", maxDepthField(data))) m (app \(appTime) s, \(appMax) m)")
             }
 
             // Dual-transmitter / multi-gas cross-check (issues #33/#34): the app

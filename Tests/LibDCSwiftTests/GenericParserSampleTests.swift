@@ -295,6 +295,16 @@ final class GenericParserSampleTests: XCTestCase {
         XCTAssertEqual(GenericParser.resolveAverageDepth(field: 40, maxDepth: 33.1, sampled: 18.0), 18.0)
     }
 
+    func testMaxDepthPrefersTheComputersOwnWhenClose() {
+        // #29: the watch's 25.0 m sits between samples that peak at 24.72 m.
+        XCTAssertEqual(GenericParser.resolveMaxDepth(field: 25.0, sampled: 24.72), 25.0)
+        XCTAssertEqual(GenericParser.resolveMaxDepth(field: nil, sampled: 24.72), 24.72)
+        XCTAssertEqual(GenericParser.resolveMaxDepth(field: 0, sampled: 24.72), 24.72)
+        XCTAssertEqual(GenericParser.resolveMaxDepth(field: 40, sampled: 24.72), 24.72)
+        XCTAssertEqual(GenericParser.resolveMaxDepth(field: 20, sampled: 24.72), 24.72)
+        XCTAssertEqual(GenericParser.resolveMaxDepth(field: .nan, sampled: 24.72), 24.72)
+    }
+
     func testSampledAverageDepthStopsAtDiveTime() {
         // 10 m for 100 s, then 100 s logged at the surface after the dive.
         for (t, d) in [(0.0, 10.0), (100.0, 10.0), (100.0, 10.0), (101.0, 0.0), (200.0, 0.0)] {

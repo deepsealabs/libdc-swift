@@ -38,6 +38,14 @@ public final class NauticAutoSync {
         public var notificationPollMs: UInt32 = 1000
         /// How long to look for the watch after a failed connect before waiting passively.
         public var presenceTimeout: TimeInterval = 15
+        /// Gives up on a connect attempt after this long; nil waits as long as the open does.
+        /// A watch on its standby screen isn't connectable until a button is pressed.
+        public var connectTimeout: TimeInterval? = 25
+        /// Attempts after the first when subscribing to the sync triggers fails, and the delay between them.
+        public var triggerSubscribeRetries = 3
+        public var triggerSubscribeRetryDelay: TimeInterval = 2
+        /// While connected without a trigger subscription, try subscribing again this often; nil disables.
+        public var triggerResubscribeInterval: TimeInterval? = 5 * 60
 
         public init() {}
     }
@@ -75,7 +83,11 @@ public final class NauticAutoSync {
         case dive(DownloadedDive)
         case diveFailed(id: UInt32, reason: String)
         case syncCompleted(SyncSummary)
+        /// A connect attempt timed out: the watch is likely asleep on its standby screen.
+        case watchUnreachable(after: TimeInterval)
     }
+
+    public static let unreachableHint = "watch not reachable; it may be asleep, press a button on the watch"
 
     public struct Environment {
         public var now: () -> Date
@@ -217,6 +229,10 @@ public final class NauticAutoSync {
         var unsyncedCount: Int?
         var isBusy = false
         var unsupported = false
+        /// When subscribing last gave up; nil once subscribed.
+        var failedAt: Date?
+
+        var isSubscribed: Bool { unsynced != nil && busy != nil }
     }
 
     private var isStopping: Bool {
@@ -281,7 +297,7 @@ public final class NauticAutoSync {
         while !isStopping {
             set(.connecting(attempt: tracker.nextAttempt))
             do {
-                let link = try await onLinkQueue { try self.connector.connect() }
+                let link = try await openLink()
                 tracker.connected()
                 emit(.log("Connected"))
                 return link
@@ -303,6 +319,38 @@ public final class NauticAutoSync {
             }
         }
         return nil
+    }
+
+    /// `connector.connect()` under `connectTimeout`: on timeout the pending
+    /// connection is cancelled so the caller can fall back to scanning.
+    private func openLink() async throws -> NauticSyncLink {
+        guard let timeout = configuration.connectTimeout else {
+            return try await onLinkQueue { try self.connector.connect() }
+        }
+        let attempt = ConnectAttempt()
+        let started = Date()
+        // Wall-clock, so a device that slept past the deadline fires as soon as it wakes.
+        DispatchQueue.global().asyncAfter(wallDeadline: .now() + timeout) { [weak self, connector = self.connector] in
+            guard attempt.expire() else { return }
+            self?.emit(.log("No connection after \(Int(timeout)) s: \(Self.unreachableHint)"))
+            self?.emit(.watchUnreachable(after: timeout))
+            connector.cancelConnect()
+        }
+        do {
+            let link = try await onLinkQueue { try self.connector.connect() }
+            if attempt.finish() { return link }
+            await runOnLinkQueue { link.close() }
+            throw NauticAutoSyncError.connectTimedOut
+        } catch NauticAutoSyncError.connectTimedOut {
+            throw NauticAutoSyncError.connectTimedOut
+        } catch {
+            if !attempt.finish() { throw NauticAutoSyncError.connectTimedOut }
+            let elapsed = Date().timeIntervalSince(started)
+            if elapsed > timeout * 2 {
+                emit(.log("The connect attempt took \(Int(elapsed)) s; the app was probably suspended meanwhile"))
+            }
+            throw error
+        }
     }
 
     private func coolDown(_ duration: TimeInterval, _ tracker: inout ReconnectTracker) async throws {
@@ -358,6 +406,11 @@ public final class NauticAutoSync {
                     continue
                 }
 
+                if let interval = configuration.triggerResubscribeInterval, let failedAt = triggers.failedAt,
+                   environment.now().timeIntervalSince(failedAt) >= interval {
+                    try await subscribeTriggers(link, &triggers)
+                }
+
                 set(triggers.isBusy ? .watchBusy : .watching)
                 let started = environment.now()
                 let notification = try await onLinkQueue { try link.waitForNotification(timeoutMs: self.configuration.notificationPollMs) }
@@ -375,9 +428,13 @@ public final class NauticAutoSync {
                     needsSync = true
                 }
             }
+            try? await unsubscribeTriggers(link, &triggers)
             return .stopped
         } catch {
-            if isStopping || error is CancellationError { return .stopped }
+            if isStopping || error is CancellationError {
+                try? await unsubscribeTriggers(link, &triggers)
+                return .stopped
+            }
             return .linkLost("Link lost: \(Self.describe(error))")
         }
     }
@@ -462,20 +519,50 @@ public final class NauticAutoSync {
 
     // MARK: - Triggers
 
+    /// Subscribes to whichever trigger isn't subscribed yet. A GET or subscribe
+    /// that goes unanswered is retried (re-GET + resubscribe); after the
+    /// retries the session falls back to the periodic refresh and tries again
+    /// after the next sync or `triggerResubscribeInterval`. Only a watch
+    /// without the resource stops the attempts for the session.
     private func subscribeTriggers(_ link: NauticSyncLink, _ triggers: inout Triggers) async throws {
-        guard configuration.subscribeToTriggers, !triggers.unsupported, triggers.unsynced == nil else { return }
-        do {
-            let unsynced = try await onLinkQueue { try link.subscribe(Self.unsynchronisedLogsPath) }
-            triggers.unsynced = unsynced
-            triggers.unsyncedCount = unsynced.initialValue?.integerValue
-            let busy = try await onLinkQueue { try link.subscribe(Self.busyStatePath) }
-            triggers.busy = busy
-            triggers.isBusy = (busy.initialValue?.integerValue ?? 0) != 0
-            emit(.log("Listening for sync triggers (unsynchronised: \(triggers.unsyncedCount.map(String.init) ?? "?"), busy: \(triggers.isBusy))"))
-        } catch {
-            if case .linkLost = Self.classify(error), !Self.isTimeout(error) { throw error }
-            triggers.unsupported = true
-            emit(.log("No sync trigger on this watch (\(Self.describe(error))); using periodic refresh"))
+        guard configuration.subscribeToTriggers, !triggers.unsupported, !triggers.isSubscribed else { return }
+        var failures = 0
+        while true {
+            do {
+                if triggers.unsynced == nil {
+                    let unsynced = try await onLinkQueue { try link.subscribe(Self.unsynchronisedLogsPath) }
+                    triggers.unsynced = unsynced
+                    triggers.unsyncedCount = unsynced.initialValue?.integerValue
+                }
+                if triggers.busy == nil {
+                    let busy = try await onLinkQueue { try link.subscribe(Self.busyStatePath) }
+                    triggers.busy = busy
+                    triggers.isBusy = (busy.initialValue?.integerValue ?? 0) != 0
+                }
+                triggers.failedAt = nil
+                emit(.log("Listening for sync triggers (unsynchronised: \(triggers.unsyncedCount.map(String.init) ?? "?"), busy: \(triggers.isBusy))"))
+                return
+            } catch {
+                if Self.isUnsupported(error) {
+                    triggers.unsupported = true
+                    emit(.log("No sync trigger on this watch (\(Self.describe(error))); using periodic refresh"))
+                    return
+                }
+                switch Self.classify(error) {
+                case .linkLost where !Self.isTimeout(error), .cancelled:
+                    throw error
+                default:
+                    break
+                }
+                failures += 1
+                guard failures <= configuration.triggerSubscribeRetries else {
+                    triggers.failedAt = environment.now()
+                    emit(.log("No sync trigger after \(failures) attempts (\(Self.describe(error))); using periodic refresh and trying again later"))
+                    return
+                }
+                emit(.log("Sync trigger subscription failed (\(Self.describe(error))); retrying (\(failures) of \(configuration.triggerSubscribeRetries))"))
+                try await environment.sleep(configuration.triggerSubscribeRetryDelay)
+            }
         }
     }
 
@@ -558,6 +645,11 @@ public final class NauticAutoSync {
         }
     }
 
+    private static func isUnsupported(_ error: Error) -> Bool {
+        if case SuuntoNauticExplorer.ExplorerError.requestFailed(let status) = error { return status == DC_STATUS_UNSUPPORTED }
+        return false
+    }
+
     private static func isTimeout(_ error: Error) -> Bool {
         if case SuuntoNauticExplorer.ExplorerError.requestFailed(let status) = error { return status == DC_STATUS_TIMEOUT }
         return false
@@ -570,11 +662,30 @@ public final class NauticAutoSync {
         case SuuntoNauticExplorer.ExplorerError.notConnected: return "not connected"
         case NauticAutoSyncError.connectFailed(let reason): return reason
         case NauticAutoSyncError.deviceNotFound: return "watch not found"
+        case NauticAutoSyncError.connectTimedOut: return "timed out"
         default: return "\(error)"
         }
     }
 
     private static func statusName(_ status: dc_status_t) -> String {
         DiveLogRetriever.statusName(status)
+    }
+}
+
+/// Settles the race between a connect finishing and its timeout firing.
+private final class ConnectAttempt {
+    private let lock = NSLock()
+    private var settled = false
+
+    /// True when the timeout won.
+    func expire() -> Bool { settle() }
+    /// True when the connect finished first.
+    func finish() -> Bool { settle() }
+
+    private func settle() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !settled else { return false }
+        settled = true
+        return true
     }
 }
