@@ -175,6 +175,14 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(dive.datetime.timeIntervalSince1970, 1787752091, accuracy: 1.0)
     }
 
+    func testOwningLogbookIDNamesTheDiveTheBytesBelongTo() throws {
+        // #29: dive 1788616918 was requested but these bytes came back.
+        let data = try loadFixture()
+        XCTAssertEqual(SuuntoNauticExplorer.owningLogbookID(of: data, among: [1788616918, 1787752091]), 1787752091)
+        XCTAssertNil(SuuntoNauticExplorer.owningLogbookID(of: data, among: [1788616918]))
+        XCTAssertNil(SuuntoNauticExplorer.owningLogbookID(of: Data("SBEM0103".utf8), among: [1787752091]))
+    }
+
     func testDecodeEvents() throws {
         let raw = try rawSamples(loadFixture())
         // 8 Alarm + 3 Warning + 6 Notify + 6 State + 1 GasSwitch = 24 edges.
