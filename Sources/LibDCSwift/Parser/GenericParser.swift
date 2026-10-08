@@ -489,6 +489,11 @@ public class GenericParser {
             date = fallbackDate!
         }
         
+        let tanks = fillTankPressures(
+            tanks: wrapper.data.tanks,
+            profile: wrapper.data.profile,
+            gasMixCount: wrapper.data.gasMixes.count)
+
         return DiveData(
             number: diveNumber,
             datetime: date,
@@ -506,8 +511,8 @@ public class GenericParser {
             surfaceTemperature: wrapper.data.tempSurface,
             minTemperature: wrapper.data.tempMinimum,
             maxTemperature: wrapper.data.tempMaximum,
-            tankCount: wrapper.data.tanks.count,
-            tanks: wrapper.data.tanks,
+            tankCount: tanks.count,
+            tanks: tanks,
             diveMode: diveMode,
             decoModel: wrapper.data.decoModel,
             location: wrapper.data.location,
@@ -554,6 +559,49 @@ public class GenericParser {
     static func resolveMaxDepth(field: Double?, sampled: Double) -> Double {
         guard let field, field > 0, field.isFinite, sampled > 0 else { return sampled }
         return field >= sampled - 0.5 && field <= sampled + 3 ? field : sampled
+    }
+
+    /// Some parsers (Suunto EON Core, Oceanic/Aqualung) only report pressure in
+    /// the samples, leaving the tank's begin/end at 0 or reporting no tank at
+    /// all; take the first and last transmitter reading instead.
+    static func fillTankPressures(
+        tanks: [DiveData.Tank],
+        profile: [DiveProfilePoint],
+        gasMixCount: Int
+    ) -> [DiveData.Tank] {
+        var first: [Int: Double] = [:]
+        var last: [Int: Double] = [:]
+        for point in profile {
+            for (tank, value) in point.tankPressures where value > 0 && value.isFinite {
+                if first[tank] == nil { first[tank] = value }
+                last[tank] = value
+            }
+        }
+        guard !first.isEmpty else { return tanks }
+
+        var filled = tanks
+        for index in filled.indices {
+            if filled[index].beginPressure <= 0, let begin = first[index] {
+                filled[index].beginPressure = begin
+            }
+            if filled[index].endPressure <= 0, let end = last[index] {
+                filled[index].endPressure = end
+            }
+        }
+
+        guard let highest = first.keys.max(), highest >= filled.count else { return filled }
+        for index in filled.count...highest {
+            filled.append(DiveData.Tank(
+                volume: 0,
+                workingPressure: 0,
+                beginPressure: first[index] ?? 0,
+                endPressure: last[index] ?? 0,
+                // Without a tank record the mix link is unknown; assume tank N breathes mix N.
+                gasMix: index < gasMixCount ? index : (gasMixCount > 0 ? 0 : -1),
+                usage: .none
+            ))
+        }
+        return filled
     }
 
     fileprivate static func convertTank(_ tank: dc_tank_t) -> DiveData.Tank {
