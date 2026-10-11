@@ -118,10 +118,13 @@ public final class NauticAutoSync {
     private let environment: Environment
     private let continuation: AsyncStream<Event>.Continuation
     private let linkQueue = DispatchQueue(label: "com.libdcswift.nautic-autosync.link")
+    private let linkLease: NauticLinkLease
     private let lock = NSLock()
     private var task: Task<Void, Never>?
     private var currentState: State = .stopped
     private var stopRequested = false
+    /// Makes the link's blocking calls give up; cleared for the session's own teardown.
+    private var abortLinkCalls = false
     private var syncNowRequested = false
     private var markExistingRequested = false
     private var resetRequested = false
@@ -136,9 +139,11 @@ public final class NauticAutoSync {
         store: AutoSyncStore = UserDefaultsAutoSyncStore(),
         baseline: UInt32? = nil,
         configuration: Configuration = Configuration(),
-        environment: Environment = .live
+        environment: Environment = .live,
+        linkLease: NauticLinkLease = .shared
     ) {
         self.deviceKey = deviceKey
+        self.linkLease = linkLease
         self.connector = connector
         self.store = store
         self.baseline = baseline
@@ -168,6 +173,7 @@ public final class NauticAutoSync {
         lock.lock()
         guard task == nil else { lock.unlock(); return }
         stopRequested = false
+        abortLinkCalls = false
         task = Task.detached { [weak self] in await self?.run() }
         lock.unlock()
     }
@@ -175,6 +181,7 @@ public final class NauticAutoSync {
     public func stop() {
         lock.lock()
         stopRequested = true
+        abortLinkCalls = true
         let running = task
         task = nil
         lock.unlock()
@@ -240,6 +247,16 @@ public final class NauticAutoSync {
         return stopRequested || Task.isCancelled
     }
 
+    private var shouldAbortLinkCalls: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return abortLinkCalls
+    }
+
+    /// Lets the stopping session unsubscribe before it closes the link.
+    private func allowTeardown() {
+        lock.lock(); abortLinkCalls = false; lock.unlock()
+    }
+
     private func consume(_ flag: ReferenceWritableKeyPath<NauticAutoSync, Bool>) -> Bool {
         lock.lock(); defer { lock.unlock() }
         let value = self[keyPath: flag]
@@ -264,9 +281,25 @@ public final class NauticAutoSync {
                 }
                 reconnecting = false
 
-                guard let link = try await connect(&tracker) else { continue }
+                // Every connector opens through the one shared CoreBluetoothManager, so a
+                // session waits for any other watch's to close its link (switching watches).
+                if linkLease.isHeld { emit(.log("Waiting for the other watch's session to close")) }
+                try await linkLease.acquire()
+                let opened: NauticSyncLink?
+                do {
+                    opened = try await connect(&tracker)
+                } catch {
+                    linkLease.release()
+                    throw error
+                }
+                guard let link = opened else {
+                    linkLease.release()
+                    continue
+                }
+                link.setCancellation { [weak self] in self?.shouldAbortLinkCalls ?? true }
                 let outcome = await session(link, &plan)
                 await runOnLinkQueue { link.close() }
+                linkLease.release()
 
                 switch outcome {
                 case .stopped:
@@ -428,10 +461,12 @@ public final class NauticAutoSync {
                     needsSync = true
                 }
             }
+            allowTeardown()
             try? await unsubscribeTriggers(link, &triggers)
             return .stopped
         } catch {
             if isStopping || error is CancellationError {
+                allowTeardown()
                 try? await unsubscribeTriggers(link, &triggers)
                 return .stopped
             }
@@ -687,5 +722,61 @@ private final class ConnectAttempt {
         guard !settled else { return false }
         settled = true
         return true
+    }
+}
+
+/// One Suunto Nautic/Ocean link at a time: `CoreBluetoothManager` holds a single open
+/// device, so a sync for one watch waits until another's has closed its link.
+public final class NauticLinkLease {
+    public static let shared = NauticLinkLease()
+
+    private let lock = NSLock()
+    private var held = false
+    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+
+    public init() {}
+
+    public var isHeld: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return held
+    }
+
+    /// Waits in turn; throws `CancellationError` if the task is cancelled meanwhile.
+    public func acquire() async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                lock.lock()
+                if Task.isCancelled {
+                    lock.unlock()
+                    continuation.resume(throwing: CancellationError())
+                } else if !held {
+                    held = true
+                    lock.unlock()
+                    continuation.resume()
+                } else {
+                    waiters.append((id, continuation))
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
+            lock.lock()
+            let waiter = waiters.firstIndex { $0.id == id }.map { waiters.remove(at: $0) }
+            lock.unlock()
+            waiter?.continuation.resume(throwing: CancellationError())
+        }
+    }
+
+    /// Hands the lease to the next waiter, if any.
+    public func release() {
+        lock.lock()
+        guard !waiters.isEmpty else {
+            held = false
+            lock.unlock()
+            return
+        }
+        let next = waiters.removeFirst()
+        lock.unlock()
+        next.continuation.resume()
     }
 }

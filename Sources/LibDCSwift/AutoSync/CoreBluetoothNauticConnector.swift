@@ -94,8 +94,16 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
             DispatchQueue.main.sync { manager.close(clearDevicePtr: true) }
             throw NauticAutoSyncError.connectFailed("\(name) opened without a device")
         }
-        return DCDeviceNauticLink(device: device) { _ in
-            DispatchQueue.main.sync { manager.close(clearDevicePtr: true) }
+        let name = self.name
+        return DCDeviceNauticLink(device: device) { closing in
+            DispatchQueue.main.sync {
+                // The manager holds one open device; never close another session's.
+                guard manager.openedDeviceDataPtr?.pointee.device == closing else {
+                    logWarning("[NauticAutoSync] \(name)'s link was already replaced; not closing the open device")
+                    return
+                }
+                manager.close(clearDevicePtr: true)
+            }
         }
     }
 

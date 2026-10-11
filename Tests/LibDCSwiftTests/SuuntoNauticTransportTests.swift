@@ -777,11 +777,23 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
     // MARK: - Auto download: reconnect, resume, no duplicates
 
+    /// The one device `CoreBluetoothManager` holds open, shared by every watch's connector.
+    /// Closing takes a moment, like the real manager tearing a link down.
+    private final class DeviceSlot {
+        private let lock = NSLock()
+        private var open = 0
+        private var peak = 0
+        var maxOpen: Int { lock.lock(); defer { lock.unlock() }; return peak }
+        func opened() { lock.lock(); open += 1; peak = max(peak, open); lock.unlock() }
+        func closed() { usleep(50_000); lock.lock(); open -= 1; lock.unlock() }
+    }
+
     /// Opens a fresh driver session on the same fake watch for every connect, like a real reconnect.
     private final class FakeConnector: NauticSyncConnector {
         let watch: FakeWatch
         let openSession: () throws -> OpaquePointer
         let closeSession: (OpaquePointer) -> Void
+        var slot: DeviceSlot?
         private let lock = NSLock()
         private var _connects = 0
         private var _presenceChecks = 0
@@ -819,7 +831,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 throw NauticAutoSyncError.connectFailed("could not open")
             }
             watch.reconnect()
-            return DCDeviceNauticLink(device: try openSession(), onClose: closeSession)
+            let device = try openSession()
+            slot?.opened()
+            return DCDeviceNauticLink(device: device) { [closeSession, slot] in
+                closeSession($0)
+                slot?.closed()
+            }
         }
 
         func simulateDrop() {
@@ -865,16 +882,18 @@ final class SuuntoNauticTransportTests: XCTestCase {
     }
 
     private func makeAutoSync(_ watch: FakeWatch, store: AutoSyncStore = InMemoryAutoSyncStore(),
+                              lease: NauticLinkLease = NauticLinkLease(), slot: DeviceSlot? = nil,
                               configure: (inout NauticAutoSync.Configuration) -> Void = { _ in })
         -> (NauticAutoSync, FakeConnector, VirtualClock, EventLog) {
         let connector = FakeConnector(watch: watch, open: { [unowned self] in try self.open(watch) },
                                       close: { [unowned self] in self.close(device: $0) })
+        connector.slot = slot
         var config = NauticAutoSync.Configuration()
         config.refreshInterval = nil
         configure(&config)
         let clock = VirtualClock()
         let sync = NauticAutoSync(deviceKey: "Suunto Nautic test", connector: connector, store: store,
-                                  configuration: config, environment: clock.environment)
+                                  configuration: config, environment: clock.environment, linkLease: lease)
         let log = EventLog()
         Task { for await event in sync.events { log.append(event) } }
         return (sync, connector, clock, log)
@@ -1173,6 +1192,63 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let reconnected = try XCTUnwrap(messages.lastIndex(of: "Connected"))
         XCTAssertTrue(messages[reconnected...].contains { $0.hasPrefix("Listening for sync triggers") })
         XCTAssertEqual(Self.dives(log.all).map(\.id), dives.map(\.id))
+    }
+
+    // MARK: - #29: switching auto download from one watch to another
+
+    func testSwitchingWatchesWaitsForThePreviousLinkToClose() async throws {
+        // Build 17 crashed when one watch's Auto download was turned off and another's on
+        // straight away: the new session opened the shared device while the old one was
+        // still unsubscribing and closing it.
+        let ocean = FakeWatch(dives: (0..<2).map { FakeDive(id: 1_789_810_000 + UInt32($0) * 7200, profileBytes: 600, summaryBytes: 100) })
+        let nautic = FakeWatch(dives: (0..<2).map { FakeDive(id: 1_789_820_000 + UInt32($0) * 7200, profileBytes: 600, summaryBytes: 100) })
+        let lease = NauticLinkLease(), slot = DeviceSlot()
+        let (first, _, _, firstLog) = makeAutoSync(ocean, lease: lease, slot: slot)
+        let (second, _, _, secondLog) = makeAutoSync(nautic, lease: lease, slot: slot)
+
+        first.start()
+        await waitFor(firstLog) { $0.contains(.state(.watching)) }
+        first.stop()
+        second.start()
+        await waitFor(firstLog) { $0.contains(.state(.stopped)) }
+        await waitFor(secondLog) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(second, secondLog)
+
+        XCTAssertEqual(slot.maxOpen, 1, "one link open at a time")
+        XCTAssertEqual(Self.dives(firstLog.all).map(\.id), ocean.dives.map(\.id))
+        XCTAssertEqual(Self.dives(secondLog.all).map(\.id), nautic.dives.map(\.id))
+        XCTAssertEqual(ocean.subscribed, [:], "the first watch's session unsubscribed before closing")
+        XCTAssertFalse(lease.isHeld)
+    }
+
+    func testStoppingWhileWaitingForTheLeaseStopsCleanly() async throws {
+        let lease = NauticLinkLease()
+        try await lease.acquire()
+        let watch = FakeWatch(dives: [FakeDive(id: 1_789_830_000, profileBytes: 600, summaryBytes: 100)])
+        let (sync, connector, _, log) = makeAutoSync(watch, lease: lease)
+
+        sync.start()
+        await waitFor(log) { Self.logs($0).contains("Waiting for the other watch's session to close") }
+        await stopAndWait(sync, log)
+        XCTAssertEqual(connector.connects, 0)
+        lease.release()
+        XCTAssertFalse(lease.isHeld)
+    }
+
+    func testCancelStopsADownloadBetweenStreamFrames() throws {
+        let dive = FakeDive(id: 1_789_840_000, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        let link = DCDeviceNauticLink(device: try open(watch)) { _ in }
+        defer { link.setCancellation(nil) }
+        link.setCancellation { watch.streamsServed > 0 }
+
+        XCTAssertThrowsError(try link.download(dive.id)) { error in
+            guard case SuuntoNauticExplorer.ExplorerError.requestFailed(let status) = error else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(status, DC_STATUS_CANCELLED)
+        }
+        XCTAssertEqual(watch.streamStops, 1, "the stream is stopped, not left running")
     }
 
     // MARK: - #29: a connect attempt that never completes
