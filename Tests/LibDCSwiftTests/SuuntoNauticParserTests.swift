@@ -360,8 +360,11 @@ final class SuuntoNauticParserTests: XCTestCase {
     // MARK: - #29: dive time and max depth as the Suunto app shows them
 
     /// The fixture's own summary layout: [first record][dive record], with the
-    /// app's DiveTime and Depth.Max at payload offsets 321 and 330 of the dive record.
-    private static func summary(divetime: Float, maxDepth: Float) -> [UInt8] {
+    /// app's Temperature.Min/Max, DiveTime, Depth.Max and DepthAverage at payload
+    /// offsets 313, 317, 321, 330 and 338 of the dive record.
+    /// The DiveFooter between them carries tank 1's end pressure for gas 0 at +311 (int32 Pa).
+    private static func summary(divetime: Float, maxDepth: Float, avgDepth: Float = 0,
+                                tempMin: Float = 0, tempMax: Float = 0, footerEndBar: Double = 0) -> [UInt8] {
         func record(_ id: UInt8, _ payload: [UInt8]) -> [UInt8] {
             [id, 0xFF] + withUnsafeBytes(of: UInt32(payload.count).littleEndian, Array.init) + payload
         }
@@ -369,7 +372,13 @@ final class SuuntoNauticParserTests: XCTestCase {
         var dive = [UInt8](repeating: 0, count: 370)
         dive.replaceSubrange(321..<325, with: f32(divetime))
         dive.replaceSubrange(330..<334, with: f32(maxDepth))
-        return Array("SBEM0103".utf8) + record(33, [UInt8](repeating: 0, count: 561)) + record(37, dive) + [0xB8, 0xAE, 0xA4, 0x0B]
+        dive.replaceSubrange(338..<342, with: f32(avgDepth))
+        dive.replaceSubrange(313..<317, with: f32(tempMin))
+        dive.replaceSubrange(317..<321, with: f32(tempMax))
+        var footer = [UInt8](repeating: 0, count: 658)
+        footer.replaceSubrange(311..<315, with: withUnsafeBytes(of: Int32(footerEndBar * 100_000).littleEndian, Array.init))
+        return Array("SBEM0103".utf8) + record(33, [UInt8](repeating: 0, count: 561)) + record(34, footer)
+            + record(37, dive) + [0xB8, 0xAE, 0xA4, 0x0B]
     }
 
     func testSummaryDiveTimeAndMaxDepthWin() throws {
@@ -380,6 +389,66 @@ final class SuuntoNauticParserTests: XCTestCase {
         let dive = try parse(data, logbookID: 1787752091)
         XCTAssertEqual(dive.divetime, 1921)
         XCTAssertEqual(dive.maxDepth, 33.12, accuracy: 0.001)
+    }
+
+    func testSummaryAverageDepthAndTemperaturesWin() throws {
+        // 1787752091: app DepthAverage 21.51 m, Temperature.Min/Max 294.0/298.5 K.
+        let fixture = try loadFixture()
+        let profile = try parse(fixture, logbookID: 1787752091)
+        let data = fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12, avgDepth: 21.51,
+                                               tempMin: 294.0, tempMax: 298.5))
+        let dive = try parse(data, logbookID: 1787752091)
+        XCTAssertEqual(dive.avgDepth, 21.51, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(dive.minTemperature), 294.0 - 273.15, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(dive.maxTemperature), 298.5 - 273.15, accuracy: 0.001)
+
+        // 1788106904 records its minimum above its maximum; keep the sampled range then.
+        let swapped = fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12, avgDepth: 21.51,
+                                                  tempMin: 303.1, tempMax: 295.2))
+        let kept = try parse(swapped, logbookID: 1787752091)
+        XCTAssertEqual(kept.minTemperature, profile.minTemperature)
+        XCTAssertEqual(kept.maxTemperature, profile.maxTemperature)
+        XCTAssertEqual(kept.avgDepth, 21.51, accuracy: 0.001)
+
+        // An average deeper than the maximum isn't trusted.
+        let deep = try parse(fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12, avgDepth: 40)),
+                             logbookID: 1787752091)
+        XCTAssertEqual(deep.avgDepth, profile.avgDepth, accuracy: 0.001)
+    }
+
+    // MARK: - #52: end pressure after the regulator is shut and purged
+
+    /// A dive: Diving for 60 s with tank 0 at 200 then 120.5 bar, then on the surface
+    /// the valve is shut and the regulator purged (0.9 bar), as on kreitje's 1791129285.
+    private static func purgedRegulatorProfile() -> [UInt8] {
+        func status(_ bar: Double, deltaMs: UInt16 = 30_000) -> [UInt8] {
+            var p = [UInt8](repeating: 0, count: 141)
+            p.replaceSubrange(0..<2, with: withUnsafeBytes(of: deltaMs.littleEndian, Array.init))
+            p[42] = 0
+            p.replaceSubrange(44..<48, with: withUnsafeBytes(of: UInt32(bar * 100_000).littleEndian, Array.init))
+            return [0x16, 141] + p
+        }
+        let diving: [UInt8] = [0x1C, 3, 0, 0, 1], idling: [UInt8] = [0x1C, 3, 0, 0, 0]
+        return Array("SBEM0103".utf8) + diving + status(200) + status(120.5) + idling + status(0.9)
+    }
+
+    func testEndPressureIgnoresAPurgedRegulatorAfterTheDive() throws {
+        let dive = try parse(Data(Self.purgedRegulatorProfile()), logbookID: 1791129285)
+        let tank = try XCTUnwrap(dive.tanks?.first)
+        XCTAssertEqual(tank.beginPressure, 200, accuracy: 0.01)
+        XCTAssertEqual(tank.endPressure, 120.5, accuracy: 0.01, "the last reading while Diving, not 0.9 bar")
+    }
+
+    func testEndPressureIsTheWatchesOwnFromTheDiveFooter() throws {
+        let profile = Self.purgedRegulatorProfile()
+        let watch = try parse(Data(profile + Self.summary(divetime: 60, maxDepth: 0, footerEndBar: 121.55)),
+                              logbookID: 1791129285)
+        XCTAssertEqual(try XCTUnwrap(watch.tanks?.first).endPressure, 121.55, accuracy: 0.01)
+
+        // An end above the start isn't trusted.
+        let high = try parse(Data(profile + Self.summary(divetime: 60, maxDepth: 0, footerEndBar: 250)),
+                             logbookID: 1791129285)
+        XCTAssertEqual(try XCTUnwrap(high.tanks?.first).endPressure, 120.5, accuracy: 0.01)
     }
 
     func testImplausibleSummaryFallsBackToTheProfile() throws {
@@ -455,9 +524,31 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(tanks[1].beginPressure, 100, accuracy: 0.5)
     }
 
+    func testTrimixHeliumAndWaterTypeDecode() throws {
+        // The gas record holds O2 and He as int16 at +1 and +3 (the watch's
+        // /Summary schema). Reading He as a byte at +2 (O2's high byte) gave
+        // 0 % helium on every gas, so trimix decoded as nitrox.
+        var summary = Array("SBEM0103".utf8) + [UInt8](repeating: 0, count: 0x140)
+        let base = 0xC7, stride = 45
+        summary[base + 1] = 18; summary[base + 3] = 45           // Tx 18/45
+        summary[base + stride + 1] = 50                           // EAN50
+        summary[base + 2 * stride + 1] = 100                      // oxygen
+        summary[0x3E] = 0                                         // fresh water
+        let dive = try parse(Data(Array("SBEM0103".utf8) + summary), logbookID: 1787000000)
+
+        let gases = try XCTUnwrap(dive.gasMixes)
+        XCTAssertEqual(gases.count, 3)
+        XCTAssertEqual(gases[0].oxygen, 0.18, accuracy: 0.001)
+        XCTAssertEqual(gases[0].helium, 0.45, accuracy: 0.001)
+        XCTAssertEqual(gases[1].oxygen, 0.50, accuracy: 0.001)
+        XCTAssertEqual(gases[1].helium, 0.0, accuracy: 0.001)
+        XCTAssertEqual(gases[2].oxygen, 1.0, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(dive.salinity), 1.0, accuracy: 0.0001)
+    }
+
     func testMultiGasSummaryDecodesGasesVolumesAndTankLinkage() throws {
         // Multi-gas (issue #33): the /Summary carries one 45-byte record per
-        // configured gas starting at 0xC7 (O2% @+1, He% @+2, cylinder water
+        // configured gas starting at 0xC7 (O2% @+1, He% @+3, cylinder water
         // capacity float32 m^3 @+9). The record index == cylinder slot ==
         // GasNumber, so tank i breathes gas i. Reproduces nandodiver's real
         // dual-transmitter dive (Air 12 L + NX26 5.7 L, issue #29): two
@@ -487,8 +578,10 @@ final class SuuntoNauticParserTests: XCTestCase {
             summary.replaceSubrange(off..<off + 4, with: f32le(litres))
         }
 
+        summary[0x3E] = 2                      // salt
         let buf = Array("SBEM0103".utf8) + [0x16, 141] + payload + summary
         let dive = try parse(Data(buf), logbookID: 1787000000)
+        XCTAssertEqual(try XCTUnwrap(dive.salinity), 1.03, accuracy: 0.0001)
 
         let gases = try XCTUnwrap(dive.gasMixes)
         XCTAssertEqual(gases.count, 2, "both gas records must decode (stride 45)")
@@ -530,6 +623,14 @@ final class SuuntoNauticParserTests: XCTestCase {
             XCTAssert(divetime > 30 && divetime < 30000, "\(logid): implausible divetime \(divetime)")
             if let lo = dive.decoModel?.gfLow, let hi = dive.decoModel?.gfHigh {
                 XCTAssertLessThanOrEqual(lo, hi, "\(logid): GF low \(lo) > high \(hi) (inverted)")
+            }
+
+            // kreitje's Nautic S dive (#52): the Suunto app shows 2992 -> 1763 psi.
+            if logid == "1791129285", let tank = dive.tanks?.first {
+                XCTAssertEqual(tank.beginPressure, 2992 / 14.5038, accuracy: 0.5, "\(logid): begin vs app")
+                XCTAssertEqual(tank.endPressure, 1763 / 14.5038, accuracy: 0.1, "\(logid): end vs app")
+                XCTAssertEqual(dive.decoModel?.gfLow, 40)
+                XCTAssertEqual(dive.decoModel?.gfHigh, 85)
             }
 
             // Cross-check against the app JSON when present.
@@ -592,6 +693,14 @@ final class SuuntoNauticParserTests: XCTestCase {
                 XCTAssertEqual(divetime, appTime.rounded(.down), "\(logid): divetime \(divetime) vs app \(appTime) truncated")
                 XCTAssertEqual(maxDepthField(data), appMax, accuracy: 0.005, "\(logid): maxDepth field vs app \(appMax)")
                 XCTAssertEqual(dive.maxDepth, appMax, accuracy: 0.005, "\(logid): pipeline maxDepth vs app \(appMax)")
+                if let appAvg = header["DepthAverage"] as? Double {
+                    XCTAssertEqual(dive.avgDepth, appAvg, accuracy: 0.005, "\(logid): avgDepth vs app \(appAvg)")
+                }
+                if let t = header["Temperature"] as? [String: Any], let lo = t["Min"] as? Double, let hi = t["Max"] as? Double, lo <= hi {
+                    XCTAssertEqual(try XCTUnwrap(dive.minTemperature), lo - 273.15, accuracy: 0.06, "\(logid): min temperature vs app")
+                    XCTAssertEqual(try XCTUnwrap(dive.maxTemperature), hi - 273.15, accuracy: 0.06, "\(logid): max temperature vs app")
+                }
+                XCTAssertNotNil(dive.salinity, "\(logid): water type from the /Summary")
                 print("  \(logid): summary dive time \(Int(divetime)) s, max depth \(String(format: "%.2f", maxDepthField(data))) m (app \(appTime) s, \(appMax) m)")
             }
 
@@ -604,8 +713,12 @@ final class SuuntoNauticParserTests: XCTestCase {
             // sample 7 and never again), not a real transmitter -- the parser
             // gates those out, so require >=2 readings before counting a curve.
             if let samples = (root["DeviceLog"] as? [String: Any])?["Samples"] as? [[String: Any]] {
+                // End = the last reading while the app's DiveState is Diving: readings
+                // on the surface afterwards can be of a closed, purged regulator.
                 var raw: [String: (gas: Int, begin: Double, end: Double, count: Int)] = [:]
+                var diving = false
                 for s in samples {
+                    if let state = (s["DiveEvents"] as? [String: Any])?["DiveState"] as? String { diving = state == "Diving" }
                     for c in (s["Cylinders"] as? [[String: Any]]) ?? [] {
                         guard let gn = c["GasNumber"] as? Int else { continue }
                         for f in ["Pressure", "Pressure2"] {
@@ -615,7 +728,7 @@ final class SuuntoNauticParserTests: XCTestCase {
                             // begin = highest reading (a cylinder only loses
                             // pressure), matching the parser -- so an initial
                             // pre-pairing dropout doesn't skew the expected begin.
-                            if var cur = raw[key] { cur.end = bar; if bar > cur.begin { cur.begin = bar }; cur.count += 1; raw[key] = cur }
+                            if var cur = raw[key] { if diving { cur.end = bar }; if bar > cur.begin { cur.begin = bar }; cur.count += 1; raw[key] = cur }
                             else { raw[key] = (gn, bar, bar, 1) }
                         }
                     }

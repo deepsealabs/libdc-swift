@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `DiveDataViewModel.lastDownloadInterruption`: set when a download delivered some dives and then failed, so the app can say "some dives couldn't be downloaded, reconnect and sync again"
 - `NauticAutoSync.Configuration.connectTimeout` (25 s): a connect attempt that hasn't finished is cancelled (`NauticSyncConnector.cancelConnect()`), the `watchUnreachable` event fires with a "press a button on the watch" hint, and the sync falls back to scanning; DC Tester shows the hint in its status (#29)
 - DC Tester: "Download all (ignore fingerprint)" switch next to Download Dives
+- Suunto Nautic/Ocean: the water type set on the watch (fresh, EN13319, salt) from the `/Summary`, as `DiveData.salinity` (#29)
 
 ### Changed
 - GenericParser closes a profile point when the next `DC_SAMPLE_TIME` arrives (or parsing ends), so depth, events and deco land on the sample they were reported in instead of the following timestamp
@@ -38,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suunto Nautic/Ocean: the sync trigger subscription comes back after an automatic reconnect that followed a drop mid-download. Message ids now carry on from the previous connection instead of restarting at 1 (the watch can keep a dropped link's session and leave a repeated request unanswered); an unanswered subscription is retried 3 times 2 s apart and again later instead of being given up for the session; unsubscribing releases a per-id handle, and a 00 slot left bound by a dropped link is released when a GET lands on the 10 slot (#29)
 - Suunto Nautic/Ocean: dive time is truncated like the Suunto app's (4680.5 s is 78:00, not 78:01), and dive time and max depth come from the watch's own values in the `/Summary` when they agree with the profile; max depth was the deepest logged sample, 0.2-0.3 m shallower than the app (#29)
 - `retrieveDiveLogs(useFingerprint: false)` clears a fingerprint an earlier download on the same connection set
+- Suunto Nautic/Ocean: on a reconnect a few seconds after a drop, opening the device waits for the watch's handshake reply, skipping the tail of the interrupted stream, before sending anything. The first request used to go out while the watch was still flushing that stream, and the Ocean left it unanswered about two times in three (#29, #45)
+- Suunto Nautic/Ocean: helium is read from the gas record as an int16 at +3; it was read from O2's high byte, so every gas had 0 % helium and trimix decoded as nitrox (#29)
+- Suunto Nautic/Ocean: average depth and the water temperature range are the watch's own, as the Suunto app shows them, when the `/Summary` agrees with the profile (#29)
+- Suunto Nautic/Ocean: tank end pressure is the watch's own at the end of the dive. It was the last reading, which after a dive with the valve shut and the regulator purged on the surface came out at 0.9 bar instead of 121.5 (#52)
 - DC Tester: Download Dives says "No new dives since the last download" instead of "Downloaded 0 dive(s)" when the fingerprint stops it
 - DC Tester: a failed download suggests reconnecting first and only calls a dive gone when `/Logbook/Entries` no longer lists it; Capture raw on a `/Summary` path fetches every page (#56)
 
