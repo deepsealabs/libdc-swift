@@ -88,6 +88,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var valueSlots = false
         /// GETs of a value resource to leave unanswered.
         var unansweredValueGets = 0
+        /// After a drop, the next hello is answered behind this many frames of the interrupted
+        /// /Data stream, and a request that arrives before the host has read the Hello-Ack goes
+        /// unanswered. Models the quick Ocean reconnects traced in #29.
+        var staleFramesAfterDrop = 0
+        private var pendingStaleFrames = 0
+        private var helloAckEnd: Int?
         private(set) var ignoredRequests = 0
         private(set) var linkUp = true
         private(set) var drops = 0
@@ -133,6 +139,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// A fresh link: whatever was in flight on the old one is gone.
         func reconnect() {
             lock.lock(); defer { lock.unlock() }
+            if !linkUp { pendingStaleFrames = staleFramesAfterDrop }
+            helloAckEnd = nil
             if !(keepsSessionAcrossDrops && !linkUp) {
                 heldSlots.removeAll()
                 subscribed.removeAll()
@@ -199,6 +207,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
             guard n > 0 else { return linkUp ? 0 : nil }
             rx.withUnsafeBufferPointer { buffer.copyMemory(from: $0.baseAddress! + rxIndex, byteCount: n) }
             rxIndex += n
+            if let end = helloAckEnd, rxIndex >= end { helloAckEnd = nil }
             if rxIndex == rx.count { rx.removeAll(keepingCapacity: true); rxIndex = 0 }
             return n
         }
@@ -234,6 +243,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
             guard f.count >= 6, f[0] == 0xA5 else { return }
             let msgid = Array(f[4...5])
             if f[1] != 0x12 {
+                if helloAckEnd != nil {
+                    ignoredRequests += 1
+                    return
+                }
                 if keepsSessionAcrossDrops && recentRequests.contains(f) {
                     ignoredRequests += 1
                     return
@@ -243,7 +256,16 @@ final class SuuntoNauticTransportTests: XCTestCase {
             }
             switch f[1] {
             case 0x12: // EVA hello
-                send([0xA5, 0x13, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02])
+                if pendingStaleFrames > 0 {
+                    // The tail of a frame cut mid-way, then an empty frame, then the old stream.
+                    rx += [0x11, 0x22, 0x7E, 0x7E]
+                    for _ in 0..<pendingStaleFrames { send(chunkFrame(ArraySlice(repeating: 0xEE, count: 40))) }
+                    pendingStaleFrames = 0
+                    send([0xA5, 0x13, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02])
+                    helloAckEnd = rx.count
+                } else {
+                    send([0xA5, 0x13, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02])
+                }
             case 0x0A: // GET
                 let pathLen = Int(f[9])
                 let path = String(decoding: f[10..<(10 + pathLen)], as: UTF8.self)
@@ -1108,6 +1130,49 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(connector.connects, 2)
         XCTAssertFalse(Self.logs(log.all).contains { $0.hasPrefix("No sync trigger") })
         XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 0, "unsubscribing releases the slot")
+    }
+
+    // MARK: - #29/#45: a quick reconnect while the watch still flushes the old stream
+
+    func testOpenWaitsForTheHandshakeReplyBehindAStaleStream() throws {
+        let dives = (0..<2).map { FakeDive(id: 1_789_750_000 + UInt32($0) * 7200, profileBytes: 600, summaryBytes: 100) }
+        let watch = FakeWatch(dives: dives)
+        watch.staleFramesAfterDrop = 5
+        watch.dropLink()
+        watch.reconnect()
+
+        let device = try open(watch)
+        XCTAssertEqual(list(device).sorted(), dives.map(\.id))
+        XCTAssertEqual(watch.ignoredRequests, 0, "nothing was sent before the Hello-Ack was read")
+    }
+
+    func testTriggerSubscriptionIsAnsweredFirstTimeAfterAQuickReconnect() async throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_760_000 + UInt32($0) * 7200, profileBytes: 6000) }
+        let watch = FakeWatch(dives: dives)
+        watch.staleFramesAfterDrop = 6
+        // No retries: the reconnect's first subscription must be answered.
+        let (sync, connector, _, log) = makeAutoSync(watch) { $0.triggerSubscribeRetries = 0 }
+
+        var streams = 0
+        sync.onDive = { _ in
+            streams += 1
+            if streams == 1 { watch.mutate { $0.dropAfterChunks = 2 } }
+        }
+        sync.start()
+        await waitFor(log) { events in
+            guard let done = events.firstIndex(where: { if case .syncCompleted = $0 { return true } else { return false } }) else { return false }
+            return events[done...].contains(.state(.watching))
+        }
+        await stopAndWait(sync, log)
+
+        let messages = Self.logs(log.all)
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertEqual(watch.drops, 1)
+        XCTAssertEqual(watch.ignoredRequests, 0)
+        XCTAssertFalse(messages.contains { $0.hasPrefix("No sync trigger") }, "\(messages)")
+        let reconnected = try XCTUnwrap(messages.lastIndex(of: "Connected"))
+        XCTAssertTrue(messages[reconnected...].contains { $0.hasPrefix("Listening for sync triggers") })
+        XCTAssertEqual(Self.dives(log.all).map(\.id), dives.map(\.id))
     }
 
     // MARK: - #29: a connect attempt that never completes
