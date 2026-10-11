@@ -11,7 +11,14 @@ public protocol NauticSyncLink: AnyObject {
     func subscribe(_ path: String) throws -> SuuntoNauticExplorer.Subscription
     func unsubscribe(_ subscription: SuuntoNauticExplorer.Subscription) throws
     func waitForNotification(timeoutMs: UInt32) throws -> SuuntoNauticExplorer.Notification?
+    /// While `isCancelled` returns true, calls give up with `DC_STATUS_CANCELLED`,
+    /// a download between stream frames. Nil removes the check.
+    func setCancellation(_ isCancelled: (() -> Bool)?)
     func close()
+}
+
+public extension NauticSyncLink {
+    func setCancellation(_ isCancelled: (() -> Bool)?) {}
 }
 
 /// Finds and opens the watch.
@@ -38,7 +45,13 @@ public enum NauticAutoSyncError: Error, Equatable {
 
 /// `NauticSyncLink` over an open `dc_device_t`, through the Nautic driver.
 public final class DCDeviceNauticLink: NauticSyncLink {
+    private final class CancelCheck {
+        let isCancelled: () -> Bool
+        init(_ isCancelled: @escaping () -> Bool) { self.isCancelled = isCancelled }
+    }
+
     private var device: OpaquePointer?
+    private var cancelCheck: CancelCheck?
     private let onClose: (OpaquePointer) -> Void
 
     public init(device: OpaquePointer, onClose: @escaping (OpaquePointer) -> Void) {
@@ -71,9 +84,26 @@ public final class DCDeviceNauticLink: NauticSyncLink {
         try SuuntoNauticExplorer.waitForNotification(dcDevice: dcDevice(), timeoutMs: timeoutMs)
     }
 
+    public func setCancellation(_ isCancelled: (() -> Bool)?) {
+        guard let device else { return }
+        guard let isCancelled else {
+            dc_device_set_cancel(device, nil, nil)
+            cancelCheck = nil
+            return
+        }
+        let check = CancelCheck(isCancelled)
+        cancelCheck = check
+        dc_device_set_cancel(device, { userdata in
+            guard let userdata else { return 0 }
+            return Unmanaged<CancelCheck>.fromOpaque(userdata).takeUnretainedValue().isCancelled() ? 1 : 0
+        }, Unmanaged.passUnretained(check).toOpaque())
+    }
+
     public func close() {
         guard let device else { return }
         self.device = nil
+        dc_device_set_cancel(device, nil, nil)
+        cancelCheck = nil
         onClose(device)
     }
 }

@@ -402,13 +402,13 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(dive.minTemperature), 294.0 - 273.15, accuracy: 0.001)
         XCTAssertEqual(try XCTUnwrap(dive.maxTemperature), 298.5 - 273.15, accuracy: 0.001)
 
-        // 1788106904 records its minimum above its maximum; keep the sampled range then.
+        // The Ocean can store the pair reversed (1788106904: 303.1 / 295.2 K); it's ordered.
         let swapped = fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12, avgDepth: 21.51,
                                                   tempMin: 303.1, tempMax: 295.2))
-        let kept = try parse(swapped, logbookID: 1787752091)
-        XCTAssertEqual(kept.minTemperature, profile.minTemperature)
-        XCTAssertEqual(kept.maxTemperature, profile.maxTemperature)
-        XCTAssertEqual(kept.avgDepth, 21.51, accuracy: 0.001)
+        let ordered = try parse(swapped, logbookID: 1787752091)
+        XCTAssertEqual(try XCTUnwrap(ordered.minTemperature), 295.2 - 273.15, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(ordered.maxTemperature), 303.1 - 273.15, accuracy: 0.001)
+        XCTAssertEqual(ordered.avgDepth, 21.51, accuracy: 0.001)
 
         // An average deeper than the maximum isn't trusted.
         let deep = try parse(fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12, avgDepth: 40)),
@@ -696,7 +696,8 @@ final class SuuntoNauticParserTests: XCTestCase {
                 if let appAvg = header["DepthAverage"] as? Double {
                     XCTAssertEqual(dive.avgDepth, appAvg, accuracy: 0.005, "\(logid): avgDepth vs app \(appAvg)")
                 }
-                if let t = header["Temperature"] as? [String: Any], let lo = t["Min"] as? Double, let hi = t["Max"] as? Double, lo <= hi {
+                if let t = header["Temperature"] as? [String: Any], let a = t["Min"] as? Double, let b = t["Max"] as? Double {
+                    let lo = min(a, b), hi = max(a, b)
                     XCTAssertEqual(try XCTUnwrap(dive.minTemperature), lo - 273.15, accuracy: 0.06, "\(logid): min temperature vs app")
                     XCTAssertEqual(try XCTUnwrap(dive.maxTemperature), hi - 273.15, accuracy: 0.06, "\(logid): max temperature vs app")
                 }
