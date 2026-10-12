@@ -708,6 +708,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         
         DispatchQueue.main.async {
+            // A late disconnect from a closed link must not reset a newer connection to another peripheral.
+            if let current = self.connectedDevice, current.identifier != peripheral.identifier { return }
             self.isPeripheralReady = false
             self.connectedDevice = nil
 

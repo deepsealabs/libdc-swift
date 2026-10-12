@@ -67,7 +67,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         autoSync?.stop()
         // The auto-download session needs the link to itself; close() cancels the old link after a delay, so let that land first.
         let manager = CoreBluetoothManager.sharedManager
-        let closedManualSession = manager.openedDeviceDataPtr != nil
+        // A stopping auto-download session still holds the lease and closes its own device; closing it here frees it mid-call.
+        let closedManualSession = manager.openedDeviceDataPtr != nil && !NauticLinkLease.shared.isHeld
         if closedManualSession {
             manager.close(clearDevicePtr: true)
         }
