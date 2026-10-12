@@ -65,6 +65,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var dives: [FakeDive]                   // any order; served oldest-first
         var entriesPerPage = 18
         var summaryPageSize = 451
+        /// Served for any /Logbook/byId/<id>/Descriptors, paged like /Summary.
+        var descriptors: [UInt8] = []
         var mdsPayloadSize = 278
         /// Stale 0x01 chunks emitted just before the next /Summary GET's ACK.
         var leftoverChunksBeforeSummaryAck = 0
@@ -339,14 +341,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     : nil
                 if path == "/Logbook/Entries" {
                     serveEntries(msgid: msgid, handle: h, param: param)
-                } else if path.hasSuffix("/Summary"), let dive = dive(for: path) {
+                } else if let content = pagedContent(for: path) {
                     let offset = Int(param?.value ?? 0)
-                    summaryOffsets.append(UInt32(offset))
-                    let end = min(offset + summaryPageSize, dive.summary.count)
-                    let data = Array(dive.summary[min(offset, end)..<end])
+                    if path.hasSuffix("/Summary") { summaryOffsets.append(UInt32(offset)) }
+                    let end = min(offset + summaryPageSize, content.count)
+                    let data = Array(content[min(offset, end)..<end])
                     let len = Self.u16(data.count)
                     let header: [UInt8] = [0x0D, 0x00, 0x02, len[0], len[1], 0x00, len[0], len[1], 0x00, len[0], len[1]]
-                    send(dataFrame(msgid: msgid, handle: h, status: end < dive.summary.count ? 100 : 200, body: header + data))
+                    send(dataFrame(msgid: msgid, handle: h, status: end < content.count ? 100 : 200, body: header + data))
                 } else if path == "/Info" {
                     send(dataFrame(msgid: msgid, handle: h, status: 200, body: Array("Suunto\0Ocean\0".utf8)))
                 } else {
@@ -355,6 +357,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
             default:
                 break
             }
+        }
+
+        private func pagedContent(for path: String) -> [UInt8]? {
+            if path.hasSuffix("/Summary") { return dive(for: path)?.summary }
+            if path.hasSuffix("/Descriptors"), !descriptors.isEmpty { return descriptors }
+            return nil
         }
 
         /// Static paths get a fresh F0 handle; the value resources their fixed ones from the Suunto
@@ -575,6 +583,21 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
         XCTAssertEqual(watch.summaryOffsets, [0, 451, 902, 1353, 1804])
+    }
+
+    // MARK: - #72: any paged resource comes through whole
+
+    func testFetchPagedReadsAWholeDescriptorsSchema() throws {
+        let dive = FakeDive(id: 1_789_390_909, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.descriptors = (0..<43_140).map { UInt8(truncatingIfNeeded: $0 &* 31) }
+        let device = try open(watch)
+
+        let buffer = dc_buffer_new(0)!
+        defer { dc_buffer_free(buffer) }
+        XCTAssertEqual(suunto_nautic_device_fetch_paged(device, "/Logbook/byId/\(dive.id)/Descriptors", buffer), DC_STATUS_SUCCESS)
+        let bytes = Array(UnsafeBufferPointer(start: dc_buffer_get_data(buffer), count: dc_buffer_get_size(buffer)))
+        XCTAssertEqual(bytes, watch.descriptors)
     }
 
     // MARK: - #59: a leftover stream chunk is never taken as a GET's reply

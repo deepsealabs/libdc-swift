@@ -333,27 +333,28 @@ struct DeviceExplorerView: View {
         return formatter.string(from: date)
     }
 
-    /// The logbook id in a `/Logbook/byId/<id>/Summary` path.
-    private func summaryLogbookID(_ path: String) -> String? {
+    /// The resource name of a paged `/Logbook/byId/<id>/Summary` or `/Descriptors` path.
+    private func pagedResource(_ path: String) -> String? {
         let parts = path.split(separator: "/")
-        guard parts.count == 4, parts[0] == "Logbook", parts[1] == "byId", parts[3] == "Summary" else { return nil }
-        return String(parts[2])
+        guard parts.count == 4, parts[0] == "Logbook", parts[1] == "byId",
+              parts[3] == "Summary" || parts[3] == "Descriptors" else { return nil }
+        return String(parts[3])
     }
 
     private func captureRaw(path: String) {
         busy = true; statusMessage = nil
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                // /Summary is paged: fetch every page so no transfer is left half-done.
-                let summaryID = summaryLogbookID(path)
-                let data = try summaryID.map { try SuuntoNauticExplorer.downloadSummary(device: devicePtr, logbookID: $0) }
-                    ?? SuuntoNauticExplorer.fetchRaw(device: devicePtr, path: path)
+                // Paged resources: fetch every page so no transfer is left half-done.
+                let resource = pagedResource(path)
+                let data = try resource != nil
+                    ? SuuntoNauticExplorer.fetchPaged(device: devicePtr, path: path)
+                    : SuuntoNauticExplorer.fetchRaw(device: devicePtr, path: path)
                 DispatchQueue.main.async {
                     lastResponse = data
                     lastLabel = "RAW \(path)"
-                    statusMessage = summaryID != nil
-                        ? "Captured all \(data.count) /Summary data bytes for \(path). Tap Export Raw Capture below and send us the file."
-                        : "Captured \(data.count) raw bytes for \(path). Tap Export Raw Capture below and send us the file."
+                    statusMessage = resource.map { "Captured all \(data.count) /\($0) data bytes for \(path). Tap Export Raw Capture below and send us the file." }
+                        ?? "Captured \(data.count) raw bytes for \(path). Tap Export Raw Capture below and send us the file."
                     busy = false
                 }
             } catch {

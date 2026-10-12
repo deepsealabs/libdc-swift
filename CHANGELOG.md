@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DC Tester: "Download all (ignore fingerprint)" switch next to Download Dives
 - `NauticSyncLink.setCancellation(_:)`: blocking calls give up with `DC_STATUS_CANCELLED` while the check returns true; `NauticAutoSync` sets it so `stop()` interrupts a download
 - Suunto Nautic/Ocean: the water type set on the watch (fresh, EN13319, salt) from the `/Summary`, as `DiveData.salinity` (#29)
+- `SuuntoNauticExplorer.fetchPaged(device:path:)` (`suunto_nautic_device_fetch_paged`): every page of any paged resource, so `/Logbook/byId/<id>/Descriptors` comes through whole; DC Tester's Explorer uses it for Descriptors as well as `/Summary` (#72)
 
 ### Changed
 - GenericParser closes a profile point when the next `DC_SAMPLE_TIME` arrives (or parsing ends), so depth, events and deco land on the sample they were reported in instead of the following timestamp
@@ -44,6 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suunto Nautic/Ocean: helium is read from the gas record as an int16 at +3; it was read from O2's high byte, so every gas had 0 % helium and trimix decoded as nitrox (#29)
 - Suunto Nautic/Ocean: average depth and the water temperature range are the watch's own, as the Suunto app shows them, when the `/Summary` agrees with the profile (#29)
 - Suunto Nautic/Ocean auto download: switching from one watch to another no longer crashes. Every connector opens through the one shared `CoreBluetoothManager`, and the new watch's session could open its device while the old session was still unsubscribing and closing it. Sessions now take turns (`NauticLinkLease`), a stopped session cancels its in-flight download between stream frames instead of finishing it, and a closing link never closes another session's device (#29, #45)
+- Suunto Nautic/Ocean auto download: turning it off and straight back on (same watch or another) no longer crashes. DC Tester's switch closed the shared device as a leftover manual session while the stopped session was still unsubscribing on it; it now leaves a device whose session holds the lease alone. A closing link also keeps the lease until its watch has actually disconnected, so a new session can't open into the old link's delayed cancel, and a late disconnect from one watch no longer resets the manager's state for another (#29)
 - Suunto Nautic/Ocean: a dive's Descriptors schema is no longer truncated at 64 pages
 - Suunto Nautic/Ocean: when the Ocean stores the water temperature pair reversed, it is ordered instead of falling back to the sampled range
 - Suunto Nautic/Ocean: tank end pressure is the watch's own at the end of the dive. It was the last reading, which after a dive with the valve shut and the regulator purged on the surface came out at 0.9 bar instead of 121.5 (#52)
