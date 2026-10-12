@@ -289,6 +289,26 @@ public enum SuuntoNauticExplorer {
         return dataFromBuffer(buffer)
     }
 
+    /// Every page of a paged resource such as `/Logbook/byId/<id>/Descriptors`
+    /// (data bytes only). `fetch`/`fetchRaw` return just the first frame.
+    public static func fetchPaged(device devicePtr: UnsafeMutablePointer<device_data_t>, path: String) throws -> Data {
+        guard let dcDevice = devicePtr.pointee.device else {
+            throw ExplorerError.notConnected
+        }
+
+        guard let buffer = dc_buffer_new(0) else {
+            throw ExplorerError.requestFailed(DC_STATUS_NOMEMORY)
+        }
+        defer { dc_buffer_free(buffer) }
+
+        let status = suunto_nautic_device_fetch_paged(dcDevice, path, buffer)
+        guard status == DC_STATUS_SUCCESS else {
+            throw ExplorerError.requestFailed(status)
+        }
+
+        return dataFromBuffer(buffer)
+    }
+
 
     /// A decoded dive profile. Populated from the standard dc_parser_t
     /// fields/samples: depth, temperature, tank pressure, and (from the

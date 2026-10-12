@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DC Tester: "Download all (ignore fingerprint)" switch next to Download Dives
 - `NauticSyncLink.setCancellation(_:)`: blocking calls give up with `DC_STATUS_CANCELLED` while the check returns true; `NauticAutoSync` sets it so `stop()` interrupts a download
 - Suunto Nautic/Ocean: the water type set on the watch (fresh, EN13319, salt) from the `/Summary`, as `DiveData.salinity` (#29)
+- `SuuntoNauticExplorer.fetchPaged(device:path:)` (`suunto_nautic_device_fetch_paged`): every page of any paged resource, so `/Logbook/byId/<id>/Descriptors` comes through whole; DC Tester's Explorer uses it for Descriptors as well as `/Summary` (#72)
 
 ### Changed
 - GenericParser closes a profile point when the next `DC_SAMPLE_TIME` arrives (or parsing ends), so depth, events and deco land on the sample they were reported in instead of the following timestamp
