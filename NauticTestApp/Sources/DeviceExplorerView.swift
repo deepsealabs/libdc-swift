@@ -29,6 +29,10 @@ struct DeviceExplorerView: View {
     @State private var decodedProfile: SuuntoNauticExplorer.DecodedProfile?
     @State private var diveNotes: String = ""
     @State private var diveIDs: [UInt32] = []
+    @State private var handshakeMissing = false
+    @ObservedObject private var log = ExplorerLog.shared
+
+    private static let sleepingHint = "The watch hasn't answered since connecting; it may be asleep. Press a button on the watch, then try again."
 
     private var isNautic: Bool { family == .suuntoNautic }
 
@@ -96,15 +100,63 @@ struct DeviceExplorerView: View {
                     Text(statusMessage).font(.footnote)
                 }
             }
+
+            explorerLogSection
         }
         .navigationTitle("Device Explorer")
-        .onAppear(perform: detectFamily)
+        .onAppear {
+            detectFamily()
+            logConnection()
+        }
+        .onChange(of: statusMessage) { message in
+            if let message { log.append(message) }
+        }
         .sheet(isPresented: Binding(
             get: { shareItems != nil },
             set: { if !$0 { shareItems = nil } }
         )) {
             ActivityView(activityItems: shareItems ?? [])
         }
+    }
+
+    private var explorerLogSection: some View {
+        Section {
+            let device = bluetoothManager.connectedDevice?.name
+            Button {
+                shareItems = [log.text(device: device)]
+            } label: {
+                Label("Share log", systemImage: "square.and.arrow.up")
+            }
+            Button {
+                UIPasteboard.general.string = log.text(device: device)
+            } label: {
+                Label("Copy log", systemImage: "doc.on.doc")
+            }
+            Button("Clear log", role: .destructive) { log.clear() }
+        } header: {
+            Text("Explorer log")
+        } footer: {
+            Text("\(log.lines.count) line(s): connects, commands and their results, for a GitHub report.")
+        }
+    }
+
+    private func logConnection() {
+        let name = bluetoothManager.connectedDevice?.name ?? "dive computer"
+        log.append("Connected to \(name) (\(familyLabel)), LibDCSwift \(libDCSwiftBuildTag)")
+        guard isNautic else { return }
+        handshakeMissing = !SuuntoNauticExplorer.handshakeAcknowledged(device: devicePtr)
+        if handshakeMissing {
+            log.append("No handshake reply on open")
+            statusMessage = Self.sleepingHint
+        }
+    }
+
+    /// A timeout on a link whose handshake never came back is most likely a sleeping watch.
+    private func failureMessage(_ text: String, _ error: Error) -> String {
+        guard handshakeMissing,
+              case SuuntoNauticExplorer.ExplorerError.requestFailed(let status) = error,
+              status == DC_STATUS_TIMEOUT else { return text }
+        return "\(text)\n\(Self.sleepingHint)"
     }
 
     private var familyLabel: String {
@@ -274,6 +326,7 @@ struct DeviceExplorerView: View {
             return
         }
         busy = true
+        log.append("Download dives (\(ignoreFingerprint ? "all" : "new only"))")
         statusMessage = "Downloading dives…"
         DiveLogRetriever.retrieveDiveLogs(
             from: devicePtr,
@@ -285,7 +338,8 @@ struct DeviceExplorerView: View {
             DispatchQueue.main.async {
                 busy = false
                 if !success {
-                    statusMessage = "Download failed: \(viewModel.status)"
+                    let hint = handshakeMissing && viewModel.lastDownloadStatus == "TIMEOUT" ? "\n\(Self.sleepingHint)" : ""
+                    statusMessage = "Download failed: \(viewModel.status)\(hint)"
                 } else if viewModel.progress == .noNewDives {
                     statusMessage = "No new dives since the last download. Turn on Download all to fetch every dive again."
                 } else {
@@ -308,6 +362,7 @@ struct DeviceExplorerView: View {
 
     private func listDives() {
         busy = true; statusMessage = nil
+        log.append("List dives")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let ids = try SuuntoNauticExplorer.listDives(device: devicePtr)
@@ -318,7 +373,7 @@ struct DeviceExplorerView: View {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    statusMessage = "Listing dives failed: \(error)"
+                    statusMessage = failureMessage("Listing dives failed: \(error)", error)
                     busy = false
                 }
             }
@@ -343,6 +398,7 @@ struct DeviceExplorerView: View {
 
     private func captureRaw(path: String) {
         busy = true; statusMessage = nil
+        log.append("Capture raw \(path)")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 // Paged resources: fetch every page so no transfer is left half-done.
@@ -359,7 +415,7 @@ struct DeviceExplorerView: View {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    statusMessage = "Raw capture for \(path) failed: \(error)"
+                    statusMessage = failureMessage("Raw capture for \(path) failed: \(error)", error)
                     busy = false
                 }
             }
@@ -369,6 +425,7 @@ struct DeviceExplorerView: View {
     private func sendRequest(path: String) {
         let needsFetch = path == "/Logbook/Entries" || path == "/Logbook/UnsynchronisedLogs"
         busy = true; statusMessage = nil
+        log.append("\(needsFetch ? "FETCH" : "GET") \(path)")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let data = needsFetch
@@ -382,7 +439,7 @@ struct DeviceExplorerView: View {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    statusMessage = "Request for \(path) failed: \(error)"
+                    statusMessage = failureMessage("Request for \(path) failed: \(error)", error)
                     busy = false
                 }
             }
@@ -391,6 +448,7 @@ struct DeviceExplorerView: View {
 
     private func downloadDive(id: String) {
         busy = true; statusMessage = nil; decodedProfile = nil
+        log.append("Download dive \(id)")
         let listed = diveIDs
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -423,7 +481,7 @@ struct DeviceExplorerView: View {
                     busy = false
                 }
             } catch {
-                let msg = describeDownloadFailure(id: id, error: error)
+                let msg = failureMessage(describeDownloadFailure(id: id, error: error), error)
                 DispatchQueue.main.async {
                     statusMessage = msg
                     busy = false

@@ -355,6 +355,11 @@ public class DiveLogRetriever {
                     return
                 }
 
+                if dc_device_get_type(dcDevice) == DC_FAMILY_SUUNTO_NAUTIC {
+                    let acknowledged = suunto_nautic_device_handshake_acknowledged(dcDevice) != 0
+                    DispatchQueue.main.async { viewModel.lastHandshakeAcknowledged = acknowledged }
+                }
+
                 let deviceName = device.name ?? "Unknown Device"
 
                 // Get device type from stored configuration (user-selected) for consistent fingerprint lookups

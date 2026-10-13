@@ -253,6 +253,12 @@ public enum SuuntoNauticExplorer {
         }
     }
 
+    /// False when the watch never answered the open's handshake; the first request may time out.
+    public static func handshakeAcknowledged(device devicePtr: UnsafeMutablePointer<device_data_t>) -> Bool {
+        guard let dcDevice = devicePtr.pointee.device else { return false }
+        return suunto_nautic_device_handshake_acknowledged(dcDevice) != 0
+    }
+
     /// Waits up to `timeoutMs` for the next pushed value; nil on timeout.
     public static func waitForNotification(dcDevice: OpaquePointer, timeoutMs: UInt32) throws -> Notification? {
         guard let buffer = dc_buffer_new(0) else {
