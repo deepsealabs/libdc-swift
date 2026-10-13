@@ -94,6 +94,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// /Data stream, and a request that arrives before the host has read the Hello-Ack goes
         /// unanswered. Models the quick Ocean reconnects traced in #29.
         var staleFramesAfterDrop = 0
+        /// A sleeping watch: the hello gets one stray frame and no Hello-Ack.
+        var withholdHelloAck = false
         private var pendingStaleFrames = 0
         private var helloAckEnd: Int?
         private(set) var ignoredRequests = 0
@@ -258,7 +260,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
             }
             switch f[1] {
             case 0x12: // EVA hello
-                if pendingStaleFrames > 0 {
+                if withholdHelloAck {
+                    send(chunkFrame(ArraySlice(repeating: 0xEE, count: 40)))
+                } else if pendingStaleFrames > 0 {
                     // The tail of a frame cut mid-way, then an empty frame, then the old stream.
                     rx += [0x11, 0x22, 0x7E, 0x7E]
                     for _ in 0..<pendingStaleFrames { send(chunkFrame(ArraySlice(repeating: 0xEE, count: 40))) }
@@ -1186,6 +1190,20 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let device = try open(watch)
         XCTAssertEqual(list(device).sorted(), dives.map(\.id))
         XCTAssertEqual(watch.ignoredRequests, 0, "nothing was sent before the Hello-Ack was read")
+    }
+
+    // MARK: - #29: an open the watch never answered is flagged
+
+    func testHandshakeAcknowledgedOnANormalOpen() throws {
+        let device = try open(FakeWatch(dives: []))
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 1)
+    }
+
+    func testOpenWithoutAHelloAckIsFlagged() throws {
+        let watch = FakeWatch(dives: [])
+        watch.withholdHelloAck = true
+        let device = try open(watch)
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 0)
     }
 
     func testTriggerSubscriptionIsAnsweredFirstTimeAfterAQuickReconnect() async throws {

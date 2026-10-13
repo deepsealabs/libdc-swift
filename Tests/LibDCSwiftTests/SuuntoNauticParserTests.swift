@@ -364,7 +364,8 @@ final class SuuntoNauticParserTests: XCTestCase {
     /// offsets 313, 317, 321, 330 and 338 of the dive record.
     /// The DiveFooter between them carries tank 1's end pressure for gas 0 at +311 (int32 Pa).
     private static func summary(divetime: Float, maxDepth: Float, avgDepth: Float = 0,
-                                tempMin: Float = 0, tempMax: Float = 0, footerEndBar: Double = 0) -> [UInt8] {
+                                tempMin: Float = 0, tempMax: Float = 0, footerEndBar: Double = 0,
+                                windows: [(min: Float, max: Float)] = []) -> [UInt8] {
         func record(_ id: UInt8, _ payload: [UInt8]) -> [UInt8] {
             [id, 0xFF] + withUnsafeBytes(of: UInt32(payload.count).littleEndian, Array.init) + payload
         }
@@ -377,8 +378,14 @@ final class SuuntoNauticParserTests: XCTestCase {
         dive.replaceSubrange(317..<321, with: f32(tempMax))
         var footer = [UInt8](repeating: 0, count: 658)
         footer.replaceSubrange(311..<315, with: withUnsafeBytes(of: Int32(footerEndBar * 100_000).littleEndian, Array.init))
+        let windowRecords = windows.flatMap { window -> [UInt8] in
+            var payload = [UInt8](repeating: 0, count: 130)
+            payload.replaceSubrange(101..<105, with: f32(window.min))
+            payload.replaceSubrange(105..<109, with: f32(window.max))
+            return record(35, payload)
+        }
         return Array("SBEM0103".utf8) + record(33, [UInt8](repeating: 0, count: 561)) + record(34, footer)
-            + record(37, dive) + [0xB8, 0xAE, 0xA4, 0x0B]
+            + windowRecords + record(37, dive) + [0xB8, 0xAE, 0xA4, 0x0B]
     }
 
     func testSummaryDiveTimeAndMaxDepthWin() throws {
@@ -409,6 +416,14 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(ordered.minTemperature), 295.2 - 273.15, accuracy: 0.001)
         XCTAssertEqual(try XCTUnwrap(ordered.maxTemperature), 303.1 - 273.15, accuracy: 0.001)
         XCTAssertEqual(ordered.avgDepth, 21.51, accuracy: 0.001)
+
+        // The Windows records' pair is in schema order on both watches and wins over the dive record's.
+        let windowed = try parse(fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12, avgDepth: 21.51,
+                                                              tempMin: 305.0, tempMax: 288.0,
+                                                              windows: [(290.0, 296.0), (289.0, 297.0), (291.0, 295.0)])),
+                                 logbookID: 1787752091)
+        XCTAssertEqual(try XCTUnwrap(windowed.minTemperature), 289.0 - 273.15, accuracy: 0.001)
+        XCTAssertEqual(try XCTUnwrap(windowed.maxTemperature), 297.0 - 273.15, accuracy: 0.001)
 
         // An average deeper than the maximum isn't trusted.
         let deep = try parse(fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12, avgDepth: 40)),

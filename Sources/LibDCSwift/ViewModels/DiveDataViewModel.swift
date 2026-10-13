@@ -27,6 +27,10 @@ public class DiveDataViewModel: ObservableObject {
     /// (e.g. the BLE link dropped). The stored fingerprint was not advanced, so
     /// syncing again fetches the dives that are missing; nil otherwise.
     @Published public var lastDownloadInterruption: DownloadInterruption?
+    /// Suunto Nautic/Ocean only: false when the watch never answered the open's
+    /// handshake (often asleep), so a failed or empty download may just need a
+    /// button press on the watch; nil for other computers.
+    @Published public var lastHandshakeAcknowledged: Bool?
 
     public struct DownloadInterruption: Equatable {
         /// DC_STATUS name of the failure, e.g. "IO" or "TIMEOUT".
@@ -402,6 +406,7 @@ public class DiveDataViewModel: ObservableObject {
             self.progress = .notStarted
             self.status = ""
             self.lastDownloadInterruption = nil
+            self.lastHandshakeAcknowledged = nil
         }
     }
 }
