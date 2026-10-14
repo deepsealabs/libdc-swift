@@ -484,7 +484,35 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             self.isDisconnecting = false
         }
     }
-    
+
+    /// Closes the open device and its link, then blocks until the peripheral
+    /// has actually disconnected (capped at `timeout`), so a connect that
+    /// follows doesn't race the cancel close() issues 0.5 s later. Call off
+    /// main: the wait polls main, where the CoreBluetooth callbacks land.
+    /// Returns the name of what was closed, or nil if nothing was open.
+    @discardableResult
+    func closeAndWaitForDisconnect(timeout: TimeInterval = 3) -> String? {
+        let closed: (name: String, peripheral: CBPeripheral?)? = DispatchQueue.main.sync {
+            guard openedDeviceDataPtr != nil || peripheral != nil else { return nil }
+            let open = peripheral
+            close(clearDevicePtr: true)
+            return (open?.name ?? "the open device", open)
+        }
+        if let peripheral = closed?.peripheral {
+            Self.waitForDisconnect(peripheral, timeout: timeout)
+        }
+        return closed?.name
+    }
+
+    static func waitForDisconnect(_ peripheral: CBPeripheral, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if DispatchQueue.main.sync(execute: { peripheral.state == .disconnected }) { return }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        logWarning("\(peripheral.name ?? "Peripheral") still connected \(Int(timeout)) s after close")
+    }
+
     public func startScanning(omitUnsupportedPeripherals: Bool = true) {
         // Never issue a CoreBluetooth command before .poweredOn: it's an
         // API-misuse no-op, and some peripherals react badly to BLE traffic
@@ -557,17 +585,22 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             }
         }
 
-        // connect(toDevice:) is called from openBLEDevice, which every call site
-        // dispatches off the main thread (it's a blocking call awaiting CB
-        // callbacks). `peripheral` is @Published, so assigning it here directly
-        // triggers "Updating ObservedObject from background threads" — hop to
-        // main for the mutation, everything else can stay off-thread.
-        if Thread.isMainThread {
+        // The open waits on isPeripheralReady and the write/notify
+        // characteristics. Left over from another link, they let the open run
+        // its handshake on that link instead of this one, so reset them before
+        // connecting. Synchronously, so the open's wait can't see the old
+        // values; on main, where the published properties and the delegate
+        // callbacks (queue: nil) live. openBLEDevice runs off main.
+        let startLink = {
             self.peripheral = peripheral
+            self.isPeripheralReady = false
+            self.writeCharacteristic = nil
+            self.notifyCharacteristic = nil
+        }
+        if Thread.isMainThread {
+            startLink()
         } else {
-            DispatchQueue.main.async { [weak self] in
-                self?.peripheral = peripheral
-            }
+            DispatchQueue.main.sync(execute: startLink)
         }
         peripheral.delegate = self
         centralManager.connect(peripheral, options: nil)

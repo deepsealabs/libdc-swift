@@ -11,7 +11,9 @@ struct ContentView: View {
 
     @State private var isConnecting = false
     @State private var connectError: String?
-    @State private var connectedPeripheralID: UUID?
+    @State private var connectingPeripheralID: UUID?
+    // Set only once an open succeeds: before that, the manager may still hold another watch's device.
+    @State private var explorerDeviceName: String?
 
     var body: some View {
         NavigationStack {
@@ -23,7 +25,9 @@ struct ContentView: View {
 
                     Section {
                         if bluetoothManager.discoveredPeripherals.isEmpty {
-                            Text(bluetoothManager.isScanning ? "Scanning…" : "No devices found yet.")
+                            Text(bluetoothManager.isScanning
+                                 ? "Scanning… A watch that has been idle for a while may need a button press before it shows up."
+                                 : "No devices found yet.")
                                 .foregroundColor(.secondary)
                         }
                         ForEach(bluetoothManager.discoveredPeripherals, id: \.identifier) { peripheral in
@@ -62,8 +66,8 @@ struct ContentView: View {
                 }
             }
             .navigationDestination(isPresented: explorerBinding) {
-                if let devicePtr = bluetoothManager.openedDeviceDataPtr {
-                    DeviceExplorerView(devicePtr: devicePtr, bluetoothManager: bluetoothManager)
+                if let devicePtr = bluetoothManager.openedDeviceDataPtr, let explorerDeviceName {
+                    DeviceExplorerView(devicePtr: devicePtr, deviceName: explorerDeviceName, bluetoothManager: bluetoothManager)
                 }
             }
             .navigationDestination(isPresented: $showAutoDownload) {
@@ -72,7 +76,7 @@ struct ContentView: View {
             .onChange(of: autoDownload.deviceName) { name in
                 // Turning it on from the device screen pops that screen; land on the live log instead.
                 if name != nil {
-                    connectedPeripheralID = nil
+                    explorerDeviceName = nil
                     showAutoDownload = true
                 }
             }
@@ -81,8 +85,8 @@ struct ContentView: View {
 
     private var explorerBinding: Binding<Bool> {
         Binding(
-            get: { connectedPeripheralID != nil && bluetoothManager.hasValidDeviceDataPtr() && !autoDownload.isActive },
-            set: { if !$0 { connectedPeripheralID = nil } }
+            get: { explorerDeviceName != nil && bluetoothManager.hasValidDeviceDataPtr() && !autoDownload.isActive },
+            set: { if !$0 { explorerDeviceName = nil } }
         )
     }
 
@@ -134,7 +138,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
-            if isConnecting && connectedPeripheralID == peripheral.identifier {
+            if isConnecting && connectingPeripheralID == peripheral.identifier {
                 ProgressView()
             } else {
                 Button("Connect") {
@@ -151,7 +155,8 @@ struct ContentView: View {
 
         isConnecting = true
         connectError = nil
-        connectedPeripheralID = peripheral.identifier
+        connectingPeripheralID = peripheral.identifier
+        ExplorerLog.shared.append("Connecting to \(name)")
 
         // openBLEDevice is blocking (it polls internally until the
         // libdivecomputer handshake succeeds/fails/times out) - keep it
@@ -175,9 +180,12 @@ struct ContentView: View {
 
             DispatchQueue.main.async {
                 isConnecting = false
-                if !success {
-                    connectError = "Failed to connect/handshake with \(name). For a Suunto Nautic/Ocean this can mean the EVA handshake needs updating for this unit (see suunto_nautic.h)."
-                    connectedPeripheralID = nil
+                connectingPeripheralID = nil
+                if success {
+                    explorerDeviceName = name
+                } else {
+                    connectError = "Couldn't connect to \(name). Check it's awake (press a button) and in range, then try again."
+                    ExplorerLog.shared.append("Connect to \(name) failed")
                 }
             }
         }
