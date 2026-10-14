@@ -107,17 +107,8 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
                 return peripheral
             }
             // close() cancels the link 0.5 s later; a session opened before then loses its link to that cancel.
-            if let closed { Self.waitForDisconnect(closed, timeout: 3) }
+            if let closed { CoreBluetoothManager.waitForDisconnect(closed, timeout: 3) }
         }
-    }
-
-    private static func waitForDisconnect(_ peripheral: CBPeripheral, timeout: TimeInterval) {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if DispatchQueue.main.sync(execute: { peripheral.state == .disconnected }) { return }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        logWarning("[NauticAutoSync] \(peripheral.name ?? "watch") still connected \(Int(timeout)) s after close")
     }
 
     /// iOS never times out a pending connect; cancelling it makes the open's wait for the link fail.

@@ -11,6 +11,7 @@ import Clibdivecomputer
 /// probing (currently only Suunto Nautic/Ocean) adds its own advanced panel.
 struct DeviceExplorerView: View {
     let devicePtr: UnsafeMutablePointer<device_data_t>
+    let deviceName: String
     @ObservedObject var bluetoothManager: CoreBluetoothManager
     @EnvironmentObject private var autoDownload: AutoDownloadController
     @StateObject private var viewModel = DiveDataViewModel()
@@ -45,7 +46,7 @@ struct DeviceExplorerView: View {
     var body: some View {
         Form {
             Section("Connected") {
-                Text(bluetoothManager.connectedDevice?.name ?? "Dive computer")
+                Text(deviceName)
                     .font(.headline)
                 LabeledContent("Family", value: familyLabel)
             }
@@ -109,7 +110,7 @@ struct DeviceExplorerView: View {
             logConnection()
         }
         .onChange(of: statusMessage) { message in
-            if let message { log.append(message) }
+            if let message { note(message) }
         }
         .sheet(isPresented: Binding(
             get: { shareItems != nil },
@@ -121,7 +122,7 @@ struct DeviceExplorerView: View {
 
     private var explorerLogSection: some View {
         Section {
-            let device = bluetoothManager.connectedDevice?.name
+            let device = deviceName
             Button {
                 shareItems = [log.text(device: device)]
             } label: {
@@ -140,13 +141,17 @@ struct DeviceExplorerView: View {
         }
     }
 
+    /// Every line names the watch: with two watches bonded, a log is ambiguous otherwise.
+    private func note(_ text: String) {
+        log.append("[\(deviceName)] \(text)")
+    }
+
     private func logConnection() {
-        let name = bluetoothManager.connectedDevice?.name ?? "dive computer"
-        log.append("Connected to \(name) (\(familyLabel)), LibDCSwift \(libDCSwiftBuildTag)")
+        log.append("Connected to \(deviceName) (\(familyLabel)), LibDCSwift \(libDCSwiftBuildTag)")
         guard isNautic else { return }
         handshakeMissing = !SuuntoNauticExplorer.handshakeAcknowledged(device: devicePtr)
         if handshakeMissing {
-            log.append("No handshake reply on open")
+            note("No handshake reply on open")
             statusMessage = Self.sleepingHint
         }
     }
@@ -168,8 +173,7 @@ struct DeviceExplorerView: View {
 
     @ViewBuilder
     private var autoDownloadPanel: some View {
-        if let name = bluetoothManager.connectedDevice?.name,
-           let device = AutoDownloadController.storedDevice(named: name) {
+        if let device = AutoDownloadController.storedDevice(named: deviceName) {
             Section {
                 AutoDownloadToggle(device: device, controller: autoDownload)
             } header: {
@@ -326,7 +330,7 @@ struct DeviceExplorerView: View {
             return
         }
         busy = true
-        log.append("Download dives (\(ignoreFingerprint ? "all" : "new only"))")
+        note("Download dives (\(ignoreFingerprint ? "all" : "new only"))")
         statusMessage = "Downloading dives…"
         DiveLogRetriever.retrieveDiveLogs(
             from: devicePtr,
@@ -350,7 +354,8 @@ struct DeviceExplorerView: View {
     }
 
     private func detectFamily() {
-        guard family == nil, let name = bluetoothManager.connectedDevice?.name else { return }
+        guard family == nil else { return }
+        let name = deviceName
         var dcFamily = DC_FAMILY_NULL
         var dcModel: UInt32 = 0
         if get_device_info_from_name(name, &dcFamily, &dcModel) == DC_STATUS_SUCCESS {
@@ -362,7 +367,7 @@ struct DeviceExplorerView: View {
 
     private func listDives() {
         busy = true; statusMessage = nil
-        log.append("List dives")
+        note("List dives")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let ids = try SuuntoNauticExplorer.listDives(device: devicePtr)
@@ -398,7 +403,7 @@ struct DeviceExplorerView: View {
 
     private func captureRaw(path: String) {
         busy = true; statusMessage = nil
-        log.append("Capture raw \(path)")
+        note("Capture raw \(path)")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 // Paged resources: fetch every page so no transfer is left half-done.
@@ -425,7 +430,7 @@ struct DeviceExplorerView: View {
     private func sendRequest(path: String) {
         let needsFetch = path == "/Logbook/Entries" || path == "/Logbook/UnsynchronisedLogs"
         busy = true; statusMessage = nil
-        log.append("\(needsFetch ? "FETCH" : "GET") \(path)")
+        note("\(needsFetch ? "FETCH" : "GET") \(path)")
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let data = needsFetch
@@ -448,7 +453,7 @@ struct DeviceExplorerView: View {
 
     private func downloadDive(id: String) {
         busy = true; statusMessage = nil; decodedProfile = nil
-        log.append("Download dive \(id)")
+        note("Download dive \(id)")
         let listed = diveIDs
         DispatchQueue.global(qos: .userInitiated).async {
             do {
