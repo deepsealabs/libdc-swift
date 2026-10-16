@@ -172,8 +172,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
             lock.lock(); defer { lock.unlock() }
             guard let h = subscribed[path] else { return }
             let body = value(for: path)
-            let content = [0x00, 0x00] + h + [0x01, 0x80, 0x00] + body + [0x00] + Self.crc
-            send([0xA5, 0x01] + Self.u16(content.count - 6) + content)
+            send(Self.packet(0x01, [0x00, 0x00], h + [0x01, 0x80, 0x00] + body + [0x00]))
         }
 
         private func value(for path: String) -> [UInt8] {
@@ -226,19 +225,33 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         private static func u16(_ v: Int) -> [UInt8] { [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF)] }
         private static func u32(_ v: UInt32) -> [UInt8] { (0..<4).map { UInt8((v >> (8 * UInt32($0))) & 0xFF) } }
-        private static let crc: [UInt8] = [0xC1, 0xC2, 0xC3, 0xC4]
-
-        private func dataFrame(msgid: [UInt8], handle: [UInt8], status: Int, body: [UInt8]) -> [UInt8] {
-            let content = msgid + handle + [0x01, 0x80, 0x00] + Self.u16(status) + body + Self.crc
-            return [0xA5, 0x05] + Self.u16(content.count - 2) + content
+        static func crc32(_ bytes: [UInt8]) -> UInt32 {
+            var crc: UInt32 = 0xFFFF_FFFF
+            for b in bytes {
+                crc ^= UInt32(b)
+                for _ in 0..<8 { crc = crc & 1 != 0 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1 }
+            }
+            return ~crc
         }
 
-        private func chunkFrame(_ payload: ArraySlice<UInt8>) -> [UInt8] {
-            var mds = [UInt8](repeating: 0, count: 28)
-            mds[0] = 0xA5; mds[1] = 0x01
-            mds[6] = 0xF0; mds[7] = 0x24; mds[8] = 0x0E
-            mds[20] = UInt8(payload.count & 0xFF); mds[21] = UInt8(payload.count >> 8)
-            return mds + payload + Self.crc
+        /// A5 <op> <length:u16> <msgid:2> <payload> <crc32:u32>, as the watch frames every packet.
+        static func packet(_ op: UInt8, _ msgid: [UInt8], _ payload: [UInt8]) -> [UInt8] {
+            let head = [0xA5, op] + u16(payload.count) + msgid + payload
+            return head + u32(crc32(head))
+        }
+
+        /// The watch's Hello reply payload (protocol versions, its packed serial, Whiteboard version).
+        private static let helloReply: [UInt8] = [0x09, 0x09, 0x04] + [UInt8](repeating: 0x11, count: 12)
+            + [0x04, 0x01, 0x02] + [UInt8](repeating: 0, count: 5) + [0x01] + [UInt8](repeating: 0, count: 8)
+
+        private func dataFrame(msgid: [UInt8], handle: [UInt8], status: Int, body: [UInt8]) -> [UInt8] {
+            Self.packet(0x05, msgid, handle + [0x01, 0x80, 0x00] + Self.u16(status) + body)
+        }
+
+        /// A /Data notification: HANDLE(3) FLAGS(3) ?(4) OFFSET(4) LENGTH(2) ?(6) DATA.
+        private func chunkFrame(_ payload: ArraySlice<UInt8>, offset: Int = 0) -> [UInt8] {
+            Self.packet(0x01, [0x00, 0x00], [0xF0, 0x24, 0x0E, 0x01, 0x80, 0x00, 0x02, 0x24, 0x22, 0x25]
+                + Self.u32(UInt32(offset)) + Self.u16(payload.count) + [0x00, 0x10, 0x0C, 0x00, 0x00, 0x00] + Array(payload))
         }
 
         private var sortedDives: [FakeDive] { dives.sorted { $0.id < $1.id } }
@@ -267,10 +280,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     rx += [0x11, 0x22, 0x7E, 0x7E]
                     for _ in 0..<pendingStaleFrames { send(chunkFrame(ArraySlice(repeating: 0xEE, count: 40))) }
                     pendingStaleFrames = 0
-                    send([0xA5, 0x13, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02])
+                    send(Self.packet(0x13, [0x00, 0x00], Self.helloReply))
                     helloAckEnd = rx.count
                 } else {
-                    send([0xA5, 0x13, 0x02, 0x00, 0x00, 0x00, 0x01, 0x02])
+                    send(Self.packet(0x13, [0x00, 0x00], Self.helloReply))
                 }
             case 0x0A: // GET
                 let pathLen = Int(f[9])
@@ -287,35 +300,33 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     leftoverChunksBeforeSummaryAck = 0
                 }
                 // Real ACK: A5 02 08 00 <msgid> F0 24 00 01 80 00 C8 00 <crc>.
-                send([0xA5, 0x02, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + Self.crc)
+                send(Self.packet(0x02, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200)))
             case 0x0B: // release a resolved handle
                 let h = Array(f[6...8])
                 releases += 1
                 heldSlots.remove(h)
-                send([0xA5, 0x03, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + Self.crc)
+                send(Self.packet(0x03, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200)))
             case 0x10 where handles[Array(f[6...8])].map(Self.valuePaths.contains) == true: // subscribe to a value
                 let h = Array(f[6...8])
                 let path = handles[h]!
                 subscribed[path] = h
                 subscribeCount += 1
-                let content = msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + value(for: path) + Self.crc
-                send([0xA5, 0x08] + Self.u16(content.count - 6) + content)
+                send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200) + value(for: path)))
             case 0x11 where handles[Array(f[6...8])].map(Self.valuePaths.contains) == true: // unsubscribe a value
                 let h = Array(f[6...8])
                 subscribed[handles[h]!] = nil
-                let content = msgid + h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00] + Self.crc
-                send([0xA5, 0x09] + Self.u16(content.count - 6) + content)
+                send(Self.packet(0x09, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00]))
             case 0x10: // subscribe to a /Data handle: stream the dive bound to it
                 let h = Array(f[6...8])
                 guard let path = handles[h], path.hasSuffix("/Data"), let dive = dive(for: path) else { return }
                 if refuseStreams > 0 {
                     refuseStreams -= 1
-                    send([0xA5, 0x08, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(423))
+                    send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(423) + [0x00, 0x00]))
                     return
                 }
                 streamsServed += 1
                 streamedPaths.append(path)
-                send([0xA5, 0x08, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200))
+                send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00]))
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
                 let bytes = dive.compressed.dropLast(truncate)
@@ -329,13 +340,16 @@ final class SuuntoNauticTransportTests: XCTestCase {
                         return
                     }
                     let j = min(i + mdsPayloadSize, bytes.endIndex)
-                    send(chunkFrame(bytes[i..<j]))
+                    send(chunkFrame(bytes[i..<j], offset: i - bytes.startIndex))
                     sent += 1
                     i = j
                 }
+                // The end marker: a zero length chunk at the total size, sent twice.
+                send(chunkFrame([], offset: bytes.count))
+                send(chunkFrame([], offset: bytes.count))
             case 0x11: // unsubscribe a /Data handle; the resolution stays bound until released
                 streamStops += 1
-                send([0xA5, 0x09, 0x02, 0x00] + msgid)
+                send(Self.packet(0x09, msgid, Array(f[6...8]) + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00]))
             case 0x0D: // fetch on a handle
                 let h = Array(f[6...8])
                 guard let path = handles[h] else { return }
@@ -354,7 +368,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     let header: [UInt8] = [0x0D, 0x00, 0x02, len[0], len[1], 0x00, len[0], len[1], 0x00, len[0], len[1]]
                     send(dataFrame(msgid: msgid, handle: h, status: end < content.count ? 100 : 200, body: header + data))
                 } else if path == "/Info" {
-                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: Array("Suunto\0Ocean\0".utf8)))
+                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: Array("Suunto\0Ocean\0Porvoo\0T\02604C3003306\02.51.28\0".utf8)))
                 } else {
                     send(dataFrame(msgid: msgid, handle: h, status: 404, body: []))
                 }

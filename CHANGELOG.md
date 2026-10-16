@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SuuntoNauticExplorer.fetchPaged(device:path:)` (`suunto_nautic_device_fetch_paged`): every page of any paged resource, so `/Logbook/byId/<id>/Descriptors` comes through whole; DC Tester's Explorer uses it for Descriptors as well as `/Summary` (#72)
 
 ### Changed
+- Suunto Nautic/Ocean: every packet from the watch goes through one receive path that checks its start byte, length and CRC and matches it to its request by sequence number, following Jef Driesen's review of libdivecomputer#73. Replies to the Suunto app's requests on the same link are skipped instead of being read as ours, which made a sync with the Suunto app still connected time out. The `/Data` stream ends on the watch's end marker with each chunk's offset checked, and `/Logbook/Entries` is parsed by its records
 - GenericParser closes a profile point when the next `DC_SAMPLE_TIME` arrives (or parsing ends), so depth, events and deco land on the sample they were reported in instead of the following timestamp
 - Repeated `DC_SAMPLE_TIME` callbacks with the same time continue one sample instead of adding duplicate points
 - Events no longer append an extra profile point; they attach to their sample
