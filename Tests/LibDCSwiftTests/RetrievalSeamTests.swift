@@ -3,7 +3,7 @@ import Clibdivecomputer
 import LibDCBridge
 @testable import LibDCSwift
 
-/// Exercises the internal name/UUID/isCancelled/deviceStorage seam `retrieveDiveLogs`'s `CBPeripheral` overload forwards to -- no device at all, then end to end against a real `FakeWatch` (reusing `SuuntoNauticTransportTests.FakeWatch`).
+/// Exercises the seam `retrieveDiveLogs`'s `CBPeripheral` overload forwards to, end to end against a real `FakeWatch` (reusing `SuuntoNauticTransportTests.FakeWatch`).
 final class RetrievalSeamTests: XCTestCase {
 
     private func emptyDevicePtr() -> UnsafeMutablePointer<device_data_t> {
