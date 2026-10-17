@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CoreBluetoothManager.isIOCancelled()`: true while a close waits for a download to stop; the BLE iostream then answers `DC_STATUS_CANCELLED`
 - `CoreBluetoothManager.withDeviceHeld(_:on:_:completion:)`: runs work on the open device, such as `SuuntoNauticExplorer` calls, held like a `retrieveDiveLogs` download, so a close meanwhile cancels its BLE I/O and waits for it instead of freeing the device under it. The completion runs on main once the device is released and says whether a close was waiting
 - `DiveDataViewModel.lastUnreadableDives`: the fingerprints of dives a successful download skipped because the parser had rejected them on an earlier download too (see Fixed)
+- `libdc_has_custom_baud()` (LibDCBridge): whether the serial driver was built with the non-standard baud rate path (`IOSSIOSPEED`). True on macOS, false on iOS
 
 ### Changed
 - Suunto Nautic/Ocean, following the third round of Jef Driesen's review of libdivecomputer#73: the driver no longer retries a stream or a dive, which replaces the stream and download retries of the second round below. A refused `/Data` stream, a stream that stops before its end marker or has a chunk at an earlier offset, an unanswered GET or SUBSCRIBE of `/Data`, and a dive that doesn't add up to its listed size fail the dive on the first attempt (`DC_STATUS_PROTOCOL` or `DC_STATUS_TIMEOUT`), and `dc_device_foreach` stops at that dive with only the newer dives delivered. Apps must retry a failed dive themselves, on the same link or after a reconnect. Auto download already does (`retriesPerDive`); a caller of `retrieveDiveLogs` or `SuuntoNauticExplorer.download` should offer to sync again
@@ -45,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Events no longer append an extra profile point; they attach to their sample
 - Deco fields are only set on samples where the computer reported `DC_SAMPLE_DECO`; safety and deep stops now fill `decoStop`/`decoTime`
 - `SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY` and `SAMPLE_EVENT_GASCHANGE2` map to their `DiveEvent` cases
+- macOS: libdivecomputer builds with `HAVE_IOKIT_SERIAL_IOSS_H` and `HAVE_CLOCK_GETTIME`. Serial rates with no `Bxxx` constant (Sporasub SP2 at 460800, Cochran EMC at 850000) are set with `IOSSIOSPEED` instead of failing with `DC_STATUS_UNSUPPORTED`, `DC_IOCTL_SERIAL_SET_LATENCY` sets the receive latency with `IOSSDATALAT`, and serial timeouts use the monotonic clock. iOS builds are unchanged. Details in `Docs/MACOS_BUILD_DEFINES.md`
 
 ### Fixed
 - Suunto Nautic/Ocean: a dive's start comes from `dc_datetime_mktime` rather than reading the parser's fields as UTC, so it stays the same instant when the parser reports the wall clock and offset the dive logged (deepsealabs/libdivecomputer#19)

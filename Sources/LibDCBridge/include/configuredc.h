@@ -215,6 +215,12 @@ void set_libdc_log_sink(libdc_log_sink_t sink);
  */
 void attach_libdc_log(dc_context_t *context);
 
+/**
+ * Whether the serial driver can set non-standard baud rates (IOSSIOSPEED).
+ * True on macOS; false on iOS, where a non-standard rate returns DC_STATUS_UNSUPPORTED.
+ */
+bool libdc_has_custom_baud(void);
+
 #ifdef __cplusplus
 }
 #endif
