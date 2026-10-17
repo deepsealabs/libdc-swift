@@ -49,3 +49,67 @@ targets:
         UIBackgroundModes:
           - bluetooth-central
         ITSAppUsesNonExemptEncryption: false
+
+  # Sandboxed probe (Docs/MAC_SANDBOX_PROBE.md), ad-hoc signed so it builds headless on any Mac.
+  DC Tester Mac:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: MacProbe
+    dependencies:
+      - package: LibDCSwift
+        product: LibDCSwift
+    entitlements:
+      path: Generated/DCTesterMac.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.device.serial: true
+        com.apple.security.device.usb: true
+        com.apple.security.device.bluetooth: true
+        com.apple.security.files.user-selected.read-write: true
+        com.apple.security.files.bookmarks.app-scope: true
+    settings:
+      base:
+        PRODUCT_NAME: "DC Tester Mac"
+        PRODUCT_BUNDLE_IDENTIFIER: com.deepsealabs.DCTesterMac
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.10"
+        ARCHS: "arm64 x86_64"
+        ONLY_ACTIVE_ARCH: NO
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        # Xcode skips the hardened runtime when ad-hoc signing; force it to match a shipping build.
+        OTHER_CODE_SIGN_FLAGS: "--options=runtime"
+        # An ad-hoc debug dylib has no Team ID, so library validation would refuse to load it.
+        ENABLE_DEBUG_DYLIB: NO
+        # The commit stamp reads .git and writes the built Info.plist, outside a script sandbox's declared paths.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        PROBE_GIT_COMMIT: unknown
+      configs:
+        Release:
+          # Ad-hoc signing injects get-task-allow in every configuration; HIL copies carry the shipping set.
+          CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+    postBuildScripts:
+      - name: Stamp probe commit
+        basedOnDependencyAnalysis: false
+        # Declared as input so the stamp runs after Info.plist processing, which would overwrite it.
+        inputFiles:
+          - $(TARGET_BUILD_DIR)/$(INFOPLIST_PATH)
+        script: |
+          commit=$(git -C "$SRCROOT" rev-parse --short HEAD 2>/dev/null) || exit 0
+          [ -z "$(git -C "$SRCROOT" status --porcelain 2>/dev/null)" ] || commit="$commit-dirty"
+          /usr/libexec/PlistBuddy -c "Set :ProbeGitCommit $commit" "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+    info:
+      path: Generated/Info-Mac.plist
+      properties:
+        CFBundleDisplayName: "DC Tester"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        ProbeGitCommit: "$(PROBE_GIT_COMMIT)"
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSBluetoothAlwaysUsageDescription: "DC Tester needs Bluetooth to scan for dive computers and check Bluetooth access inside the App Sandbox."
