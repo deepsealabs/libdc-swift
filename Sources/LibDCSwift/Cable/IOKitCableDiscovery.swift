@@ -17,21 +17,27 @@ public protocol RegistrySource: AnyObject {
     func stopWatching()
 }
 
-/// Serial ports and known USB-serial cables from the IORegistry, following hot-plug; it never opens a port.
+/// Serial ports and known USB-serial cables from the IORegistry, following hot-plug; it never opens a port. A cable missing altogether may be held back by an Apple silicon laptop's "Allow accessory to connect?" prompt.
 public final class IOKitCableDiscovery: CableDiscovering {
     private let source: RegistrySource
     private let settle: DispatchTimeInterval
+    private let driverGrace: DispatchTimeInterval
     private let queue = DispatchQueue(label: "com.libdcswift.cable.discovery")
     private let feed = CableEndpointFeed()
     private var running = false
     private var refreshPending = false
+    /// When each known cable with no port may be listed as `driverMissing`.
+    private var portlessDue: [CableEndpoint.ID: DispatchTime] = [:]
+    private var recheckAt: DispatchTime?
     private let startedLock = NSLock()
     private var started = false
 
-    /// `settle` is how long an arrival waits before the registry is read again: a USB device appears before its serial port does, and reading at once would show it as `driverMissing`.
-    public init(source: RegistrySource = IOKitRegistrySource(), settle: DispatchTimeInterval = .milliseconds(500)) {
+    /// `settle`: how long an arrival waits before the registry is read again (a USB device appears before its port). `driverGrace`: how long a cable arriving after `start()` goes without a port before it's `driverMissing` (a DriverKit driver can take seconds).
+    public init(source: RegistrySource = IOKitRegistrySource(), settle: DispatchTimeInterval = .milliseconds(500),
+                driverGrace: DispatchTimeInterval = .seconds(3)) {
         self.source = source
         self.settle = settle
+        self.driverGrace = driverGrace
     }
 
     deinit {
@@ -51,7 +57,7 @@ public final class IOKitCableDiscovery: CableDiscovering {
             setStarted(true)
             let watching = source.startWatching(on: queue) { [weak self] change in self?.changed(change) }
             if !watching { logWarning("Cable discovery can't watch the registry; call refresh() to update it") }
-            refreshNow()
+            refreshNow(initial: true)
         }
     }
 
@@ -60,6 +66,8 @@ public final class IOKitCableDiscovery: CableDiscovering {
             guard running else { return }
             running = false
             setStarted(false)
+            portlessDue.removeAll()
+            recheckAt = nil
             source.stopWatching()
         }
     }
@@ -103,9 +111,31 @@ public final class IOKitCableDiscovery: CableDiscovering {
         }
     }
 
-    private func refreshNow() {
+    /// Cables already plugged in at `start()` are listed at once; later ones wait out `driverGrace` before showing `driverMissing`.
+    private func refreshNow(initial: Bool = false) {
         guard running else { return }
-        feed.replace(source.snapshot().endpoints)
+        let now = DispatchTime.now()
+        let endpoints = source.snapshot().endpoints
+        var due: [CableEndpoint.ID: DispatchTime] = [:]
+        var held: [DispatchTime] = []
+        for endpoint in endpoints where endpoint.status == .driverMissing {
+            let when = portlessDue[endpoint.id] ?? (initial ? now : now + driverGrace)
+            due[endpoint.id] = when
+            if now < when { held.append(when) }
+        }
+        portlessDue = due
+        feed.replace(endpoints.filter { endpoint in due[endpoint.id].map { now >= $0 } ?? true })
+        if let next = held.min() { scheduleRecheck(at: next) }
+    }
+
+    private func scheduleRecheck(at deadline: DispatchTime) {
+        if let pending = recheckAt, pending <= deadline { return }
+        recheckAt = deadline
+        queue.asyncAfter(deadline: deadline) { [weak self] in
+            guard let self, self.recheckAt == deadline else { return }
+            self.recheckAt = nil
+            self.refreshNow()
+        }
     }
 }
 
