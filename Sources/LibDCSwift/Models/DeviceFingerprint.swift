@@ -26,8 +26,7 @@ public class DeviceFingerprintStorage {
     private let rejectedDivesKey = "RejectedDiveFingerprints"
     private let defaults: UserDefaults
 
-    /// `userDefaults` is a test seam (an isolated suite instead of `.standard`,
-    /// so tests don't pollute or race on the real store).
+    /// Test seam: an isolated suite instead of `.standard`.
     init(userDefaults: UserDefaults = .standard) {
         self.defaults = userDefaults
     }
