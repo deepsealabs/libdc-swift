@@ -171,6 +171,11 @@ final class OpenBox: @unchecked Sendable {
     var result: Result<DiveComputerSession, Error>?
 }
 
+/// An open that never returned: a failure, so a hang can't pass as a skip.
+struct CableOpenTimedOut: Error {
+    let seconds: TimeInterval
+}
+
 enum CableFixtures {
     static let ftdiOSTC = RegistrySnapshot.USBDevice(registryID: 0x100, vendorID: 0x0403, productID: 0x6001,
                                                      serialNumber: "TESTADAPTER", productName: "FT232R USB UART")
@@ -218,7 +223,8 @@ extension XCTestCase {
             done.signal()
         }
         guard done.wait(timeout: .now() + timeout) == .success, let result = box.result else {
-            throw XCTSkip("open did not return within \(timeout) s")
+            XCTFail("open did not return within \(timeout) s")
+            throw CableOpenTimedOut(seconds: timeout)
         }
         let session = try result.get()
         addTeardownBlock { session.close() }
