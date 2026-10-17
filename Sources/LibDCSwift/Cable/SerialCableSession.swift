@@ -63,7 +63,7 @@ extension DiveComputerSession {
         deviceStorage: DeviceStorage,
         lease: DiveComputerSessionLease,
         cancellation: CableOpenCancellation,
-        claims: SerialPortClaims = .shared,
+        claims: EndpointClaims = .shared,
         opening: SerialOpensInFlight = .shared
     ) throws -> DiveComputerSession {
         guard endpoint.transport == .serial else { throw CableError.unsupportedTransport(endpoint.transport) }
