@@ -170,7 +170,7 @@ public class DeviceFingerprintStorage {
 
     // MARK: - Keyed by identity
 
-    /// The newest fingerprint for this computer: under its identity's key, else a 1.18 record of the same family and serial, so an unmigrated store never forces a full download.
+    /// The newest fingerprint under the identity's key, else a 1.18 record of its family and serial, so unmigrated stores still stop.
     public func getFingerprint(for identity: DiveComputerIdentity, standIn: String? = nil) -> DeviceFingerprint? {
         guard let key = identity.storageKey(standIn: standIn) else { return nil }
         return loadFingerprints()
@@ -178,7 +178,7 @@ public class DeviceFingerprintStorage {
             .max { $0.timestamp < $1.timestamp }
     }
 
-    /// Replaces this computer's records, keyed or 1.18, with one under its identity's key, keeping the deviceType and serial a 1.18 reader looks up. Saves nothing when the identity has no key.
+    /// Replaces this computer's records with one under its key, keeping what a 1.18 reader looks up; no key, no save.
     public func saveFingerprint(_ fingerprint: Data, for identity: DiveComputerIdentity, standIn: String? = nil) {
         guard let key = identity.storageKey(standIn: standIn) else {
             logInfo("No fingerprint saved for \(identity.canonicalName): it reports no serial and has no stand-in")
@@ -195,7 +195,7 @@ public class DeviceFingerprintStorage {
         logInfo("Saved fingerprint for \(key)")
     }
 
-    /// Stores a fingerprint from a dive the host already has (another device downloaded it, say) when none is stored for this computer, so the first download here stops there; seed only from a completed download, since older dives are never offered again.
+    /// Stores a fingerprint from a dive the host already has, when none is stored; seed only from a completed download (see Docs/DEVICE_IDENTITY.md).
     @discardableResult
     public func seedFingerprint(identity: DiveComputerIdentity, data: Data, standIn: String? = nil) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -222,7 +222,7 @@ public class DeviceFingerprintStorage {
         if fingerprints.count != count { saveFingerprints(fingerprints) }
     }
 
-    /// Keys 1.18 records in place, keeping deviceType and serial for 1.18 lookups; a serial-0 record needs exactly one serial-0 BLE device of its family in `storedDevices` (its UUID stands in), and an unkeyed record is still found. Safe to run every launch.
+    /// Keys 1.18 records in place, keeping what a 1.18 lookup reads; idempotent (see Docs/DEVICE_IDENTITY.md).
     @discardableResult
     public func migrateLegacyKeys(storedDevices: [StoredDevice] = []) -> Int {
         lock.lock(); defer { lock.unlock() }

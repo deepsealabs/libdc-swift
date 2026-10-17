@@ -39,12 +39,12 @@ public enum DeviceCatalog {
         all.filter { $0.transports.contains(transport) }
     }
 
-    /// First `supportedModels` match, else first descriptor in table order, else "<family> model <n>": family and model don't name one product (G2 and G2 Console share Uwatec Smart 0x32), and stored devices and 1.18 fingerprints already carry `supportedModels` names.
+    /// First `supportedModels` match, else first descriptor, else "<family> model <n>", since family and model don't name one product (see Docs/DEVICE_IDENTITY.md).
     public static func canonicalName(family: DeviceConfiguration.DeviceFamily, model: UInt32) -> String {
         canonicalName(family: family, model: model, descriptors: all.lazy.map { (Optional($0.family), $0.model, $0.name) })
     }
 
-    /// The models a USB device with this VID and PID can be: libdivecomputer's family filter, narrowed by `usbModels` where the PID names products. Empty on other transports, whose descriptors carry no VID/PID.
+    /// The models a USB or USB HID device can be: libdivecomputer's family filter, narrowed by `usbModels`; empty on other transports.
     public static func candidates(vid: UInt16, pid: UInt16, transport: DCTransport) -> [DCModel] {
         guard transport == .usbHID || transport == .usb else { return [] }
         let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })

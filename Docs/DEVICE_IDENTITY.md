@@ -75,10 +75,12 @@ it in from DEVINFO, and you can read it on `DiveComputerSession.identity`, `Dive
 descriptor knows it, and otherwise the descriptor the session opened.
 
 - **Serial**: DEVINFO's serial as `%08x`. A serial of 0, empty, or none is unknown (`nil`). Cressi Edy and
-  Oceans S1 report 0 for every unit, and some families never send DEVINFO at all.
+  Oceans S1 report 0 for every unit, and some families never send DEVINFO at all (see below).
 - **`deviceKey`**: `"sn:<serial>"`, or `"md:<canonical name>"` lowercased when there's no serial. These are the
   keys hosts dedupe dives on. No key includes the transport, so the same computer gets the same key over BLE
-  and over a cable.
+  and over a cable. The `CBPeripheral` download hands hosts DEVINFO's serial as it is, so a serial-0 computer
+  arrives as `"00000000"`. A host building its own keys must treat an empty or all-zero serial as no serial,
+  or dives it already stored will key differently from `deviceKey`.
 - **`storageKey(standIn:)`**: the key fingerprints are stored under.
   - With a serial, it's `"dc:<family as %08x>:<serial>"`. The family is part of it, so two families can't
     share a fingerprint just because their serials happen to match.
@@ -90,13 +92,30 @@ descriptor knows it, and otherwise the descriptor the session opened.
 
 `DiveComputerLocator` (`ble`, `serial`, `usbHID`, `usb`, `classicBTSerial`) records where the computer was reached
 this time. It's provenance for records and logs, never identity: ports, IORegistry IDs and BLE identifiers
-all change. `locatorKey` is its string form, and it's what `StoredDevice.locatorKey` holds.
+all change. `locatorKey` is its string form for logs.
+
+### Families that never send DEVINFO
+
+Two drivers never send DEVINFO: Zeagle N2iTiON3 (also sold as the Apeks Quantum X, Dive Rite NiTek Trio and
+Scubapro XTender 5) and Citizen Hyper Aqualand. They have no serial, and the C fingerprint lookup, which runs
+on DEVINFO, never runs for them.
+
+A session download gives them the identity of the descriptor it opened, with no serial, so
+`result.identity` and `deviceKey` (`"md:<canonical name>"`) still exist. From there they're keyed like a
+serial-0 computer. With a stand-in (a cable adapter with a USB serial number), the stored fingerprint is set
+on the device before the walk, and the commit is keyed `"md:<name>@<standIn>"`. Without one, nothing is
+stored and every download is full. Neither family has a BLE descriptor, so the `CBPeripheral` download never
+reaches them.
 
 ## Stored devices
 
-- **New fields.** `StoredDevice` has `transport` and `locatorKey`. A record from before this change has
-  neither, decodes with `transport == nil`, and reads as BLE (`effectiveTransport`). A record stored without
-  them encodes exactly as before.
+- **New fields.** `StoredDevice` has `transport` and `locator`, the `DiveComputerLocator` it was last reached
+  through. A record from before this change has neither, decodes with `transport == nil`, and reads as BLE
+  (`effectiveTransport`). A record stored without them encodes exactly as before. A locator this version can't
+  read (a case from a newer version) decodes as nil and keeps the record.
+- **Fingerprint key.** A record knows its computer's fingerprint key. With no serial, its locator's
+  `unitStandIn` stands in, or, for a BLE record from before locators, its peripheral UUID. So `removeDevice`
+  also clears a serial-0 cable computer's `"md:<name>@adapter:..."` fingerprint.
 - **Unreadable records.** `DeviceStorage` decodes the list one record at a time. A record this version can't
   read (a family or transport from a newer version, or a missing field) is dropped on its own, instead of
   emptying the whole list.
@@ -117,7 +136,8 @@ all change. `locatorKey` is its string form, and it's what `StoredDevice.locator
   version still finds the fingerprint.
 - **Migration.** `migrateLegacyKeys(storedDevices:)` (or `DeviceStorage.migrateFingerprintKeys()`) keys 1.18
   records in place. Their device type, serial, fingerprint and timestamp don't change. It's idempotent, so
-  it's safe to run on every launch.
+  it's safe to run on every launch. The store serializes its changes, so a download that commits while the
+  migration runs keeps its fingerprint.
   - A record whose device type names no family stays as it is, and the 1.18 lookup still finds it.
   - A serial-0 record is keyed only when exactly one BLE stored device of its family has serial 0. That
     device's UUID becomes the stand-in.
@@ -129,3 +149,6 @@ all change. `locatorKey` is its string form, and it's what `StoredDevice.locator
 Session downloads (`retrieveDiveLogs(session:)`) look up and commit by identity. The C lookup's context is
 the session, and it keys on DEVINFO instead of on the descriptor's name. The `CBPeripheral` download still
 uses the 1.18 `(deviceType, serial)` keys, unchanged.
+
+Every dive is in `viewModel.dives` when either download's `completion` runs, so a host can convert them there
+and then acknowledge the commit. A session download has also numbered them, oldest first, by then.
