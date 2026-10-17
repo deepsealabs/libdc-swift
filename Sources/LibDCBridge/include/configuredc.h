@@ -174,7 +174,7 @@ dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback,
 
 /**
  * Releases everything a successful open left in data: the device, iostream, context,
- * descriptor, model string and fingerprint buffer
+ * descriptor, model string and fingerprint buffer, and clears the fingerprint lookup
  * @param data: Device data structure; NULL is ignored. Every pointer field is NULL afterwards
  * @note Clear any cancel callback (libdc_set_cancel) whose userdata dies with the caller first
  */
