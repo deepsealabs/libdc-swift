@@ -8,7 +8,7 @@ extension DiveComputerSession {
     /// open(2) stuck on a CDC-ACM node after wake (Apple FB6153687) holds only its own open; the lease still allows one session.
     static let cableQueue = DispatchQueue(label: "com.libdcswift.cable", attributes: .concurrent)
 
-    /// Opens `model` on a serial, USB HID or raw USB endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
+    /// Opens `model` on a serial, paired classic-Bluetooth, USB HID or raw USB endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
     public static func open(
         _ endpoint: CableEndpoint,
         model: DCModel,
@@ -71,6 +71,7 @@ extension DiveComputerSession {
                                deviceStorage: request.deviceStorage, lease: request.lease,
                                cancellation: request.cancellation, makeDevice: request.usbDevice)
         default:
+            // A paired classic-Bluetooth port is DC_TRANSPORT_SERIAL too, and opens the same way as a USB-serial one.
             return try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
                                   recorder: request.recorder, deviceStorage: request.deviceStorage,
                                   lease: request.lease, cancellation: request.cancellation)
@@ -95,14 +96,16 @@ extension DiveComputerSession {
         claims: EndpointClaims = .shared,
         opening: SerialOpensInFlight = .shared
     ) throws -> DiveComputerSession {
-        guard endpoint.transport == .serial else { throw CableError.unsupportedTransport(endpoint.transport) }
+        guard endpoint.transport == .serial || endpoint.transport == .classicBTSerial else {
+            throw CableError.unsupportedTransport(endpoint.transport)
+        }
         guard endpoint.status != .driverMissing, let path = endpoint.calloutPath, let locator = endpoint.locator else {
             throw CableError.driverMissing
         }
-        guard model.transports.contains(.serial) else { throw CableError.unsupportedTransport(.serial) }
+        guard model.transports.contains(endpoint.transport) else { throw CableError.unsupportedTransport(endpoint.transport) }
         // Checked before the port opens, since opening it raises DTR.
         guard DeviceConfiguration.hasDescriptor(family: model.dcFamily, model: model.model) else {
-            throw CableError.unsupportedTransport(.serial)
+            throw CableError.unsupportedTransport(endpoint.transport)
         }
         guard !cancellation.isCancelled else { throw CableError.cancelled }
         // Refused here while another session is open; the open itself takes the lease in the wrap, once the port is open.
