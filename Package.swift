@@ -63,7 +63,8 @@ let package = Package(
             sources: [
                 "src/configuredc.c",
                 "src/BLEBridge.m",
-                "src/transport_caps.c"
+                "src/transport_caps.c",
+                "src/cable_open.c"
             ],
             publicHeadersPath: "include",
             cSettings: [
