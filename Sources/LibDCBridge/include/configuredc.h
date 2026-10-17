@@ -194,6 +194,12 @@ device_data_t* get_device_data_pointer(void);
  */
 void set_ble_debug_logging(int enabled);
 
+/**
+ * Whether the serial driver can set non-standard baud rates (IOSSIOSPEED).
+ * True on macOS; false on iOS, where a non-standard rate returns DC_STATUS_UNSUPPORTED.
+ */
+bool libdc_has_custom_baud(void);
+
 #ifdef __cplusplus
 }
 #endif
