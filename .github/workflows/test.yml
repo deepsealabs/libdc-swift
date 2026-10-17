@@ -1,0 +1,94 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-macos:
+    name: swift test (macOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: swift test
+        run: swift test
+
+  build-generic:
+    name: xcodebuild generic iOS + macOS
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build LibDCSwift for generic iOS
+        run: >
+          xcodebuild -scheme LibDCSwift -destination 'generic/platform=iOS'
+          -derivedDataPath DerivedData-ios build
+
+      - name: Build LibDCSwift for generic macOS
+        run: >
+          xcodebuild -scheme LibDCSwift -destination 'generic/platform=macOS'
+          -derivedDataPath DerivedData-macos build
+
+      - name: Build LibDCBridge product for generic iOS
+        # The LibDCSwift scheme links LibDCBridge into a relocatable .o; the
+        # dynamic framework the no-IOKit-on-iOS check below inspects only
+        # exists when LibDCBridge is built as its own scheme/product.
+        run: >
+          xcodebuild -scheme LibDCBridge -destination 'generic/platform=iOS'
+          -derivedDataPath DerivedData-ios-bridge build
+
+      - name: No IOKit symbols in the iOS LibDCBridge slice
+        run: |
+          set -euo pipefail
+          BIN="DerivedData-ios-bridge/Build/Products/Debug-iphoneos/PackageFrameworks/LibDCBridge.framework/LibDCBridge"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::expected binary not found at $BIN"
+            exit 1
+          fi
+          echo "Linked frameworks:"
+          otool -L "$BIN"
+          if otool -L "$BIN" | grep -q 'IOKit\.framework'; then
+            echo "::error::LibDCBridge (iOS) links IOKit.framework -- IOKit is macOS-only"
+            exit 1
+          fi
+          # IOKit's own C API is IOxxx/kIOxxx (capitalized); POSIX ioctl() is
+          # lowercase and must not be mistaken for it.
+          IOKIT_SYMS=$(nm -u "$BIN" | grep -E '_IO[A-Z]|_kIO' || true)
+          if [ -n "$IOKIT_SYMS" ]; then
+            echo "::error::undefined IOKit-style symbols in the iOS LibDCBridge slice:"
+            echo "$IOKIT_SYMS"
+            exit 1
+          fi
+          echo "OK: no IOKit linkage or symbols in the iOS LibDCBridge slice."
+
+  dc-tester:
+    name: DC Tester app (generic iOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate NauticTestApp.xcodeproj
+        working-directory: NauticTestApp
+        run: xcodegen generate
+
+      - name: Build NauticTestApp for generic iOS
+        working-directory: NauticTestApp
+        run: >
+          xcodebuild -project NauticTestApp.xcodeproj -scheme NauticTestApp
+          -destination 'generic/platform=iOS' -derivedDataPath DerivedData
+          CODE_SIGNING_ALLOWED=NO build
