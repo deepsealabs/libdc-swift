@@ -64,7 +64,8 @@ let package = Package(
                 "src/configuredc.c",
                 "src/BLEBridge.m",
                 "src/transport_caps.c",
-                "src/cable_open.c"
+                "src/cable_open.c",
+                "src/USBBridge.m"
             ],
             publicHeadersPath: "include",
             cSettings: [
@@ -76,7 +77,8 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("CoreBluetooth"),
-                .linkedFramework("Foundation")
+                .linkedFramework("Foundation"),
+                .linkedFramework("IOKit", .when(platforms: [.macOS]))
             ]
         ),
         .target(
