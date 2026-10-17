@@ -380,6 +380,39 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertEqual(source.snapshotCount, 2, "both arrivals are one read")
     }
 
+    func testACableArrivingWithoutAPortWaitsOutTheDriverGraceBeforeDriverMissing() {
+        let source = FakeRegistrySource()
+        let discovery = IOKitCableDiscovery(source: source, settle: .milliseconds(10), driverGrace: .milliseconds(500))
+        discovery.start()
+        source.emit(.arrived, RegistrySnapshot(cableDevices: [CableFixtures.ftdiOSTC]))
+        usleep(250_000)
+        XCTAssertEqual(discovery.endpoints, [], "its driver may still be publishing the port")
+        waitUntil { discovery.endpoints.map(\.status) == [.driverMissing] }
+        XCTAssertNotNil(discovery.endpoints.first?.driverMissingMessage)
+    }
+
+    func testAPortPublishedWithinTheDriverGraceNeverShowsDriverMissing() {
+        let source = FakeRegistrySource()
+        let discovery = IOKitCableDiscovery(source: source, settle: .milliseconds(10), driverGrace: .milliseconds(600))
+        discovery.start()
+        let seen = collect(discovery.updates(), for: 1.2) {
+            source.emit(.arrived, RegistrySnapshot(cableDevices: [CableFixtures.ftdiOSTC]))
+            usleep(300_000)
+            source.emit(.arrived, RegistrySnapshot(ports: [CableFixtures.usbPort("/dev/cu.usbserial-TESTADAPTER")],
+                                                   cableDevices: [CableFixtures.ftdiOSTC]))
+        }
+        XCTAssertEqual(seen.last?.map(\.status), [.ready])
+        XCTAssertFalse(seen.joined().contains { $0.status == .driverMissing })
+    }
+
+    func testACableAlreadyPluggedInWithoutAPortIsListedAtStart() {
+        let source = FakeRegistrySource(RegistrySnapshot(cableDevices: [CableFixtures.ftdiOSTC]))
+        let discovery = IOKitCableDiscovery(source: source, driverGrace: .seconds(30))
+        discovery.start()
+        XCTAssertEqual(discovery.endpoints.map(\.status), [.driverMissing])
+        discovery.stop()
+    }
+
     func testWithoutNotificationsRefreshStillReads() {
         let source = FakeRegistrySource()
         source.canWatch = false
