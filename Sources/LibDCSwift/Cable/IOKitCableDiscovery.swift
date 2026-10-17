@@ -4,7 +4,7 @@ import IOKit
 import IOKit.serial
 import IOKit.hid
 
-/// A serial port, a known cable's USB device or a USB HID computer came or went.
+/// A serial port, a known cable's USB device, or a USB HID or raw USB computer came or went.
 public enum RegistryChange: Sendable {
     case arrived
     case removed
@@ -13,12 +13,12 @@ public enum RegistryChange: Sendable {
 /// Where `IOKitCableDiscovery` reads the registry; tests pass a fake that serves `RegistrySnapshot` fixtures.
 public protocol RegistrySource: AnyObject {
     func snapshot() -> RegistrySnapshot
-    /// Calls `changed` on `queue` as serial ports, known cables and HID devices come and go, until `stopWatching()`; false if it can't watch.
+    /// Calls `changed` on `queue` as serial ports, known cables, HID devices and raw USB computers come and go, until `stopWatching()`; false if it can't watch.
     func startWatching(on queue: DispatchQueue, changed: @escaping (RegistryChange) -> Void) -> Bool
     func stopWatching()
 }
 
-/// Serial ports, known USB-serial cables and USB HID dive computers, following hot-plug; it never opens a port or device. A cable missing altogether may be held back by an Apple silicon laptop's "Allow accessory to connect?" prompt.
+/// Serial ports, known USB-serial cables, and USB HID and raw USB dive computers, following hot-plug; it never opens a port or device. A cable missing altogether may be held back by an Apple silicon laptop's "Allow accessory to connect?" prompt.
 public final class IOKitCableDiscovery: CableDiscovering {
     private let source: RegistrySource
     private let settle: DispatchTimeInterval
@@ -185,20 +185,23 @@ public final class IOKitRegistrySource: RegistrySource {
         }
         var seen = Set<UInt64>()
         var cables: [RegistrySnapshot.USBDevice] = []
+        var computers: [RegistrySnapshot.USBDevice] = []
         for className in Self.usbDeviceClasses {
             Self.forEachService(IOServiceMatching(className)) { device in
-                guard let vid = Self.number(device, Self.vendorIDKey), let pid = Self.number(device, Self.productIDKey),
-                      CableHints.hint(vendorID: vid, productID: pid) != nil else { return }
+                guard let vid = Self.number(device, Self.vendorIDKey), let pid = Self.number(device, Self.productIDKey) else { return }
+                let cable = CableHints.hint(vendorID: vid, productID: pid) != nil
+                guard cable || USBComputers.layout(vendorID: vid, productID: pid) != nil else { return }
                 let id = Self.registryID(device)
                 guard seen.insert(id).inserted else { return }
-                cables.append(RegistrySnapshot.USBDevice(
+                let entry = RegistrySnapshot.USBDevice(
                     registryID: id, vendorID: vid, productID: pid,
                     serialNumber: Self.serialNumberKeys.lazy.compactMap { Self.string(device, $0) }.first,
-                    productName: Self.productNameKeys.lazy.compactMap { Self.string(device, $0) }.first))
+                    productName: Self.productNameKeys.lazy.compactMap { Self.string(device, $0) }.first)
+                if cable { cables.append(entry) } else { computers.append(entry) }
             }
         }
         let hid = hidWatch?.devices ?? Self.hidDevices(in: Self.makeHIDManager())
-        return RegistrySnapshot(ports: ports, cableDevices: cables, hidDevices: hid)
+        return RegistrySnapshot(ports: ports, cableDevices: cables, hidDevices: hid, usbComputers: computers)
     }
 
     public func startWatching(on queue: DispatchQueue, changed: @escaping (RegistryChange) -> Void) -> Bool {
@@ -207,7 +210,7 @@ public final class IOKitRegistrySource: RegistrySource {
         IONotificationPortSetDispatchQueue(port, queue)
         self.port = port
         var matchings: [() -> CFDictionary?] = [{ IOServiceMatching(kIOSerialBSDServiceValue) }]
-        for vendor in CableHints.vendorIDs.sorted() {
+        for vendor in CableHints.vendorIDs.union(USBComputers.vendorIDs).sorted() {
             matchings.append {
                 guard let dictionary = IOServiceMatching(Self.kIOUSBHostDeviceClass) as NSMutableDictionary? else { return nil }
                 dictionary[Self.vendorIDKey] = NSNumber(value: vendor)

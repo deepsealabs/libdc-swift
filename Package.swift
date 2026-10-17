@@ -118,7 +118,8 @@ let package = Package(
                 "Cable/SerialCableSession.swift",
                 "Cable/HIDDeviceIO.swift",
                 "Cable/HIDStream.swift",
-                "Cable/HIDCableSession.swift"
+                "Cable/HIDCableSession.swift",
+                "Cable/USBComputers.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
