@@ -263,5 +263,20 @@ final class SerialReplayTests: XCTestCase {
         XCTAssertEqual(second.outcome, .noNewDives)
         XCTAssertEqual(dives.count, 0)
     }
+
+    // MARK: - Stored model
+
+    func testAHardwareModelIsStoredUnderTheFamilyTheCableOpened() throws {
+        let link = try PtyLink()
+        links.append(link)
+        // hw_ostc.c takes a serial above 2048 for an OSTC 2N (model 2); the session opened the Mk2 (model 1).
+        link.attach(FakeOSTC(serial: 2_500, dives: [Self.dive(end: Self.newerEnd, depthsCm: Self.newerDepths)]))
+        let session = try openCable(CableFixtures.endpoint(link), model: model())
+        let (result, _) = downloadToEnd(session)
+        XCTAssertEqual(result?.outcome, .completed)
+        let stored = try XCTUnwrap(session.deviceStorage.getStoredDevice(uuid: session.storageKey))
+        XCTAssertEqual(stored.family, .hwOstc, "not the OSTC 3 family the name's BLE pattern matches")
+        XCTAssertEqual(stored.model, 2)
+    }
 }
 #endif
