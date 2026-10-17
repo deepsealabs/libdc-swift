@@ -58,8 +58,11 @@ public class DiveDataViewModel: ObservableObject {
     private let fingerprintKey = "DeviceFingerprints"
     private static weak var activeInstance: DiveDataViewModel?
     public weak var persistence: DiveDataPersistence?
-    
-    public init() {
+    /// Test seam: an isolated store instead of `DeviceFingerprintStorage.shared`.
+    private let fingerprintStore: DeviceFingerprintStorage
+
+    public init(fingerprintStore: DeviceFingerprintStorage = .shared) {
+        self.fingerprintStore = fingerprintStore
         DiveDataViewModel.activeInstance = self
         DeviceConfiguration.setupContext()
     }
@@ -120,7 +123,7 @@ public class DiveDataViewModel: ObservableObject {
     ///   - serial: Serial number of the device
     /// - Returns: Stored fingerprint data if found, nil otherwise
     public func getFingerprint(forDeviceType deviceType: String, serial: String) -> Data? {
-        DeviceFingerprintStorage.shared.getFingerprint(
+        fingerprintStore.getFingerprint(
             forDeviceType: deviceType, 
             serial: serial
         )?.fingerprint
@@ -137,7 +140,7 @@ public class DiveDataViewModel: ObservableObject {
             return
         }
         
-        DeviceFingerprintStorage.shared.saveFingerprint(
+        fingerprintStore.saveFingerprint(
             fingerprint,
             deviceType: deviceType,
             serial: serial
@@ -150,7 +153,7 @@ public class DiveDataViewModel: ObservableObject {
     ///   - deviceType: Type/model of the device
     ///   - serial: Serial number of the device
     public func clearFingerprint(forDeviceType deviceType: String, serial: String) {
-        DeviceFingerprintStorage.shared.clearFingerprint(
+        fingerprintStore.clearFingerprint(
             forDeviceType: deviceType,
             serial: serial
         )
@@ -159,12 +162,12 @@ public class DiveDataViewModel: ObservableObject {
     
     /// Removes all stored fingerprints from persistent storage
     public func clearAllFingerprints() {
-        DeviceFingerprintStorage.shared.clearAllFingerprints()
+        fingerprintStore.clearAllFingerprints()
         objectWillChange.send()
     }
     
     public func getFingerprintInfo(forDeviceType type: String, serial: String) -> Date? {
-        DeviceFingerprintStorage.shared.getFingerprint(
+        fingerprintStore.getFingerprint(
             forDeviceType: type,
             serial: serial
         )?.timestamp

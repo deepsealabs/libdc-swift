@@ -62,15 +62,22 @@ public class StoredDevice: Codable {
    
    private let defaults: UserDefaults
    private let storageKey = "com.libdc.storedDevices"
+   private let fingerprints: DeviceFingerprintStorage
 
    private var storedDevices: [StoredDevice] = []
 
-   /// `userDefaults` is a test seam (an isolated suite instead of `.standard`,
-   /// so tests don't pollute or race on the real store).
-   init(userDefaults: UserDefaults = .standard) {
+   /// Test seam: an isolated suite instead of `.standard`.
+   init(userDefaults: UserDefaults = .standard, fingerprints: DeviceFingerprintStorage = .shared) {
        self.defaults = userDefaults
+       self.fingerprints = fingerprints
        super.init()
        loadDevices()
+   }
+
+   // ObjC parity: without this, `[[DeviceStorage alloc] init]` resolves to
+   // NSObject's inherited -init instead of Swift's designated initializer.
+   private override convenience init() {
+       self.init(userDefaults: .standard)
    }
    
    private func loadDevices() {
@@ -174,13 +181,13 @@ public class StoredDevice: Codable {
            if let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == device.model && $0.family == device.family }),
               let serial = device.serial {
                // Clear the fingerprint for this device
-               DeviceFingerprintStorage.shared.clearFingerprint(forDeviceType: modelInfo.name, serial: serial)
+               fingerprints.clearFingerprint(forDeviceType: modelInfo.name, serial: serial)
                logInfo("🗑️ Cleared fingerprint for \(modelInfo.name) (serial: \(serial))")
            } else if device.serial == nil {
                // No serial stored - try to clear fingerprints matching the device type for any serial
                if let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == device.model && $0.family == device.family }) {
                    logWarning("⚠️ Device has no serial stored - clearing all fingerprints for \(modelInfo.name)")
-                   DeviceFingerprintStorage.shared.clearFingerprintsForDeviceType(modelInfo.name)
+                   fingerprints.clearFingerprintsForDeviceType(modelInfo.name)
                } else {
                    logWarning("⚠️ Device has no serial stored and unknown model - fingerprint may not be cleared")
                }

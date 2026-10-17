@@ -23,9 +23,10 @@ public class DiveLogRetriever {
         var deviceSerial: String?
         var deviceTypeFromLibDC: String?  // Exact device type string from libdivecomputer
         var hasNewDives: Bool = false
-        /// Stands in for `CoreBluetoothManager.isRetrievingLogs` so the callback's
-        /// cancel check works without a live BLE manager (test seam).
+        /// Test seam standing in for `CoreBluetoothManager.isRetrievingLogs`.
         let isCancelled: () -> Bool
+        /// Test seam: an isolated store instead of `DeviceStorage.shared`.
+        let deviceStorage: DeviceStorage
         var devicePtr: UnsafeMutablePointer<device_data_t>?
         var hasDeviceInfo: Bool = false
         var storedFingerprint: Data?
@@ -47,12 +48,13 @@ public class DiveLogRetriever {
         var detectedFamily: dc_family_t = DC_FAMILY_NULL
         var detectedModel: UInt32 = 0
 
-        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, isCancelled: @escaping () -> Bool, useFingerprint: Bool = true) {
+        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, isCancelled: @escaping () -> Bool, deviceStorage: DeviceStorage = .shared, useFingerprint: Bool = true) {
             self.viewModel = viewModel
             self.deviceName = deviceName
             self.deviceUUID = deviceUUID
             self.storedFingerprint = storedFingerprint
             self.isCancelled = isCancelled
+            self.deviceStorage = deviceStorage
             self.useFingerprint = useFingerprint
         }
     }
@@ -172,14 +174,14 @@ public class DiveLogRetriever {
 
             // Update stored device with serial for fingerprint cleanup when forgetting
             if let serial = context.deviceSerial {
-                DeviceStorage.shared.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
+                context.deviceStorage.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
             }
 
             // Firmware version reported alongside serial; a provenance snapshot
             // for the reading. 0 means the device reported none.
             let firmwareValue = devicePtr.pointee.devinfo.firmware
             if firmwareValue != 0 {
-                DeviceStorage.shared.updateDeviceFirmware(uuid: context.deviceUUID, firmware: String(firmwareValue))
+                context.deviceStorage.updateDeviceFirmware(uuid: context.deviceUUID, firmware: String(firmwareValue))
             }
 
             // Now that we have device info, load the stored fingerprint if we don't have it yet
@@ -229,7 +231,7 @@ public class DiveLogRetriever {
         if context.detectedModel != 0 {
             familyToUse = context.detectedFamily
             modelToUse = context.detectedModel
-        } else if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID) {
+        } else if let stored = context.deviceStorage.getStoredDevice(uuid: context.deviceUUID) {
             familyToUse = stored.family.asDCFamily
             modelToUse = stored.model
         } else if let deviceInfo = DeviceConfiguration.fromName(context.deviceName) {
@@ -342,9 +344,6 @@ public class DiveLogRetriever {
     private static var currentContext: CallbackContext?
 
     /// Test seam: the retrieval path with no live `CBPeripheral`/`CoreBluetoothManager`.
-    /// `isCancelled` stands in for `CoreBluetoothManager.isRetrievingLogs`, and
-    /// `markFinished` is called at the exact point the CBPeripheral overload below
-    /// calls `markRetrievalFinished`, so that overload's behavior is unchanged.
     static func retrieveDiveLogs(
             from devicePtr: UnsafeMutablePointer<device_data_t>,
             deviceName: String,
@@ -352,6 +351,7 @@ public class DiveLogRetriever {
             viewModel: DiveDataViewModel,
             isCancelled: @escaping () -> Bool,
             markFinished: @escaping () -> Void,
+            deviceStorage: DeviceStorage = .shared,
             syncClock: Bool = false,
             useFingerprint: Bool = true,
             onProgress: ((Int, Int) -> Void)? = nil,
@@ -377,7 +377,7 @@ public class DiveLogRetriever {
                 }
 
                 // Get device type from stored configuration (user-selected) for consistent fingerprint lookups
-                let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: deviceUUID)
+                let storedDevice = deviceStorage.getStoredDevice(uuid: deviceUUID)
                 let deviceTypeForFingerprint: String
                 if let stored = storedDevice,
                    let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
@@ -390,7 +390,7 @@ public class DiveLogRetriever {
                 // Try to get fingerprint if we already have device info (from a previous connection)
                 if devicePtr.pointee.have_devinfo != 0 {
                     let serial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
-                    DeviceStorage.shared.updateDeviceSerial(uuid: deviceUUID, serial: serial)
+                    deviceStorage.updateDeviceSerial(uuid: deviceUUID, serial: serial)
                     if useFingerprint {
                         storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceTypeForFingerprint, serial: serial)
                     }
@@ -402,6 +402,7 @@ public class DiveLogRetriever {
                     deviceUUID: deviceUUID,
                     storedFingerprint: storedFingerprint,
                     isCancelled: isCancelled,
+                    deviceStorage: deviceStorage,
                     useFingerprint: useFingerprint
                 )
                 context.devicePtr = devicePtr
@@ -513,7 +514,7 @@ public class DiveLogRetriever {
                         if shouldSaveFingerprint, let lastFP = context.lastFingerprint, let serial = context.deviceSerial {
                             // Use stored device configuration (user-selected) for consistent fingerprint storage
                             let deviceType: String
-                            if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID),
+                            if let stored = context.deviceStorage.getStoredDevice(uuid: context.deviceUUID),
                                let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
                                 deviceType = modelInfo.name
                             } else {
@@ -558,8 +559,10 @@ public class DiveLogRetriever {
                 deviceName: device.name ?? "Unknown Device",
                 deviceUUID: device.identifier.uuidString,
                 viewModel: viewModel,
-                isCancelled: { bluetoothManager.isRetrievingLogs == false },
+                // Matches the pre-seam nil semantics: a deallocated manager reads as cancelled.
+                isCancelled: { [weak bluetoothManager] in bluetoothManager?.isRetrievingLogs == false },
                 markFinished: { markRetrievalFinished(bluetoothManager) },
+                deviceStorage: .shared,
                 syncClock: syncClock,
                 useFingerprint: useFingerprint,
                 onProgress: onProgress,
