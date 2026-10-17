@@ -255,17 +255,18 @@ final class SerialReplayTests: XCTestCase {
 
     // MARK: - Hardware recordings
 
-    /// Every recording `SerialHardwareTests` made on a real computer that has been committed to Fixtures/Hardware.
+    /// Every recording the hardware tests (serial, USB HID, USB) made on a real computer that has been committed to Fixtures/Hardware.
     func testCommittedHardwareRecordingsReplay() throws {
         let urls = Bundle.module.urls(forResourcesWithExtension: DCRecording.fileExtension, subdirectory: "Hardware") ?? []
         try XCTSkipIf(urls.isEmpty, "No hardware recordings are committed yet")
         for url in urls.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
             let name = url.lastPathComponent
             let recording = try DCRecording(contentsOf: url)
-            XCTAssertEqual(recording.transport, DC_TRANSPORT_SERIAL, name)
+            let transport = try XCTUnwrap(DCTransport(dcValue: recording.transport), "\(name) is on no cable transport")
+            XCTAssertNotEqual(transport, .ble, name)
             let family = try XCTUnwrap(recording.family.flatMap { DeviceConfiguration.DeviceFamily(dcFamily: $0) }, name)
-            let model = try XCTUnwrap(DeviceCatalog.models(for: .serial).first { $0.family == family && $0.model == recording.model },
-                                      "\(name) is for no serial model in the catalog")
+            let model = try XCTUnwrap(DeviceCatalog.models(for: transport).first { $0.family == family && $0.model == recording.model },
+                                      "\(name) is for no \(transport.rawValue) model in the catalog")
             let (result, dives, script) = try replayDownload(recording, displayName: model.name)
             XCTAssertNil(script.deviation, name)
             XCTAssertTrue(script.isComplete, "\(name): played \(script.consumed) of \(script.exchanges.count)")
