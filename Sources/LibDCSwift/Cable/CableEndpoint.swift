@@ -13,9 +13,9 @@ public struct CableHint: Hashable, Sendable {
     public let families: [DeviceConfiguration.DeviceFamily]
     /// The PID is the brand's own, so only `families` can be on the other end.
     public let exclusive: Bool
-    /// macOS has no built-in driver for it, so it shows no port until the chip maker's driver is installed.
+    /// macOS 26.4's built-in drivers don't match it, so it shows no port until the chip maker's driver is installed.
     public let needsVendorDriver: Bool
-    /// Where the driver comes from, when `needsVendorDriver`.
+    /// The chip maker's driver: needed when `needsVendorDriver`, else the fallback when macOS's own driver made no port.
     public let driverURL: URL?
 
     public init(vendorID: UInt16, productID: UInt16, name: String, brand: String? = nil,
@@ -41,7 +41,7 @@ public struct CableHint: Hashable, Sendable {
     }
 }
 
-/// The USB-serial cables and chips dive computers are known to use, by VID:PID.
+/// The USB-serial cables and chips dive computers are known to use, by VID:PID; which ones macOS drives itself was read from macOS 26.4's driver personalities.
 public enum CableHints {
     private static let ftdiDriver = URL(string: "https://ftdichip.com/drivers/vcp-drivers/")
 
@@ -49,16 +49,17 @@ public enum CableHints {
 
     public static let all: [CableHint] = [
         CableHint(vendorID: 0x0403, productID: 0xF680, name: "Suunto USB cable", brand: "Suunto",
-                  families: [.suuntoD9, .suuntoVyper2, .suuntoVyper, .suuntoEon, .suuntoSolution], exclusive: true),
+                  families: [.suuntoD9, .suuntoVyper2, .suuntoVyper, .suuntoEon, .suuntoSolution], exclusive: true,
+                  driverURL: ftdiDriver),
         CableHint(vendorID: 0x0403, productID: 0x87D0, name: "Cressi USB cable", brand: "Cressi",
-                  families: [.cressiLeonardo, .cressiGoa, .cressiEdy], exclusive: true),
+                  families: [.cressiLeonardo, .cressiGoa, .cressiEdy], exclusive: true, driverURL: ftdiDriver),
         CableHint(vendorID: 0x0403, productID: 0xF460, name: "Oceanic/Pelagic USB cable", brand: "Pelagic",
                   families: [.oceanicAtom2, .oceanicVeo250, .oceanicVtpro], exclusive: true,
                   needsVendorDriver: true, driverURL: ftdiDriver),
         CableHint(vendorID: 0x0403, productID: 0x6015, name: "FTDI FT-X USB-serial", brand: "Heinrichs Weikamp",
-                  families: ostcFamilies),
+                  families: ostcFamilies, driverURL: ftdiDriver),
         CableHint(vendorID: 0x0403, productID: 0x6001, name: "FTDI FT232R USB-serial", brand: "Heinrichs Weikamp",
-                  families: ostcFamilies),
+                  families: ostcFamilies, driverURL: ftdiDriver),
         CableHint(vendorID: 0x10C4, productID: 0xEA60, name: "Silicon Labs CP210x"),
         CableHint(vendorID: 0x10C4, productID: 0xEA70, name: "Silicon Labs CP2105"),
         CableHint(vendorID: 0x067B, productID: 0x2303, name: "Prolific PL2303"),
@@ -142,6 +143,18 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
         if let hint { return hint.name }
         if let productName, !productName.isEmpty { return productName }
         return calloutPath.map { ($0 as NSString).lastPathComponent } ?? "USB cable"
+    }
+
+    /// What to do about a `driverMissing` endpoint, in English: which driver, and where from when the hint knows; nil otherwise.
+    public var driverMissingMessage: String? {
+        guard status == .driverMissing else { return nil }
+        let source = hint?.driverURL.map { " from \($0.absoluteString)" } ?? ""
+        if hint?.needsVendorDriver == true {
+            return "macOS has no driver for the \(displayName). Install the chip maker's driver\(source), "
+                + "then unplug the cable and plug it in again."
+        }
+        return "macOS made no serial port for the \(displayName). Unplug it and plug it in again. "
+            + "If it still has no port, install the chip maker's driver\(source)."
     }
 }
 
