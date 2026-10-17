@@ -163,6 +163,22 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertEqual(discovery.endpoints, [])
     }
 
+    func testClosingASessionOnAComputerThatStoppedAnsweringReturnsAtOnce() throws {
+        let ostc3 = FakeOSTC3()
+        let link = try link(ostc3)
+        let session = try openCable(CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC 3"))
+        // INIT is answered, so the computer is in download mode when the next command meets silence.
+        let download = try XCTUnwrap(downloadToEnd(session).result)
+        XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT))
+        XCTAssertFalse(session.isCancelled)
+        let start = DispatchTime.now()
+        session.close()
+        // hw_ostc3's close sends EXIT and would wait 3000 ms for its echo.
+        XCTAssertLessThan(milliseconds(since: start), 200)
+        XCTAssertTrue(session.isClosed)
+        XCTAssertTrue(waitFor { ostc3.received.last == FakeOSTC3.exitCommand }, "EXIT still goes out")
+    }
+
     func testAnOpenSessionShowsItsPortBusyUntilItCloses() throws {
         let link = try link()
         let endpoint = CableFixtures.endpoint(link)
