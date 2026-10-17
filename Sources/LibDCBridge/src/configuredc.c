@@ -641,7 +641,66 @@ static const struct name_pattern name_patterns[] = {
     { "RATIO-", "Ratio", "iX3M 2021 GPS Easy", MATCH_EXACT }
 };
 
-dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name) {
+static dc_status_t find_descriptor_by_filter(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport) {
+    dc_iterator_t *iterator = NULL;
+    dc_descriptor_t *descriptor = NULL;
+    dc_status_t rc;
+
+    rc = dc_descriptor_iterator(&iterator);
+    if (rc != DC_STATUS_SUCCESS) {
+        return rc;
+    }
+
+    while ((rc = dc_iterator_next(iterator, &descriptor)) == DC_STATUS_SUCCESS) {
+        unsigned int transports = dc_descriptor_get_transports(descriptor);
+        
+        if ((transports & transport) &&
+            dc_descriptor_filter(descriptor, transport, name)) {
+            *out_descriptor = descriptor;
+            dc_iterator_free(iterator);
+            return DC_STATUS_SUCCESS;
+        }
+        dc_descriptor_free(descriptor);
+    }
+
+    dc_iterator_free(iterator);
+    return DC_STATUS_UNSUPPORTED;
+}
+
+static dc_status_t find_descriptor_by_vendor_product(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport) {
+    dc_iterator_t *iterator = NULL;
+    dc_descriptor_t *descriptor = NULL;
+    dc_status_t rc;
+
+    rc = dc_descriptor_iterator(&iterator);
+    if (rc != DC_STATUS_SUCCESS) {
+        return rc;
+    }
+
+    while ((rc = dc_iterator_next(iterator, &descriptor)) == DC_STATUS_SUCCESS) {
+        const char *vendor = dc_descriptor_get_vendor(descriptor);
+        const char *product = dc_descriptor_get_product(descriptor);
+        size_t vendor_len = vendor ? strlen(vendor) : 0;
+
+        if ((dc_descriptor_get_transports(descriptor) & transport) &&
+            vendor && product &&
+            strncmp(name, vendor, vendor_len) == 0 &&
+            name[vendor_len] == ' ' &&
+            strcmp(name + vendor_len + 1, product) == 0) {
+            *out_descriptor = descriptor;
+            dc_iterator_free(iterator);
+            return DC_STATUS_SUCCESS;
+        }
+        dc_descriptor_free(descriptor);
+    }
+
+    dc_iterator_free(iterator);
+    return DC_STATUS_UNSUPPORTED;
+}
+
+static dc_status_t find_ble_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name) {
     dc_iterator_t *iterator = NULL;
     dc_descriptor_t *descriptor = NULL;
     dc_status_t rc;
@@ -689,25 +748,39 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
     }
 
     // Fall back to filter-based matching if no pattern match found
-    rc = dc_descriptor_iterator(&iterator);
-    if (rc != DC_STATUS_SUCCESS) {
-        return rc;
+    return find_descriptor_by_filter(out_descriptor, name, DC_TRANSPORT_BLE);
+}
+
+dc_status_t find_descriptor_by_name_transport(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport) {
+    dc_status_t rc;
+
+    if (!out_descriptor || !name) {
+        return DC_STATUS_INVALIDARGS;
     }
 
-    while ((rc = dc_iterator_next(iterator, &descriptor)) == DC_STATUS_SUCCESS) {
-        unsigned int transports = dc_descriptor_get_transports(descriptor);
-        
-        if ((transports & DC_TRANSPORT_BLE) &&
-            dc_descriptor_filter(descriptor, DC_TRANSPORT_BLE, name)) {
-            *out_descriptor = descriptor;
-            dc_iterator_free(iterator);
-            return DC_STATUS_SUCCESS;
+    switch (transport) {
+    case DC_TRANSPORT_BLE:
+        return find_ble_descriptor_by_name(out_descriptor, name);
+    case DC_TRANSPORT_BLUETOOTH:
+    case DC_TRANSPORT_IRDA:
+        rc = find_descriptor_by_vendor_product(out_descriptor, name, transport);
+        if (rc == DC_STATUS_SUCCESS) {
+            return rc;
         }
-        dc_descriptor_free(descriptor);
+        return find_descriptor_by_filter(out_descriptor, name, transport);
+    // These transports' filters read a VID/PID struct or match everything, never a name.
+    case DC_TRANSPORT_SERIAL:
+    case DC_TRANSPORT_USB:
+    case DC_TRANSPORT_USBHID:
+        return find_descriptor_by_vendor_product(out_descriptor, name, transport);
+    default:
+        return DC_STATUS_INVALIDARGS;
     }
+}
 
-    dc_iterator_free(iterator);
-    return DC_STATUS_UNSUPPORTED;
+dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name) {
+    return find_descriptor_by_name_transport(out_descriptor, name, DC_TRANSPORT_BLE);
 }
 
 /*--------------------------------------------------------------------

@@ -87,8 +87,25 @@ dc_status_t find_descriptor_by_model(dc_descriptor_t **out_descriptor,
  * @param name: Device name to match
  * @return DC_STATUS_SUCCESS on success
  * @note Caller must free the returned descriptor
+ * @note Same as find_descriptor_by_name_transport(out_descriptor, name, DC_TRANSPORT_BLE)
  */
 dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name);
+
+/**
+ * Finds a device descriptor by name among the descriptors that support one transport
+ * @param out_descriptor: Output parameter for found descriptor
+ * @param name: Device name to match
+ * @param transport: A single DC_TRANSPORT_* value
+ * @return DC_STATUS_SUCCESS on success, DC_STATUS_UNSUPPORTED if nothing matches,
+ *         DC_STATUS_INVALIDARGS for a NULL argument, DC_TRANSPORT_NONE or several transports
+ * @note DC_TRANSPORT_BLE matches advertised names exactly as find_descriptor_by_name does.
+ *       Every other transport matches "Vendor Product" exactly, first in descriptor table
+ *       order; DC_TRANSPORT_BLUETOOTH and DC_TRANSPORT_IRDA then fall back to
+ *       libdivecomputer's name filter for that transport.
+ * @note Caller must free the returned descriptor
+ */
+dc_status_t find_descriptor_by_name_transport(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport);
 
 /*--------------------------------------------------------------------
  * BLE Device Functions
