@@ -63,6 +63,8 @@ public class DiveLogRetriever {
         var parseFailureCount: Int = 0
         /// The C lookup gave the device a stored fingerprint, so a walk that delivers nothing means no new dives.
         var deviceHadStoredFingerprint: Bool = false
+        /// Test seam: wraps a session dive's parse, given the dive's fingerprint.
+        var parseHook: ParseHook?
         private var descriptorCheck: (family: dc_family_t, model: UInt32, known: Bool)?
 
         init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, isCancelled: @escaping () -> Bool, deviceStorage: DeviceStorage = .shared, useFingerprint: Bool = true, policy: RetrievalPolicy = .legacy) {
@@ -99,6 +101,8 @@ public class DiveLogRetriever {
             return GenericParser.DeviceClock(devtime: devicePtr.pointee.clock.devtime, systime: devicePtr.pointee.clock.systime)
         }
     }
+
+    typealias ParseHook = (_ fingerprint: Data, _ parse: () throws -> DiveData) throws -> DiveData
 
     /// Whose contract a download follows.
     enum RetrievalPolicy {
@@ -381,16 +385,19 @@ public class DiveLogRetriever {
                     context.parseFailureCount += 1
                     return 1
                 }
-                diveData = try GenericParser.parseDiveData(
-                    dcFamily: target.family,
-                    model: target.model,
-                    diveNumber: context.logCount,
-                    diveData: data,
-                    dataSize: Int(size),
-                    fingerprint: fingerprintData.isEmpty ? nil : fingerprintData,
-                    fallbackDate: nauticFallbackDate(family: target.family, fingerprint: fingerprintData),
-                    clock: context.deviceClock
-                )
+                let parse = {
+                    try GenericParser.parseDiveData(
+                        dcFamily: target.family,
+                        model: target.model,
+                        diveNumber: context.logCount,
+                        diveData: data,
+                        dataSize: Int(size),
+                        fingerprint: fingerprintData.isEmpty ? nil : fingerprintData,
+                        fallbackDate: nauticFallbackDate(family: target.family, fingerprint: fingerprintData),
+                        clock: context.deviceClock
+                    )
+                }
+                diveData = try context.parseHook.map { try $0(fingerprintData, parse) } ?? parse()
             } else {
                 guard let parsed = try parseLegacy(context, data: data, size: size, fingerprint: fingerprintData) else {
                     return 0
@@ -553,6 +560,7 @@ public class DiveLogRetriever {
                 syncClock: syncClock,
                 useFingerprint: useFingerprint,
                 session: nil,
+                parseHook: nil,
                 closeCoordinator: closeCoordinator,
                 onProgress: onProgress,
                 noDevice: {
@@ -573,6 +581,19 @@ public class DiveLogRetriever {
             viewModel: DiveDataViewModel,
             syncClock: Bool = false,
             useFingerprint: Bool = true,
+            onProgress: ((Int, Int) -> Void)? = nil,
+            completion: @escaping (DiveDownloadResult) -> Void
+        ) {
+            retrieveDiveLogs(session: session, viewModel: viewModel, syncClock: syncClock, useFingerprint: useFingerprint,
+                             parseHook: nil, onProgress: onProgress, completion: completion)
+        }
+
+    static func retrieveDiveLogs(
+            session: DiveComputerSession,
+            viewModel: DiveDataViewModel,
+            syncClock: Bool = false,
+            useFingerprint: Bool = true,
+            parseHook: ParseHook?,
             onProgress: ((Int, Int) -> Void)? = nil,
             completion: @escaping (DiveDownloadResult) -> Void
         ) {
@@ -604,6 +625,7 @@ public class DiveLogRetriever {
                 syncClock: syncClock,
                 useFingerprint: useFingerprint,
                 session: session,
+                parseHook: parseHook,
                 closeCoordinator: RetrievalCloseCoordinator(),
                 onProgress: onProgress,
                 noDevice: {
@@ -631,6 +653,7 @@ public class DiveLogRetriever {
             syncClock: Bool,
             useFingerprint: Bool,
             session: DiveComputerSession?,
+            parseHook: ParseHook?,
             closeCoordinator: RetrievalCloseCoordinator,
             onProgress: ((Int, Int) -> Void)?,
             noDevice: @escaping () -> Void,
@@ -688,6 +711,7 @@ public class DiveLogRetriever {
                     policy: policy
                 )
                 context.devicePtr = devicePtr
+                context.parseHook = parseHook
                 
                 let contextPtr = UnsafeMutableRawPointer(Unmanaged.passRetained(context).toOpaque())
                 
