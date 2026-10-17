@@ -1,7 +1,7 @@
 # Dive computer identity, catalog and fingerprint keys
 
-A dive computer can now be reached over more than one transport: BLE everywhere, and serial and USB HID
-cables on macOS. This page covers how LibDCSwift names the computer behind a download, the model catalog
+A dive computer can now be reached over more than one transport: BLE everywhere, and serial, USB HID and
+raw USB cables on macOS. This page covers how LibDCSwift names the computer behind a download, the model catalog
 cable pickers are built from, and how stored fingerprints move from the 1.18 layout to identity keys
 without forcing anyone to download their whole logbook again.
 
@@ -13,7 +13,7 @@ download opens with. A paired classic-Bluetooth computer shows up on macOS as a 
 `classicBTSerial.dcValue` is `DC_TRANSPORT_SERIAL`.
 
 `CableSupport.transports` lists the cable transports this platform can download over. That's
-`[.serial, .usbHID]` on macOS and empty on iOS. It comes from `libdc_cable_transports()`, because
+`[.serial, .usbHID, .usb]` on macOS and empty on iOS. It comes from `libdc_cable_transports()`, because
 `dc_context_get_transports` always reports serial.
 
 ## Catalog
@@ -72,7 +72,9 @@ PID, so on serial you pick the model.
 canonical name, the serial, the firmware, and the transport it was downloaded over. A session download fills
 it in from DEVINFO, and you can read it on `DiveComputerSession.identity`, `DiveDownloadResult.identity` and
 `FingerprintCommit.identity`. The model is the one the session parses with: the reported model when a
-descriptor knows it, and otherwise the descriptor the session opened.
+descriptor knows it, and otherwise the descriptor the session opened. A reported model of 0 usually means
+"not reported" and falls back the same way. The Atomic Aquatics Cobalt is the exception on macOS: its driver
+reads the model off the computer, and 0 there is the Cobalt 1, so it is kept (and stored) as reported.
 
 - **Serial**: DEVINFO's serial as `%08x`. A serial of 0, empty, or none is unknown (`nil`). Cressi Edy and
   Oceans S1 report 0 for every unit, and some families never send DEVINFO at all (see below).
