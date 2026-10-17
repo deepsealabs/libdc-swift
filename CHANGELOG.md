@@ -71,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `configuredc.h`: four prototypes that had no implementation (`get_alternative_models_for_name`, `event_cb`, `reopen_ble_device_with_model`, `get_device_data_pointer`); calling any of them already failed to link
 
 ### Fixed
+- `DiveDataViewModel.updateProgress(count:)` no longer moves a finished download back to `.inProgress`. `appendDives` queues its count a main-queue turn late, so after a fast walk it could land after `.completed` or `.noNewDives` and leave the download looking unfinished
 - `DeviceStorage` decodes stored devices one at a time, so a record this version can't read (a family or transport from a newer version, say) is dropped on its own instead of emptying the whole list
 - `DeviceStorage.reconcileUUID(name:newUUID:)` moves BLE records only, so a BLE scan can no longer re-key a cable record of the same name to a peripheral UUID
 - `find_descriptor_by_name` returns `DC_STATUS_INVALIDARGS` for a NULL name or output pointer instead of crashing

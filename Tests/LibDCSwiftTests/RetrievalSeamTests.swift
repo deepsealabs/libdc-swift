@@ -227,6 +227,37 @@ final class RetrievalSeamTests: XCTestCase {
         return result
     }
 
+    func testACountLandingAfterTheEndDoesNotReopenTheDownload() {
+        let viewModel = DiveDataViewModel(fingerprintStore: DeviceFingerprintStorage(userDefaults: isolatedSuite("fp")))
+        func drain(turns: Int = 3) {
+            for _ in 0..<turns {
+                let step = expectation(description: "turn")
+                DispatchQueue.main.async { step.fulfill() }
+                wait(for: [step], timeout: 1)
+            }
+        }
+        viewModel.updateProgress(count: 1)
+        drain()
+        XCTAssertEqual(viewModel.progress, .inProgress(1))
+
+        // appendDives queues its count a turn late, so it can follow the download's own end.
+        viewModel.updateProgress(.completed)
+        viewModel.updateProgress(count: 2)
+        drain()
+        XCTAssertEqual(viewModel.progress, .completed)
+
+        viewModel.updateProgress(.noNewDives)
+        viewModel.updateProgress(count: 3)
+        drain()
+        XCTAssertEqual(viewModel.progress, .noNewDives)
+
+        viewModel.resetProgress()
+        drain()
+        viewModel.updateProgress(count: 4)
+        drain()
+        XCTAssertEqual(viewModel.progress, .inProgress(4), "the next download counts again")
+    }
+
     func testDownloadReportsDivesOldestFirstWithSerialKeyedFingerprint() throws {
         let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
         let ptr = try devicePtr(for: watch)
