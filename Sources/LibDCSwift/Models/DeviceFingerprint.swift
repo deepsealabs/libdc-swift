@@ -24,8 +24,13 @@ public class DeviceFingerprintStorage {
     public static let shared = DeviceFingerprintStorage()
     private let fingerprintKey = "DeviceFingerprints"
     private let rejectedDivesKey = "RejectedDiveFingerprints"
-    
-    private init() {}
+    private let defaults: UserDefaults
+
+    /// `userDefaults` is a test seam (an isolated suite instead of `.standard`,
+    /// so tests don't pollute or race on the real store).
+    init(userDefaults: UserDefaults = .standard) {
+        self.defaults = userDefaults
+    }
     
     /// Normalizes a device type string for consistent comparison
     /// Since we now use stored device configuration, this just does simple case-insensitive matching
@@ -38,7 +43,7 @@ public class DeviceFingerprintStorage {
     /// Loads all stored device fingerprints from persistent storage
     /// - Returns: Array of DeviceFingerprint objects
     public func loadFingerprints() -> [DeviceFingerprint] {
-        guard let data = UserDefaults.standard.data(forKey: fingerprintKey),
+        guard let data = defaults.data(forKey: fingerprintKey),
               let fingerprints = try? JSONDecoder().decode([DeviceFingerprint].self, from: data) else {
             return []
         }
@@ -49,7 +54,7 @@ public class DeviceFingerprintStorage {
     /// - Parameter fingerprints: Array of DeviceFingerprint objects to save
     public func saveFingerprints(_ fingerprints: [DeviceFingerprint]) {
         if let data = try? JSONEncoder().encode(fingerprints) {
-            UserDefaults.standard.set(data, forKey: fingerprintKey)
+            defaults.set(data, forKey: fingerprintKey)
         }
     }
     
@@ -133,8 +138,8 @@ public class DeviceFingerprintStorage {
 
     /// Clears all stored fingerprints
     public func clearAllFingerprints() {
-        UserDefaults.standard.removeObject(forKey: fingerprintKey)
-        UserDefaults.standard.removeObject(forKey: rejectedDivesKey)
+        defaults.removeObject(forKey: fingerprintKey)
+        defaults.removeObject(forKey: rejectedDivesKey)
         logInfo("🗑️ Cleared all fingerprints")
     }
 
@@ -145,7 +150,7 @@ public class DeviceFingerprintStorage {
     }
 
     private func loadRejectedDives() -> [String: [Data]] {
-        guard let data = UserDefaults.standard.data(forKey: rejectedDivesKey),
+        guard let data = defaults.data(forKey: rejectedDivesKey),
               let all = try? JSONDecoder().decode([String: [Data]].self, from: data) else {
             return [:]
         }
@@ -154,9 +159,9 @@ public class DeviceFingerprintStorage {
 
     private func saveRejectedDives(_ all: [String: [Data]]) {
         if all.isEmpty {
-            UserDefaults.standard.removeObject(forKey: rejectedDivesKey)
+            defaults.removeObject(forKey: rejectedDivesKey)
         } else if let data = try? JSONEncoder().encode(all) {
-            UserDefaults.standard.set(data, forKey: rejectedDivesKey)
+            defaults.set(data, forKey: rejectedDivesKey)
         }
     }
 
