@@ -185,12 +185,15 @@ public class DiveLogRetriever {
         UnsafeMutableRawPointer?
     ) -> Int32 = { data, size, fingerprint, fsize, userdata in
         guard let data = data,
-              let userdata = userdata,
-              let fingerprint = fingerprint else {
+              let userdata = userdata else {
             return 0
         }
         
         let context = Unmanaged<CallbackContext>.fromOpaque(userdata).takeUnretainedValue()
+        // Suunto Solution passes no fingerprint; a session still downloads those dives, it just can't commit one.
+        guard fingerprint != nil || context.policy == .session else {
+            return 0
+        }
         
         if context.isCancelled() {
             logInfo("🛑 Download cancelled")
@@ -254,7 +257,7 @@ public class DiveLogRetriever {
             context.hasDeviceInfo = true
         }
         
-        let fingerprintData = Data(bytes: fingerprint, count: Int(fsize))
+        let fingerprintData = fingerprint.map { Data(bytes: $0, count: Int(fsize)) } ?? Data()
 
         // Capture the FIRST dive's fingerprint (most recent dive on the device)
         // This is what we'll compare against on the next download
@@ -263,7 +266,8 @@ public class DiveLogRetriever {
         }
         
         // Check if this dive matches our stored fingerprint (already downloaded)
-        if let storedFingerprint = context.storedFingerprint {
+        if let storedFingerprint = context.storedFingerprint,
+           !(context.policy == .session && fingerprintData.isEmpty) {
             if storedFingerprint == fingerprintData {
                 logInfo("✨ Found matching fingerprint - all new dives downloaded")
                 context.fingerprintMatched = true
@@ -286,7 +290,7 @@ public class DiveLogRetriever {
                     diveNumber: context.logCount,
                     diveData: data,
                     dataSize: Int(size),
-                    fingerprint: fingerprintData,
+                    fingerprint: fingerprintData.isEmpty ? nil : fingerprintData,
                     fallbackDate: nauticFallbackDate(family: target.family, fingerprint: fingerprintData),
                     clock: context.deviceClock
                 )
@@ -762,7 +766,8 @@ public class DiveLogRetriever {
         let divesDownloaded = context.logCount - 1 - context.emptyReadCount
 
         var commit: FingerprintCommit?
-        if commits, let lastFP = context.lastFingerprint, let serial = context.deviceSerial {
+        // A family that reports no fingerprints has nothing to commit, so every download fetches all its dives.
+        if commits, let lastFP = context.lastFingerprint, !lastFP.isEmpty, let serial = context.deviceSerial {
             commit = FingerprintCommit(fingerprint: lastFP, deviceType: fingerprintDeviceType(context),
                                        serial: serial, viewModel: viewModel)
         }
