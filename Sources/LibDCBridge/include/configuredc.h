@@ -87,8 +87,25 @@ dc_status_t find_descriptor_by_model(dc_descriptor_t **out_descriptor,
  * @param name: Device name to match
  * @return DC_STATUS_SUCCESS on success
  * @note Caller must free the returned descriptor
+ * @note Same as find_descriptor_by_name_transport(out_descriptor, name, DC_TRANSPORT_BLE)
  */
 dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name);
+
+/**
+ * Finds a device descriptor by name among the descriptors that support one transport
+ * @param out_descriptor: Output parameter for found descriptor
+ * @param name: Device name to match
+ * @param transport: A single DC_TRANSPORT_* value
+ * @return DC_STATUS_SUCCESS on success, DC_STATUS_UNSUPPORTED if nothing matches,
+ *         DC_STATUS_INVALIDARGS for a NULL argument, DC_TRANSPORT_NONE or several transports
+ * @note DC_TRANSPORT_BLE matches advertised names exactly as find_descriptor_by_name does.
+ *       Every other transport matches "Vendor Product" exactly, first in descriptor table
+ *       order; DC_TRANSPORT_BLUETOOTH and DC_TRANSPORT_IRDA then fall back to
+ *       libdivecomputer's name filter for that transport.
+ * @note Caller must free the returned descriptor
+ */
+dc_status_t find_descriptor_by_name_transport(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport);
 
 /*--------------------------------------------------------------------
  * BLE Device Functions
@@ -103,28 +120,15 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
 dc_status_t get_device_info_from_name(const char *name, dc_family_t *family, unsigned int *model);
 
 /**
- * Gets all alternative models for a device name within the same family
- * @param name: Device name to match
- * @param family: Device family to search within
- * @param models: Output array for model numbers (caller must free)
- * @param model_count: Output parameter for number of models found
- * @param max_models: Maximum number of models to return
- * @return DC_STATUS_SUCCESS on success
- */
-dc_status_t get_alternative_models_for_name(const char *name, dc_family_t family,
-    unsigned int *models, unsigned int *model_count, unsigned int max_models);
-
-/**
- * Event callback for device events (used internally)
- */
-void event_cb(dc_device_t *device, dc_event_type_t event, const void *data, void *userdata);
-
-/**
  * Gets formatted display name for a device
  * @param name: Device name to match
  * @return Formatted string "Vendor Product" (caller must free) or NULL
  */
 char* get_formatted_device_name(const char *name);
+
+/** dc_device_open attempts open_ble_device makes on one BLE link, and the wait between them */
+#define LIBDC_BLE_OPEN_ATTEMPTS 5
+#define LIBDC_BLE_OPEN_RETRY_MS 3000
 
 /**
  * Opens a BLE device connection
@@ -133,19 +137,39 @@ char* get_formatted_device_name(const char *name);
  * @param family: Device family
  * @param model: Device model
  * @return DC_STATUS_SUCCESS on success
+ * @note Connects only once the descriptor resolves, then opens through the same path as
+ *       open_device_on_iostream with LIBDC_BLE_OPEN_ATTEMPTS / LIBDC_BLE_OPEN_RETRY_MS
  */
 dc_status_t open_ble_device(device_data_t *data, const char *devaddr, 
     dc_family_t family, unsigned int model);
 
 /**
- * Reopens a device with a different model, reusing the existing BLE connection
- * @param data: Device data structure (must have valid context and iostream)
+ * Opens a device on an iostream the caller has already opened
+ * @param data: Device data structure. data->context must be the context iostream was
+ *              opened on; every other field is reset
+ * @param iostream: The open iostream
  * @param family: Device family
- * @param model: New model number to try
- * @return DC_STATUS_SUCCESS on success
+ * @param model: Device model
+ * @param attempts: dc_device_open attempts on this iostream (at least 1)
+ * @param retry_ms: Wait between attempts, in milliseconds
+ * @return DC_STATUS_SUCCESS on success, DC_STATUS_INVALIDARGS for a NULL data, context
+ *         or iostream or zero attempts, else the descriptor lookup's or last attempt's status
+ * @note Takes ownership of data->context and iostream on every path. On success data holds
+ *       them with the device, descriptor and "Vendor Product" model string, and subscribes
+ *       to DEVINFO, PROGRESS and CLOCK events. On failure both are released and data is zeroed.
+ * @note Sets the bridge's log callback and level (set_ble_debug_logging) on data->context.
  */
-dc_status_t reopen_ble_device_with_model(device_data_t *data, 
-    dc_family_t family, unsigned int model);
+dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream,
+    dc_family_t family, unsigned int model, unsigned int attempts, unsigned int retry_ms);
+
+/**
+ * Installs (or, with a NULL callback, clears) the cancel check on an open device
+ * @param data: Device data structure with an open device
+ * @param callback: Returns non-zero to cancel; libdivecomputer polls it between transfers
+ * @param userdata: Passed to callback
+ * @return DC_STATUS_SUCCESS on success, DC_STATUS_INVALIDARGS if no device is open
+ */
+dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata);
 
 /**
  * Opens a BLE device with automatic identification
@@ -180,12 +204,6 @@ dc_status_t create_parser_for_device(dc_parser_t **parser, dc_context_t *context
  * Utility Functions
  *------------------------------------------------------------------*/
 /**
- * Gets pointer to device data structure
- * @return Pointer to device_data_t or NULL
- */
-device_data_t* get_device_data_pointer(void);
-
-/**
  * Toggle verbose BLE/protocol debug logging (off by default). When enabled,
  * the libdivecomputer context runs at DC_LOGLEVEL_DEBUG (surfacing protocol
  * hexdumps) and extra C-side traces print. Enable only when diagnosing a
@@ -199,6 +217,12 @@ void set_ble_debug_logging(int enabled);
  * True on macOS; false on iOS, where a non-standard rate returns DC_STATUS_UNSUPPORTED.
  */
 bool libdc_has_custom_baud(void);
+
+/**
+ * Cable transports (DC_TRANSPORT_* bits) this platform can reach: SERIAL | USBHID on macOS,
+ * none on iOS. Use this rather than dc_context_get_transports, which always reports SERIAL.
+ */
+unsigned int libdc_cable_transports(void);
 
 #ifdef __cplusplus
 }

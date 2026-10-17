@@ -346,46 +346,21 @@ static void dc_log_callback(dc_context_t *context, dc_loglevel_t loglevel, const
     printf("[C][libdc:%s] %s:%d %s(): %s\n", level, file, line, function, message);
 }
 
-dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_t family, unsigned int model) {
-    dc_status_t rc;
-    dc_descriptor_t *descriptor = NULL;
-
-    if (!data || !devaddr) {
-        return DC_STATUS_INVALIDARGS;
-    }
-
-    // Initialize all pointers to NULL
-    memset(data, 0, sizeof(device_data_t));
-
-    // Create context
-    rc = dc_context_new(&data->context);
-    if (rc != DC_STATUS_SUCCESS) {
-        printf("Failed to create context, rc=%d\n", rc);
-        return rc;
-    }
-    dc_context_set_logfunc(data->context, dc_log_callback, NULL);
+static void configure_context_logging(dc_context_t *context) {
+    dc_context_set_logfunc(context, dc_log_callback, NULL);
     // Default level is WARNING, which drops the DEBUG hexdumps (e.g. the
     // Suunto Nautic handshake/protocol frames). Enable debug logging with
     // set_ble_debug_logging(1) to surface them when diagnosing a device.
-    dc_context_set_loglevel(data->context,
+    dc_context_set_loglevel(context,
         g_ble_debug_logging ? DC_LOGLEVEL_DEBUG : DC_LOGLEVEL_WARNING);
+}
 
-    // Get descriptor for the device
-    rc = find_descriptor_by_model(&descriptor, family, model);
-    if (rc != DC_STATUS_SUCCESS) {
-        printf("Failed to find descriptor, rc=%d\n", rc);
-        close_device_data(data);
-        return rc;
-    }
-
-    // Create BLE iostream
-    rc = ble_packet_open(&data->iostream, data->context, devaddr, data);
-    if (rc != DC_STATUS_SUCCESS) {
-        printf("Failed to open BLE connection, rc=%d\n", rc);
-        dc_descriptor_free(descriptor);
-        close_device_data(data);
-        return rc;
-    }
+/*--------------------------------------------------------------------
+ * Opens the device on data->iostream; releases everything on failure
+ *------------------------------------------------------------------*/
+static dc_status_t open_device_with_descriptor(device_data_t *data, dc_descriptor_t *descriptor,
+    unsigned int attempts, unsigned int retry_ms) {
+    dc_status_t rc = DC_STATUS_INVALIDARGS;
 
     // Retry dc_device_open on the same BLE link. Some devices (notably
     // Aqualung i300C and other Pelagic OEMs) ignore protocol commands for
@@ -394,12 +369,13 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     // the answer"). Retrying on the same link gives the device's Bluetooth
     // module time to initialize without the expensive (and fragile)
     // disconnect + reconnect cycle that leaves CoreBluetooth in a bad state.
-    #define MAX_PROTOCOL_RETRIES 5
-    for (int attempt = 1; attempt <= MAX_PROTOCOL_RETRIES; attempt++) {
+    for (unsigned int attempt = 1; attempt <= attempts; attempt++) {
         if (attempt > 1) {
-            printf("[PROTOCOL RETRY] dc_device_open attempt %d/%d, waiting 3s...\n",
-                   attempt, MAX_PROTOCOL_RETRIES);
-            usleep(3000000);
+            printf("[PROTOCOL RETRY] dc_device_open attempt %u/%u, waiting %gs...\n",
+                   attempt, attempts, retry_ms / 1000.0);
+            if (retry_ms > 0) {
+                usleep((useconds_t)retry_ms * 1000);
+            }
         }
         rc = dc_device_open(&data->device, data->context, descriptor, data->iostream);
         if (rc == DC_STATUS_SUCCESS) {
@@ -408,7 +384,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         data->device = NULL;
     }
     if (rc != DC_STATUS_SUCCESS) {
-        printf("Failed to open device after %d attempts, rc=%d\n", MAX_PROTOCOL_RETRIES, rc);
+        printf("Failed to open device after %u attempts, rc=%d\n", attempts, rc);
         dc_descriptor_free(descriptor);
         close_device_data(data);
         return rc;
@@ -416,7 +392,6 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
 
     // Set up event handler
     unsigned int events = DC_EVENT_DEVINFO | DC_EVENT_PROGRESS | DC_EVENT_CLOCK;
-    // Updated to use the renamed callback function
     rc = dc_device_set_events(data->device, events, ble_device_event_cb, data);
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to set event handler, rc=%d\n", rc);
@@ -444,6 +419,87 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
     }
 
     return DC_STATUS_SUCCESS;
+}
+
+dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream,
+    dc_family_t family, unsigned int model, unsigned int attempts, unsigned int retry_ms) {
+    dc_status_t rc;
+    dc_descriptor_t *descriptor = NULL;
+
+    if (!data) {
+        if (iostream) {
+            dc_iostream_close(iostream);
+        }
+        return DC_STATUS_INVALIDARGS;
+    }
+
+    dc_context_t *context = data->context;
+    memset(data, 0, sizeof(device_data_t));
+    data->context = context;
+    data->iostream = iostream;
+
+    if (!context || !iostream || attempts == 0) {
+        close_device_data(data);
+        return DC_STATUS_INVALIDARGS;
+    }
+
+    configure_context_logging(context);
+
+    rc = find_descriptor_by_model(&descriptor, family, model);
+    if (rc != DC_STATUS_SUCCESS) {
+        printf("Failed to find descriptor, rc=%d\n", rc);
+        close_device_data(data);
+        return rc;
+    }
+
+    return open_device_with_descriptor(data, descriptor, attempts, retry_ms);
+}
+
+dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_t family, unsigned int model) {
+    dc_status_t rc;
+    dc_descriptor_t *descriptor = NULL;
+
+    if (!data || !devaddr) {
+        return DC_STATUS_INVALIDARGS;
+    }
+
+    // Initialize all pointers to NULL
+    memset(data, 0, sizeof(device_data_t));
+
+    // Create context
+    rc = dc_context_new(&data->context);
+    if (rc != DC_STATUS_SUCCESS) {
+        printf("Failed to create context, rc=%d\n", rc);
+        return rc;
+    }
+    configure_context_logging(data->context);
+
+    // Resolved before connecting so an unknown model never brings up a BLE link.
+    rc = find_descriptor_by_model(&descriptor, family, model);
+    if (rc != DC_STATUS_SUCCESS) {
+        printf("Failed to find descriptor, rc=%d\n", rc);
+        close_device_data(data);
+        return rc;
+    }
+
+    // Create BLE iostream
+    rc = ble_packet_open(&data->iostream, data->context, devaddr, data);
+    if (rc != DC_STATUS_SUCCESS) {
+        printf("Failed to open BLE connection, rc=%d\n", rc);
+        dc_descriptor_free(descriptor);
+        close_device_data(data);
+        return rc;
+    }
+
+    return open_device_with_descriptor(data, descriptor,
+        LIBDC_BLE_OPEN_ATTEMPTS, LIBDC_BLE_OPEN_RETRY_MS);
+}
+
+dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata) {
+    if (!data || !data->device) {
+        return DC_STATUS_INVALIDARGS;
+    }
+    return dc_device_set_cancel(data->device, callback, userdata);
 }
 
 /*--------------------------------------------------------------------
@@ -592,7 +648,66 @@ static const struct name_pattern name_patterns[] = {
     { "RATIO-", "Ratio", "iX3M 2021 GPS Easy", MATCH_EXACT }
 };
 
-dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name) {
+static dc_status_t find_descriptor_by_filter(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport) {
+    dc_iterator_t *iterator = NULL;
+    dc_descriptor_t *descriptor = NULL;
+    dc_status_t rc;
+
+    rc = dc_descriptor_iterator(&iterator);
+    if (rc != DC_STATUS_SUCCESS) {
+        return rc;
+    }
+
+    while ((rc = dc_iterator_next(iterator, &descriptor)) == DC_STATUS_SUCCESS) {
+        unsigned int transports = dc_descriptor_get_transports(descriptor);
+        
+        if ((transports & transport) &&
+            dc_descriptor_filter(descriptor, transport, name)) {
+            *out_descriptor = descriptor;
+            dc_iterator_free(iterator);
+            return DC_STATUS_SUCCESS;
+        }
+        dc_descriptor_free(descriptor);
+    }
+
+    dc_iterator_free(iterator);
+    return DC_STATUS_UNSUPPORTED;
+}
+
+static dc_status_t find_descriptor_by_vendor_product(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport) {
+    dc_iterator_t *iterator = NULL;
+    dc_descriptor_t *descriptor = NULL;
+    dc_status_t rc;
+
+    rc = dc_descriptor_iterator(&iterator);
+    if (rc != DC_STATUS_SUCCESS) {
+        return rc;
+    }
+
+    while ((rc = dc_iterator_next(iterator, &descriptor)) == DC_STATUS_SUCCESS) {
+        const char *vendor = dc_descriptor_get_vendor(descriptor);
+        const char *product = dc_descriptor_get_product(descriptor);
+        size_t vendor_len = vendor ? strlen(vendor) : 0;
+
+        if ((dc_descriptor_get_transports(descriptor) & transport) &&
+            vendor && product &&
+            strncmp(name, vendor, vendor_len) == 0 &&
+            name[vendor_len] == ' ' &&
+            strcmp(name + vendor_len + 1, product) == 0) {
+            *out_descriptor = descriptor;
+            dc_iterator_free(iterator);
+            return DC_STATUS_SUCCESS;
+        }
+        dc_descriptor_free(descriptor);
+    }
+
+    dc_iterator_free(iterator);
+    return DC_STATUS_UNSUPPORTED;
+}
+
+static dc_status_t find_ble_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name) {
     dc_iterator_t *iterator = NULL;
     dc_descriptor_t *descriptor = NULL;
     dc_status_t rc;
@@ -640,25 +755,39 @@ dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char
     }
 
     // Fall back to filter-based matching if no pattern match found
-    rc = dc_descriptor_iterator(&iterator);
-    if (rc != DC_STATUS_SUCCESS) {
-        return rc;
+    return find_descriptor_by_filter(out_descriptor, name, DC_TRANSPORT_BLE);
+}
+
+dc_status_t find_descriptor_by_name_transport(dc_descriptor_t **out_descriptor,
+    const char *name, dc_transport_t transport) {
+    dc_status_t rc;
+
+    if (!out_descriptor || !name) {
+        return DC_STATUS_INVALIDARGS;
     }
 
-    while ((rc = dc_iterator_next(iterator, &descriptor)) == DC_STATUS_SUCCESS) {
-        unsigned int transports = dc_descriptor_get_transports(descriptor);
-        
-        if ((transports & DC_TRANSPORT_BLE) &&
-            dc_descriptor_filter(descriptor, DC_TRANSPORT_BLE, name)) {
-            *out_descriptor = descriptor;
-            dc_iterator_free(iterator);
-            return DC_STATUS_SUCCESS;
+    switch (transport) {
+    case DC_TRANSPORT_BLE:
+        return find_ble_descriptor_by_name(out_descriptor, name);
+    case DC_TRANSPORT_BLUETOOTH:
+    case DC_TRANSPORT_IRDA:
+        rc = find_descriptor_by_vendor_product(out_descriptor, name, transport);
+        if (rc == DC_STATUS_SUCCESS) {
+            return rc;
         }
-        dc_descriptor_free(descriptor);
+        return find_descriptor_by_filter(out_descriptor, name, transport);
+    // These transports' filters read a VID/PID struct or match everything, never a name.
+    case DC_TRANSPORT_SERIAL:
+    case DC_TRANSPORT_USB:
+    case DC_TRANSPORT_USBHID:
+        return find_descriptor_by_vendor_product(out_descriptor, name, transport);
+    default:
+        return DC_STATUS_INVALIDARGS;
     }
+}
 
-    dc_iterator_free(iterator);
-    return DC_STATUS_UNSUPPORTED;
+dc_status_t find_descriptor_by_name(dc_descriptor_t **out_descriptor, const char *name) {
+    return find_descriptor_by_name_transport(out_descriptor, name, DC_TRANSPORT_BLE);
 }
 
 /*--------------------------------------------------------------------
