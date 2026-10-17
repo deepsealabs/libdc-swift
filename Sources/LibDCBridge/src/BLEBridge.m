@@ -4,6 +4,38 @@
 
 static id<CoreBluetoothManagerProtocol> bleManager = nil;
 
+static bool ble_io_cancelled(id<CoreBluetoothManagerProtocol> manager) {
+    return [manager respondsToSelector:@selector(isIOCancelled)] && [manager isIOCancelled];
+}
+
+dc_status_t ble_read_status(bool cancelled, size_t length, bool ready) {
+    if (cancelled) {
+        return DC_STATUS_CANCELLED;
+    }
+    if (length > 0) {
+        return DC_STATUS_SUCCESS;
+    }
+    return ready ? DC_STATUS_TIMEOUT : DC_STATUS_IO;
+}
+
+dc_status_t ble_write_status(bool cancelled, long result) {
+    if (cancelled) {
+        return DC_STATUS_CANCELLED;
+    }
+    switch (result) {
+        case 0:
+            return DC_STATUS_SUCCESS;
+        case 1:
+            // Transient -- CoreBluetooth wasn't ready to accept the write in
+            // time (already retried a few times internally; see writeData:).
+            // DC_STATUS_TIMEOUT (vs DC_STATUS_IO) reports this as recoverable
+            // rather than a broken connection.
+            return DC_STATUS_TIMEOUT;
+        default:
+            return DC_STATUS_IO;
+    }
+}
+
 void initializeBLEManager(void) {
     Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
     bleManager = [CoreBluetoothManagerClass shared];
@@ -159,8 +191,21 @@ dc_status_t ble_ioctl(ble_object_t *io, unsigned int request, void *data, size_t
 }
 
 dc_status_t ble_sleep(ble_object_t *io, unsigned int milliseconds) {
-    [NSThread sleepForTimeInterval:milliseconds / 1000.0];
-    return DC_STATUS_SUCCESS;
+    Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
+    id<CoreBluetoothManagerProtocol> manager = [CoreBluetoothManagerClass shared];
+
+    // Short steps, so a close mid-download doesn't wait out a driver's retry back-off.
+    NSDate *end = [NSDate dateWithTimeIntervalSinceNow:milliseconds / 1000.0];
+    for (;;) {
+        if (ble_io_cancelled(manager)) {
+            return DC_STATUS_CANCELLED;
+        }
+        NSTimeInterval left = [end timeIntervalSinceNow];
+        if (left <= 0) {
+            return DC_STATUS_SUCCESS;
+        }
+        [NSThread sleepForTimeInterval:MIN(left, 0.05)];
+    }
 }
 
 dc_status_t ble_read(ble_object_t *io, void *buffer, size_t requested, size_t *actual)
@@ -174,22 +219,22 @@ dc_status_t ble_read(ble_object_t *io, void *buffer, size_t requested, size_t *a
 
     // Return one BLE packet at a time to preserve packet boundaries for SLIP framing
     NSData *partialData = [manager readDataPartial:(int)requested];
+    size_t length = partialData ? partialData.length : 0;
 
-    if (!partialData || partialData.length == 0) {
+    // No notification arrived within the read window. Under background BLE
+    // conditions iOS lengthens the connection interval, so this is routinely
+    // just "not yet" rather than a broken link -- confirm via the peripheral's
+    // ready state before deciding. A real drop fires didDisconnectPeripheral
+    // separately; this only distinguishes "still connected, still waiting"
+    // (recoverable) from "no longer connected" (fatal), mirroring ble_write.
+    bool ready = length == 0 && [manager getPeripheralReadyState];
+    dc_status_t rc = ble_read_status(ble_io_cancelled(manager), length, ready);
+    if (rc != DC_STATUS_SUCCESS) {
         *actual = 0;
-        // No notification arrived within the read window. Under background BLE
-        // conditions iOS lengthens the connection interval, so this is routinely
-        // just "not yet" rather than a broken link -- confirm via the peripheral's
-        // ready state before deciding. A real drop fires didDisconnectPeripheral
-        // separately; this only distinguishes "still connected, still waiting"
-        // (recoverable) from "no longer connected" (fatal), mirroring ble_write.
-        if ([manager getPeripheralReadyState]) {
-            return DC_STATUS_TIMEOUT;
-        }
-        return DC_STATUS_IO;
+        return rc;
     }
-    memcpy(buffer, partialData.bytes, partialData.length);
-    *actual = partialData.length;
+    memcpy(buffer, partialData.bytes, length);
+    *actual = length;
     return DC_STATUS_SUCCESS;
 }
 
@@ -199,21 +244,9 @@ dc_status_t ble_write(ble_object_t *io, const void *data, size_t size, size_t *a
     NSData *nsData = [NSData dataWithBytes:data length:size];
 
     NSInteger result = [manager writeData:nsData];
-    switch (result) {
-        case 0:
-            *actual = size;
-            return DC_STATUS_SUCCESS;
-        case 1:
-            // Transient -- CoreBluetooth wasn't ready to accept the write in
-            // time (already retried a few times internally; see writeData:).
-            // DC_STATUS_TIMEOUT (vs DC_STATUS_IO) reports this as recoverable
-            // rather than a broken connection.
-            *actual = 0;
-            return DC_STATUS_TIMEOUT;
-        default:
-            *actual = 0;
-            return DC_STATUS_IO;
-    }
+    dc_status_t rc = ble_write_status(ble_io_cancelled(manager), (long)result);
+    *actual = rc == DC_STATUS_SUCCESS ? size : 0;
+    return rc;
 }
 
 dc_status_t ble_close(ble_object_t *io) {

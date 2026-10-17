@@ -56,6 +56,11 @@ dc_status_t ble_read(ble_object_t *io, void *data, size_t size, size_t *actual);
 dc_status_t ble_write(ble_object_t *io, const void *data, size_t size, size_t *actual);
 dc_status_t ble_close(ble_object_t *io);
 
+// The status ble_read reports for `length` bytes read; `ready` is the peripheral's ready state.
+dc_status_t ble_read_status(bool cancelled, size_t length, bool ready);
+// The status ble_write reports for a writeData: result (0 sent, 1 timed out, else failed).
+dc_status_t ble_write_status(bool cancelled, long result);
+
 // BLE setup functions
 void initializeBLEManager(void);
 bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress);
