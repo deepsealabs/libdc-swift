@@ -8,6 +8,9 @@ this: every type on this page is `#if os(macOS)`, and the C entry point is `TARG
 A sandboxed app needs the `com.apple.security.device.serial` entitlement to open a port. Finding ports needs
 no entitlement.
 
+Computers that are USB HID devices themselves (Suunto EON Steel family, Scubapro G2 family, Aladin Square) are
+listed by the same discovery and opened by the same `open`; see `MACOS_USB_HID.md`.
+
 ## Finding cables
 
 `IOKitCableDiscovery` lists ports from the IORegistry (`IOSerialBSDClient` services) and follows hot-plug
