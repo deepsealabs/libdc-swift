@@ -4,7 +4,7 @@ import Clibdivecomputer
 
 /// Why a cable session didn't open, or a cable download ended early, in terms a host can show.
 public enum CableError: Error, Equatable {
-    /// No cable opener for this transport (a paired Bluetooth port, for now), or the model isn't reachable over it.
+    /// No cable opener for this transport (a paired Bluetooth port, for now), or the model isn't reachable over it or has no libdivecomputer descriptor; nothing touched the port.
     case unsupportedTransport(DCTransport)
     /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where.
     case driverMissing
