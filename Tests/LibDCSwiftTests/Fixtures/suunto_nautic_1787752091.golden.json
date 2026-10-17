@@ -1,0 +1,56 @@
+{
+  "avgDepth" : 21.238,
+  "divetime" : 1922,
+  "firstProfilePoint" : {
+    "depth" : 0,
+    "eventTypes" : [
+      "gasChange"
+    ],
+    "time" : 0.03
+  },
+  "gasMixes" : [
+
+  ],
+  "lastProfilePoint" : {
+    "depth" : 0,
+    "eventTypes" : [
+
+    ],
+    "time" : 2248.85
+  },
+  "maxDepth" : 33.113,
+  "maxTemperature" : 24.30000000000001,
+  "minTemperature" : 20.850000000000023,
+  "profileCount" : 24531,
+  "tanks" : [
+    {
+      "beginPressure" : 225.57812,
+      "endPressure" : 80.51562,
+      "gasMix" : 4294967295,
+      "volume" : 0
+    }
+  ],
+  "totalEventCount" : 24,
+  "vendorSampleCounts" : [
+    {
+      "count" : 203,
+      "kind" : 1
+    },
+    {
+      "count" : 266,
+      "kind" : 2
+    },
+    {
+      "count" : 22180,
+      "kind" : 3
+    },
+    {
+      "count" : 3793,
+      "kind" : 4
+    },
+    {
+      "count" : 244,
+      "kind" : 5
+    }
+  ]
+}
