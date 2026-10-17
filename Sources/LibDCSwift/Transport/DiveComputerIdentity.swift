@@ -68,6 +68,17 @@ extension DiveComputerIdentity {
         self.init(family: family, model: model, serialNumber: data.devinfo.serial, firmware: data.devinfo.firmware,
                   transport: transport)
     }
+
+    /// Families whose drivers never send DEVINFO, so they have no serial and the C fingerprint lookup never runs.
+    static let familiesWithoutDevinfo: Set<DeviceConfiguration.DeviceFamily> = [.zeagleN2ition3, .citizenAqualand]
+
+    /// The opened descriptor's identity, with no serial, for a family in `familiesWithoutDevinfo`; nil for any other.
+    init?(descriptorOf devicePtr: UnsafeMutablePointer<device_data_t>, transport: DCTransport) {
+        guard let descriptor = devicePtr.pointee.descriptor,
+              let family = DeviceConfiguration.DeviceFamily(dcFamily: dc_descriptor_get_type(descriptor)),
+              Self.familiesWithoutDevinfo.contains(family) else { return nil }
+        self.init(family: family, model: dc_descriptor_get_model(descriptor), serial: nil, transport: transport)
+    }
 }
 
 /// Where a computer was reached this time: provenance for records and logs, never identity, since ports, registry IDs and BLE identifiers change.
