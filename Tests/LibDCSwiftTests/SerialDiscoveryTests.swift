@@ -296,7 +296,7 @@ final class SerialDiscoveryTests: XCTestCase {
 
     /// Both are lock-protected; the test hands them to concurrentPerform.
     private struct Racers: @unchecked Sendable {
-        let claims: SerialPortClaims
+        let claims: EndpointClaims
         let feed: CableEndpointFeed
     }
 
@@ -335,7 +335,7 @@ final class SerialDiscoveryTests: XCTestCase {
     }
 
     func testClaimedPortsShowBusyInEveryDiscovery() throws {
-        let claims = SerialPortClaims()
+        let claims = EndpointClaims()
         let feedA = CableEndpointFeed(claims: claims)
         let feedB = CableEndpointFeed(claims: claims)
         let endpoint = CableEndpoint.serialPort(path: "/dev/cu.usbserial-A", vendorID: 0x0403, productID: 0x6001)
@@ -355,7 +355,7 @@ final class SerialDiscoveryTests: XCTestCase {
     }
 
     func testConcurrentRepublishesEndOnTheLatestState() async throws {
-        let claims = SerialPortClaims()
+        let claims = EndpointClaims()
         let feed = CableEndpointFeed(claims: claims)
         let endpoint = CableEndpoint.serialPort(path: "/dev/cu.usbserial-A", vendorID: 0x0403, productID: 0x6001)
         let path = try XCTUnwrap(endpoint.calloutPath)
