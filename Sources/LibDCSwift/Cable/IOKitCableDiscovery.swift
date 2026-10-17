@@ -109,7 +109,7 @@ public final class IOKitCableDiscovery: CableDiscovering {
     }
 }
 
-/// The live IORegistry. Reads use IORegistryEntryCreateCFProperty and IORegistryEntrySearchCFProperty only, never IORegistryEntryGetProperty.
+/// The live IORegistry. Reads use IORegistryEntryCreateCFProperty on the entry itself, never a search up the tree or IORegistryEntryGetProperty.
 public final class IOKitRegistrySource: RegistrySource {
     private final class Subscription {
         let change: RegistryChange
@@ -218,7 +218,7 @@ public final class IOKitRegistrySource: RegistrySource {
 
     // MARK: - Registry reads
 
-    // Walks providers rather than trusting an inherited idVendor: on Intel Macs the Bluetooth controller is itself a USB device.
+    // Walks providers, then reads only that device's entry: on Intel Macs the Bluetooth controller is a USB device, and a search would give a CH340 its hub's serial.
     private static func parent(of service: io_service_t) -> RegistrySnapshot.Port.Parent {
         var entry = service
         IOObjectRetain(entry)
@@ -229,11 +229,11 @@ public final class IOKitRegistrySource: RegistrySource {
             IOObjectRelease(entry)
             entry = next
             if usbDeviceClasses.contains(where: { IOObjectConformsTo(entry, $0) != 0 }) {
-                guard let vid = searchNumber(service, vendorIDKey), let pid = searchNumber(service, productIDKey) else { return .none }
+                guard let vid = number(entry, vendorIDKey), let pid = number(entry, productIDKey) else { return .none }
                 return .usb(RegistrySnapshot.USBDevice(
                     registryID: registryID(entry), vendorID: vid, productID: pid,
-                    serialNumber: serialNumberKeys.lazy.compactMap { searchString(service, $0) }.first,
-                    productName: productNameKeys.lazy.compactMap { searchString(service, $0) }.first))
+                    serialNumber: serialNumberKeys.lazy.compactMap { string(entry, $0) }.first,
+                    productName: productNameKeys.lazy.compactMap { string(entry, $0) }.first))
             }
             if className(entry).contains("Bluetooth") || name(entry).contains("Bluetooth") {
                 return .bluetooth
@@ -246,25 +246,12 @@ public final class IOKitRegistrySource: RegistrySource {
         IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue()
     }
 
-    private static func search(_ entry: io_registry_entry_t, _ key: String) -> CFTypeRef? {
-        IORegistryEntrySearchCFProperty(entry, kIOServicePlane, key as CFString, kCFAllocatorDefault,
-                                        IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents))
-    }
-
     private static func string(_ entry: io_registry_entry_t, _ key: String) -> String? {
         property(entry, key) as? String
     }
 
     private static func number(_ entry: io_registry_entry_t, _ key: String) -> UInt16? {
         (property(entry, key) as? NSNumber).map { UInt16(truncatingIfNeeded: $0.intValue) }
-    }
-
-    private static func searchString(_ entry: io_registry_entry_t, _ key: String) -> String? {
-        search(entry, key) as? String
-    }
-
-    private static func searchNumber(_ entry: io_registry_entry_t, _ key: String) -> UInt16? {
-        (search(entry, key) as? NSNumber).map { UInt16(truncatingIfNeeded: $0.intValue) }
     }
 
     private static func registryID(_ entry: io_registry_entry_t) -> UInt64 {
