@@ -280,7 +280,7 @@ public class DiveLogRetriever {
         do {
             if context.policy == .session {
                 guard let target = context.sessionParseTarget() else {
-                    logError("❌ Unknown device configuration for dive #\(context.logCount)")
+                    logError("Unknown device configuration for dive #\(context.logCount)")
                     context.parseFailureCount += 1
                     return 1
                 }
@@ -484,7 +484,7 @@ public class DiveLogRetriever {
                 }
             }
             guard session.beginDownload() else {
-                logWarning("⚠️ Session for \(session.displayName) is closed or already downloading")
+                logWarning("Session for \(session.displayName) is closed or already downloading")
                 return endEarly(.failed(DC_STATUS_INVALIDARGS), status: DC_STATUS_INVALIDARGS)
             }
             guard !session.isCancelled else {
@@ -781,27 +781,27 @@ public class DiveLogRetriever {
 
         switch outcome {
         case .completed:
-            logInfo("✅ Download completed - \(divesDownloaded) dive(s) downloaded\(commit == nil ? "" : "; fingerprint awaits acknowledgement")")
+            logInfo("Download completed - \(divesDownloaded) dive(s) downloaded\(commit == nil ? "" : "; fingerprint awaits acknowledgement")")
             viewModel.lastDownloadStatus = "success"
             viewModel.updateProgress(.completed)
         case .noNewDives:
-            logInfo("ℹ️ No new dives found")
+            logInfo("No new dives found")
             viewModel.lastDownloadStatus = "success"
             viewModel.updateProgress(.noNewDives)
         case .cancelled:
-            logInfo("🛑 Download cancelled after \(divesDownloaded) dive(s); fingerprint kept")
+            logInfo("Download cancelled after \(divesDownloaded) dive(s); fingerprint kept")
             viewModel.lastDownloadStatus = "cancelled"
             viewModel.updateProgress(.cancelled)
         case .emptyRead:
-            logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
+            logWarning("Download returned only empty reads (\(context.emptyReadCount)), likely BLE contention (official app holding the link)")
             viewModel.lastDownloadStatus = "emptyRead"
             viewModel.updateProgress(.emptyRead)
         case .unreadableDives(let count):
-            logWarning("⚠️ \(count) dive(s) couldn't be parsed; fingerprint kept")
+            logWarning("\(count) dive(s) couldn't be parsed; fingerprint kept")
             viewModel.lastDownloadStatus = "unreadableDives"
             viewModel.setError(unreadableDivesMessage(unreadable: count, downloaded: divesDownloaded))
         case .interrupted(let status):
-            logWarning("⚠️ Download interrupted after \(divesDownloaded) dive(s): DC_STATUS_\(statusName(status)); fingerprint kept")
+            logWarning("Download interrupted after \(divesDownloaded) dive(s): DC_STATUS_\(statusName(status)); fingerprint kept")
             viewModel.lastDownloadStatus = statusName(status)
             viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: status)
         case .failed(let status):

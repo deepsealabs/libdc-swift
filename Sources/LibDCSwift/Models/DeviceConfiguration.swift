@@ -455,7 +455,7 @@ import LibDCBridge
         func storable(_ family: DeviceFamily) -> Bool {
             guard requireKnownModel else { return true }
             guard actualModel != 0, hasDescriptor(family: family.asDCFamily, model: actualModel) else {
-                logWarning("⚠️ Hardware reports model \(actualModel) for \(deviceName), which no descriptor knows; keeping the stored model")
+                logWarning("Hardware reports model \(actualModel) for \(deviceName), which no descriptor knows; keeping the stored model")
                 return false
             }
             return true
