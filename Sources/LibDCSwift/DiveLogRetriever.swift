@@ -799,7 +799,7 @@ public class DiveLogRetriever {
         case .unreadableDives(let count):
             logWarning("⚠️ \(count) dive(s) couldn't be parsed; fingerprint kept")
             viewModel.lastDownloadStatus = "unreadableDives"
-            viewModel.setError("\(count) dive(s) couldn't be read. The other \(divesDownloaded) were downloaded.")
+            viewModel.setError(unreadableDivesMessage(unreadable: count, downloaded: divesDownloaded))
         case .interrupted(let status):
             logWarning("⚠️ Download interrupted after \(divesDownloaded) dive(s): DC_STATUS_\(statusName(status)); fingerprint kept")
             viewModel.lastDownloadStatus = statusName(status)
@@ -811,6 +811,13 @@ public class DiveLogRetriever {
 
         return DiveDownloadResult(outcome: outcome, status: enumStatus, divesDownloaded: divesDownloaded,
                                   parseFailureCount: context.parseFailureCount, fingerprintCommit: commit)
+    }
+
+    static func unreadableDivesMessage(unreadable: Int, downloaded: Int) -> String {
+        func dives(_ n: Int) -> String { n == 1 ? "1 dive" : "\(n) dives" }
+        let failed = "\(dives(unreadable)) couldn't be read."
+        guard downloaded > 0 else { return failed }
+        return failed + " \(downloaded) other \(downloaded == 1 ? "dive was" : "dives were") downloaded."
     }
 
     /// Legacy contract, kept for existing callers: saves the fingerprint itself, even past an unparsed dive; prefer `retrieveDiveLogs(session:)`.
