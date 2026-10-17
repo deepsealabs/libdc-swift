@@ -237,22 +237,24 @@ extension XCTestCase {
         return defaults
     }
 
-    /// The async open, waited for here, with isolated storage and its own lease unless given one; `hidDevice` stands in for IOKit's.
+    /// The async open, waited for here, with isolated storage and its own lease unless given one; `hidDevice` and `usbDevice` stand in for IOKit's.
     func openCable(_ endpoint: CableEndpoint, model: DCModel, discovery: CableDiscovering? = nil,
                    recorder: DCStreamRecorder? = nil, lease: DiveComputerSessionLease = DiveComputerSessionLease(),
                    deviceStorage: DeviceStorage? = nil, hidDevice: HIDDeviceFactory? = nil,
-                   timeout: TimeInterval = 10) throws -> DiveComputerSession {
+                   usbDevice: USBDeviceFactory? = nil, timeout: TimeInterval = 10) throws -> DiveComputerSession {
         let box = OpenBox()
         let request = CableOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
                                        deviceStorage: deviceStorage ?? DeviceStorage(userDefaults: isolatedDefaults("dev")),
                                        lease: lease, cancellation: CableOpenCancellation(),
-                                       hidDevice: hidDevice ?? IOKitHIDDevice.make)
+                                       hidDevice: hidDevice ?? IOKitHIDDevice.make,
+                                       usbDevice: usbDevice ?? IOKitUSBDevice.make)
         let done = DispatchSemaphore(value: 0)
         Task.detached {
             do {
                 box.result = .success(try await DiveComputerSession.open(
                     request.endpoint, model: request.model, discovery: request.discovery, recorder: request.recorder,
-                    deviceStorage: request.deviceStorage, lease: request.lease, hidDevice: request.hidDevice))
+                    deviceStorage: request.deviceStorage, lease: request.lease, hidDevice: request.hidDevice,
+                    usbDevice: request.usbDevice))
             } catch {
                 box.result = .failure(error)
             }
@@ -276,10 +278,10 @@ extension XCTestCase {
 
     /// The `CableError` an open throws, failing the test if it opens or throws something else.
     func cableOpenError(_ endpoint: CableEndpoint, model: DCModel, lease: DiveComputerSessionLease = DiveComputerSessionLease(),
-                        hidDevice: HIDDeviceFactory? = nil,
+                        hidDevice: HIDDeviceFactory? = nil, usbDevice: USBDeviceFactory? = nil,
                         file: StaticString = #filePath, line: UInt = #line) -> CableError? {
         do {
-            _ = try openCable(endpoint, model: model, lease: lease, hidDevice: hidDevice)
+            _ = try openCable(endpoint, model: model, lease: lease, hidDevice: hidDevice, usbDevice: usbDevice)
             XCTFail("the open succeeded", file: file, line: line)
             return nil
         } catch let error as CableError {
@@ -297,9 +299,12 @@ extension XCTestCase {
         XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
         let script = ScriptedStream(recording: recording)
         let stream = try DCCustomStream.open(backend: script, transport: script.transport, context: context)
-        let locator: DiveComputerLocator = recording.transport == DC_TRANSPORT_USBHID
-            ? .usbHID(vid: 0x1493, pid: 0x0030, registryID: 0x1)
-            : .serial(path: "/dev/cu.usbserial-REPLAY", usbSerial: nil, vid: 0x0403, pid: 0x6001)
+        let locator: DiveComputerLocator
+        switch recording.transport {
+        case DC_TRANSPORT_USBHID: locator = .usbHID(vid: 0x1493, pid: 0x0030, registryID: 0x1)
+        case DC_TRANSPORT_USB: locator = .usb(vid: 0x0471, pid: 0x0888, registryID: 0x1)
+        default: locator = .serial(path: "/dev/cu.usbserial-REPLAY", usbSerial: nil, vid: 0x0403, pid: 0x6001)
+        }
         let session = try DiveComputerSession.open(
             iostream: stream, context: try XCTUnwrap(context), family: try XCTUnwrap(recording.family),
             model: try XCTUnwrap(recording.model), displayName: displayName,
