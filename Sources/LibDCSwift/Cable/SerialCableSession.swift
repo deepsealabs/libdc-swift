@@ -7,7 +7,7 @@ extension DiveComputerSession {
     /// Where cable opens block: libdivecomputer's open talks to the computer, for up to the driver's timeout.
     static let cableQueue = DispatchQueue(label: "com.libdcswift.cable")
 
-    /// Opens `model` on a serial or USB HID endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
+    /// Opens `model` on a serial, USB HID or raw USB endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
     public static func open(
         _ endpoint: CableEndpoint,
         model: DCModel,
@@ -17,10 +17,10 @@ extension DiveComputerSession {
         lease: DiveComputerSessionLease = .shared
     ) async throws -> DiveComputerSession {
         try await open(endpoint, model: model, discovery: discovery, recorder: recorder, deviceStorage: deviceStorage,
-                       lease: lease, hidDevice: IOKitHIDDevice.make)
+                       lease: lease, hidDevice: IOKitHIDDevice.make, usbDevice: IOKitUSBDevice.make)
     }
 
-    /// `hidDevice` makes the IOHIDDevice a USB HID endpoint names; tests pass fakes.
+    /// `hidDevice` makes the IOHIDDevice a USB HID endpoint names, and `usbDevice` opens a raw USB endpoint's interface; tests pass fakes.
     static func open(
         _ endpoint: CableEndpoint,
         model: DCModel,
@@ -28,12 +28,13 @@ extension DiveComputerSession {
         recorder: DCStreamRecorder?,
         deviceStorage: DeviceStorage,
         lease: DiveComputerSessionLease,
-        hidDevice: @escaping HIDDeviceFactory
+        hidDevice: @escaping HIDDeviceFactory,
+        usbDevice: @escaping USBDeviceFactory = IOKitUSBDevice.make
     ) async throws -> DiveComputerSession {
         let cancellation = CableOpenCancellation()
         let request = CableOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
                                        deviceStorage: deviceStorage, lease: lease, cancellation: cancellation,
-                                       hidDevice: hidDevice)
+                                       hidDevice: hidDevice, usbDevice: usbDevice)
         let session = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<DiveComputerSession, Error>) in
                 cableQueue.async {
@@ -52,6 +53,10 @@ extension DiveComputerSession {
             return try openHID(request.endpoint, model: request.model, discovery: request.discovery, recorder: request.recorder,
                                deviceStorage: request.deviceStorage, lease: request.lease,
                                cancellation: request.cancellation, makeDevice: request.hidDevice)
+        case .usb:
+            return try openUSB(request.endpoint, model: request.model, discovery: request.discovery, recorder: request.recorder,
+                               deviceStorage: request.deviceStorage, lease: request.lease,
+                               cancellation: request.cancellation, makeDevice: request.usbDevice)
         default:
             return try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
                                   recorder: request.recorder, deviceStorage: request.deviceStorage,
@@ -141,6 +146,7 @@ struct CableOpenRequest: @unchecked Sendable {
     let lease: DiveComputerSessionLease
     let cancellation: CableOpenCancellation
     var hidDevice: HIDDeviceFactory = IOKitHIDDevice.make
+    var usbDevice: USBDeviceFactory = IOKitUSBDevice.make
 }
 
 /// Set from the opening task's cancellation handler, read on the cable queue.

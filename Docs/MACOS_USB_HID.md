@@ -21,7 +21,8 @@ no entitlement. Downloads never ask for Input Monitoring (see below).
 | 2e6c:4201 | Scubapro G2 HUD | |
 | c251:2006 | Scubapro Aladin Square | USB HID only |
 
-The Scubapro G3 has no PID in libdivecomputer's table yet, so it isn't listed.
+The Scubapro G3 has no PID in libdivecomputer's table yet, so it isn't listed. The Atomic Aquatics Cobalt is a
+USB device but not a HID one; it has its own page, `MACOS_USB.md`.
 
 ## Finding computers
 

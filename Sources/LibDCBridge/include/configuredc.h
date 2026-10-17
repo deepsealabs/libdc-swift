@@ -229,7 +229,7 @@ void set_ble_debug_logging(int enabled);
 bool libdc_has_custom_baud(void);
 
 /**
- * Cable transports (DC_TRANSPORT_* bits) this platform can reach: SERIAL | USBHID on macOS,
+ * Cable transports (DC_TRANSPORT_* bits) this platform can reach: SERIAL | USBHID | USB on macOS,
  * none on iOS. Use this rather than dc_context_get_transports, which always reports SERIAL.
  */
 unsigned int libdc_cable_transports(void);
