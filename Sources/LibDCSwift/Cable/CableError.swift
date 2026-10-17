@@ -8,13 +8,13 @@ public enum CableError: Error, Equatable {
     case unsupportedTransport(DCTransport)
     /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where.
     case driverMissing
-    /// The app may not open the port (EPERM, EACCES): a sandboxed app without `com.apple.security.device.serial`, say.
+    /// The app may not open the port (EPERM, EACCES) or USB device (kIOReturnNotPermitted): a sandboxed app without `com.apple.security.device.serial` or `device.usb`, say.
     case permissionDenied
-    /// Another app has the port open exclusively (EBUSY), often the computer maker's own app.
+    /// Another app has the port open exclusively (EBUSY), or has seized the USB device (kIOReturnExclusiveAccess), often the computer maker's own app.
     case busy
     /// Another `DiveComputerSession` is open; there is one at a time.
     case sessionInProgress
-    /// The port isn't there (ENOENT, ENXIO, ENODEV): the cable came out before the open.
+    /// The port or USB device isn't there (ENOENT, ENXIO, ENODEV, kIOReturnNoDevice): it came out before the open.
     case notFound
     /// The cable came out while the session was open.
     case unplugged
@@ -23,6 +23,8 @@ public enum CableError: Error, Equatable {
     case cancelled
     /// The port wouldn't open for another reason, with its errno.
     case portError(errno: Int32)
+    /// The USB device wouldn't open for another reason, with its IOReturn.
+    case usbError(ioReturn: Int32)
     /// libdivecomputer failed with this status once the port was open (a protocol or data error, often the wrong model).
     case protocolError(dc_status_t)
 
@@ -90,13 +92,13 @@ public enum CableError: Error, Equatable {
         case .driverMissing:
             return "macOS made no serial port for this cable. Install the driver for its USB-serial chip, then unplug the cable and plug it in again."
         case .permissionDenied:
-            return "This app isn't allowed to open the cable's serial port."
+            return "This app isn't allowed to open the cable's serial port or the dive computer's USB connection."
         case .busy:
-            return "Another app is using the cable. Quit the dive computer maker's app, then try again."
+            return "Another app is using the cable or dive computer. Quit the dive computer maker's app, then try again."
         case .sessionInProgress:
             return "Another dive computer download is in progress."
         case .notFound:
-            return "The cable isn't connected. Plug it in and try again."
+            return "The cable or dive computer isn't connected. Plug it in and try again."
         case .unplugged:
             return "The cable was unplugged during the download."
         case .noResponse(let family):
@@ -106,6 +108,8 @@ public enum CableError: Error, Equatable {
             return "The download was cancelled."
         case .portError(let code):
             return "The cable's serial port couldn't be opened (\(String(cString: strerror(code))))."
+        case .usbError(let code):
+            return "The dive computer's USB connection couldn't be opened (IOReturn " + String(format: "0x%08x", code) + ")."
         case .protocolError(let status):
             return "The dive computer's reply couldn't be read (libdivecomputer status \(status.rawValue)). Check that the model is right."
         }
@@ -144,6 +148,10 @@ extension DeviceCatalog {
             return "Seat the Sensus in its ReefNet interface so the contacts touch."
         case .uwatecAladin, .uwatecMemomouse:
             return "Seat the computer on the Memomouse so its contacts touch the pins."
+        case .suuntoEonSteel:
+            return "Attach the Suunto USB cable so it clicks onto the computer's contacts, then wake the computer."
+        case .uwatecSmart:
+            return "Connect the computer's USB cable, then wake the computer."
         default:
             return "Wake the computer, attach the cable, and start its PC, download or transfer mode if it has one."
         }
