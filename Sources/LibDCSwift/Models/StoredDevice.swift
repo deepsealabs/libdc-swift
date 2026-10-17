@@ -60,12 +60,15 @@ public class StoredDevice: Codable {
 @objc public class DeviceStorage: NSObject {
    public static let shared = DeviceStorage()
    
-   private let defaults = UserDefaults.standard
+   private let defaults: UserDefaults
    private let storageKey = "com.libdc.storedDevices"
-   
+
    private var storedDevices: [StoredDevice] = []
-   
-   private override init() {
+
+   /// `userDefaults` is a test seam (an isolated suite instead of `.standard`,
+   /// so tests don't pollute or race on the real store).
+   init(userDefaults: UserDefaults = .standard) {
+       self.defaults = userDefaults
        super.init()
        loadDevices()
    }

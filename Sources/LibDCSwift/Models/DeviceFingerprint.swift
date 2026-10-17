@@ -23,8 +23,13 @@ public struct DeviceFingerprint: Codable, Identifiable {
 public class DeviceFingerprintStorage {
     public static let shared = DeviceFingerprintStorage()
     private let fingerprintKey = "DeviceFingerprints"
-    
-    private init() {}
+    private let defaults: UserDefaults
+
+    /// `userDefaults` is a test seam (an isolated suite instead of `.standard`,
+    /// so tests don't pollute or race on the real store).
+    init(userDefaults: UserDefaults = .standard) {
+        self.defaults = userDefaults
+    }
     
     /// Normalizes a device type string for consistent comparison
     /// Since we now use stored device configuration, this just does simple case-insensitive matching
@@ -37,7 +42,7 @@ public class DeviceFingerprintStorage {
     /// Loads all stored device fingerprints from persistent storage
     /// - Returns: Array of DeviceFingerprint objects
     public func loadFingerprints() -> [DeviceFingerprint] {
-        guard let data = UserDefaults.standard.data(forKey: fingerprintKey),
+        guard let data = defaults.data(forKey: fingerprintKey),
               let fingerprints = try? JSONDecoder().decode([DeviceFingerprint].self, from: data) else {
             return []
         }
@@ -48,7 +53,7 @@ public class DeviceFingerprintStorage {
     /// - Parameter fingerprints: Array of DeviceFingerprint objects to save
     public func saveFingerprints(_ fingerprints: [DeviceFingerprint]) {
         if let data = try? JSONEncoder().encode(fingerprints) {
-            UserDefaults.standard.set(data, forKey: fingerprintKey)
+            defaults.set(data, forKey: fingerprintKey)
         }
     }
     
@@ -130,7 +135,7 @@ public class DeviceFingerprintStorage {
 
     /// Clears all stored fingerprints
     public func clearAllFingerprints() {
-        UserDefaults.standard.removeObject(forKey: fingerprintKey)
+        defaults.removeObject(forKey: fingerprintKey)
         logInfo("🗑️ Cleared all fingerprints")
     }
 } 
