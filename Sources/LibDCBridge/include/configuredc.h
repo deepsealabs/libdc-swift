@@ -180,6 +180,15 @@ dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream
     dc_family_t family, unsigned int model, unsigned int attempts, unsigned int retry_ms);
 
 /**
+ * Installs (or, with a NULL callback, clears) the cancel check on an open device
+ * @param data: Device data structure with an open device
+ * @param callback: Returns non-zero to cancel; libdivecomputer polls it between transfers
+ * @param userdata: Passed to callback
+ * @return DC_STATUS_SUCCESS on success, DC_STATUS_INVALIDARGS if no device is open
+ */
+dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata);
+
+/**
  * Reopens a device with a different model, reusing the existing BLE connection
  * @param data: Device data structure (must have valid context and iostream)
  * @param family: Device family
@@ -241,6 +250,12 @@ void set_ble_debug_logging(int enabled);
  * True on macOS; false on iOS, where a non-standard rate returns DC_STATUS_UNSUPPORTED.
  */
 bool libdc_has_custom_baud(void);
+
+/**
+ * Cable transports (DC_TRANSPORT_* bits) this platform can reach: SERIAL | USBHID on macOS,
+ * none on iOS. Use this rather than dc_context_get_transports, which always reports SERIAL.
+ */
+unsigned int libdc_cable_transports(void);
 
 #ifdef __cplusplus
 }

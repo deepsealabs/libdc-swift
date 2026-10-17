@@ -495,6 +495,13 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         LIBDC_BLE_OPEN_ATTEMPTS, LIBDC_BLE_OPEN_RETRY_MS);
 }
 
+dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata) {
+    if (!data || !data->device) {
+        return DC_STATUS_INVALIDARGS;
+    }
+    return dc_device_set_cancel(data->device, callback, userdata);
+}
+
 /*--------------------------------------------------------------------
  * Helper function to find a matching device descriptor
  *------------------------------------------------------------------*/
