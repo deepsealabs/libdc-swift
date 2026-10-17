@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Internal: a `DiveLogRetriever.retrieveDiveLogs(from:deviceName:deviceUUID:viewModel:isCancelled:markFinished:deviceStorage:...)` overload exercises the download/fingerprint pipeline without a live `CBPeripheral` or `DeviceStorage.shared`; the public `CBPeripheral` overload forwards to it unchanged
 - Internal: `DeviceStorage` and `DeviceFingerprintStorage` take an injected `UserDefaults` suite (`init(userDefaults:)`, defaulting to `.standard`); `DeviceStorage` also takes an injected fingerprint store so `removeDevice`'s cleanup can be isolated (`init(userDefaults:fingerprints:)`)
 - Golden/characterization tests for the Suunto Nautic/Ocean parser pipeline (per-field aggregates, the full event list, deco-change points and a full-stream hash, not just a coarse summary), storage-key, BLE-name-pattern, and end-to-end retrieval tests against a fake watch, and a GitHub Actions workflow (macOS `swift test`, generic iOS/macOS `xcodebuild`, an iOS Simulator `xcodebuild test`, an iOS no-IOKit-symbols check on `LibDCBridge`, and the DC Tester app build)
+- `open_device_on_iostream` (LibDCBridge): opens a device on an iostream the caller already opened (a serial port, a custom stream) with a chosen number of `dc_device_open` attempts and wait between them. It takes ownership of the context and iostream on every path: on failure both are released and the `device_data_t` is zeroed. `open_ble_device` now opens through the same code with its existing 5 attempts 3 s apart (`LIBDC_BLE_OPEN_ATTEMPTS`, `LIBDC_BLE_OPEN_RETRY_MS`), still resolving the descriptor before it connects
+- `find_descriptor_by_name_transport` (LibDCBridge): descriptor lookup by name for one transport. `DC_TRANSPORT_BLE` is exactly `find_descriptor_by_name`; serial, USB and USB HID match "Vendor Product" (first in table order), and classic Bluetooth and IrDA fall back to libdivecomputer's name filter
+- `libdc_set_cancel` (LibDCBridge): installs or clears the cancel callback on an open `device_data_t`
+- `libdc_cable_transports()` (LibDCBridge): the cable transports this platform can reach, `DC_TRANSPORT_SERIAL | DC_TRANSPORT_USBHID` on macOS and none on iOS (checked at compile time), because `dc_context_get_transports` always reports serial
 
 ### Changed
 - Suunto Nautic/Ocean, following the third round of Jef Driesen's review of libdivecomputer#73: the driver no longer retries a stream or a dive, which replaces the stream and download retries of the second round below. A refused `/Data` stream, a stream that stops before its end marker or has a chunk at an earlier offset, an unanswered GET or SUBSCRIBE of `/Data`, and a dive that doesn't add up to its listed size fail the dive on the first attempt (`DC_STATUS_PROTOCOL` or `DC_STATUS_TIMEOUT`), and `dc_device_foreach` stops at that dive with only the newer dives delivered. Apps must retry a failed dive themselves, on the same link or after a reconnect. Auto download already does (`retriesPerDive`); a caller of `retrieveDiveLogs` or `SuuntoNauticExplorer.download` should offer to sync again
@@ -97,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suunto Nautic/Ocean: tank end pressure is the watch's own at the end of the dive. It was the last reading, which after a dive with the valve shut and the regulator purged on the surface came out at 0.9 bar instead of 121.5 (#52)
 - DC Tester: Download Dives says "No new dives since the last download" instead of "Downloaded 0 dive(s)" when the fingerprint stops it
 - DC Tester: a failed download suggests reconnecting first and only calls a dive gone when `/Logbook/Entries` no longer lists it; Capture raw on a `/Summary` path fetches every page (#56)
+- `find_descriptor_by_name` returns `DC_STATUS_INVALIDARGS` for a NULL name or output pointer instead of crashing
+
+### Removed
+- `configuredc.h`: four prototypes that had no implementation (`get_alternative_models_for_name`, `event_cb`, `reopen_ble_device_with_model`, `get_device_data_pointer`); calling any of them already failed to link
 
 ## [1.7.0] - 2026-07-14
 ### Changed
