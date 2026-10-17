@@ -271,8 +271,9 @@ public final class DiveComputerSession {
 
     /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends.
     /// On macOS an owned cable session's close runs the driver's quit with its sleeps, each read capped at
-    /// `TapStream.closingReadLimitMilliseconds`; reached on the main thread (this call, the end of a download, or the last release)
-    /// it runs on a background queue, so `isClosed` is true at once but the lease stays held until the port is closed.
+    /// `TapStream.closingReadLimitMilliseconds`, and a write to a stalled link (classic Bluetooth out of range) can block;
+    /// reached on the main thread (this call, the end of a download, or the last release) it runs on a background queue,
+    /// so `isClosed` is true at once but the lease stays held until the port is closed.
     public func close() {
         lock.lock()
         guard !closed else { lock.unlock(); return }
