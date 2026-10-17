@@ -4,10 +4,12 @@ import Clibdivecomputer
 
 /// Why a cable session didn't open, or a cable download ended early, in terms a host can show.
 public enum CableError: Error, Equatable {
-    /// No cable opener for this transport (a paired Bluetooth port, for now), or the model isn't reachable over it or has no libdivecomputer descriptor; nothing touched the port.
+    /// No cable opener for this endpoint's transport, or the model isn't reachable over it or has no libdivecomputer descriptor; nothing touched the port.
     case unsupportedTransport(DCTransport)
     /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where.
     case driverMissing
+    /// The paired classic-Bluetooth port exists from an earlier pairing, but the computer isn't connected over Bluetooth now (ENOTCONN): off, out of range, or not in its upload mode.
+    case bluetoothNotConnected
     /// The app may not open the port (EPERM, EACCES) or USB device (kIOReturnNotPermitted): a sandboxed app without `com.apple.security.device.serial` or `device.usb`, say.
     case permissionDenied
     /// Another app has the port open exclusively (EBUSY), or has seized the USB device (kIOReturnExclusiveAccess), often the computer maker's own app.
@@ -34,6 +36,7 @@ public enum CableError: Error, Equatable {
         case EBUSY: self = .busy
         case EPERM, EACCES: self = .permissionDenied
         case ENOENT, ENXIO, ENODEV: self = .notFound
+        case ENOTCONN: self = .bluetoothNotConnected
         default: self = .portError(errno: code)
         }
     }
@@ -91,6 +94,8 @@ public enum CableError: Error, Equatable {
             return "This dive computer can't be downloaded over this connection (\(transport.rawValue))."
         case .driverMissing:
             return "macOS made no serial port for this cable. Install the driver for its USB-serial chip, then unplug the cable and plug it in again."
+        case .bluetoothNotConnected:
+            return "This dive computer isn't connected over Bluetooth. Start Upload Log on it and keep it near the Mac; if it was unpaired, pair it again in System Settings > Bluetooth."
         case .permissionDenied:
             return "This app isn't allowed to open the cable's serial port or the dive computer's USB connection."
         case .busy:
@@ -102,8 +107,14 @@ public enum CableError: Error, Equatable {
         case .unplugged:
             return "The cable was unplugged during the download."
         case .noResponse(let family):
-            return "The dive computer didn't answer. Check that the model is right and the cable is seated. "
-                + DeviceCatalog.cableConnectInstructions(for: family)
+            let checkCable: String
+            switch family {
+            case .shearwaterPredator, .shearwaterPetrel:
+                checkCable = "Check that the model is right. "
+            default:
+                checkCable = "Check that the model is right and the cable is seated. "
+            }
+            return "The dive computer didn't answer. " + checkCable + DeviceCatalog.cableConnectInstructions(for: family)
         case .cancelled:
             return "The download was cancelled."
         case .portError(let code):
@@ -152,6 +163,9 @@ extension DeviceCatalog {
             return "Attach the Suunto USB cable so it clicks onto the computer's contacts, then wake the computer."
         case .uwatecSmart:
             return "Connect the computer's USB cable, then wake the computer."
+        case .shearwaterPredator, .shearwaterPetrel:
+            // No cable: classic Bluetooth only comes up once the computer's own Upload Log starts it.
+            return "On the computer, open Dive Log > Upload Log so it shows Wait PC, keep it near the Mac, then try again. If it still doesn't connect, check it's paired in System Settings > Bluetooth."
         default:
             return "Wake the computer, attach the cable, and start its PC, download or transfer mode if it has one."
         }

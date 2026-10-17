@@ -7,7 +7,7 @@ extension DiveComputerSession {
     /// Where cable opens block: libdivecomputer's open talks to the computer, for up to the driver's timeout.
     static let cableQueue = DispatchQueue(label: "com.libdcswift.cable")
 
-    /// Opens `model` on a serial, USB HID or raw USB endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
+    /// Opens `model` on a serial, paired classic-Bluetooth, USB HID or raw USB endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
     public static func open(
         _ endpoint: CableEndpoint,
         model: DCModel,
@@ -58,6 +58,7 @@ extension DiveComputerSession {
                                deviceStorage: request.deviceStorage, lease: request.lease,
                                cancellation: request.cancellation, makeDevice: request.usbDevice)
         default:
+            // A paired classic-Bluetooth port is DC_TRANSPORT_SERIAL too, and opens the same way as a USB-serial one.
             return try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
                                   recorder: request.recorder, deviceStorage: request.deviceStorage,
                                   lease: request.lease, cancellation: request.cancellation)
@@ -81,14 +82,16 @@ extension DiveComputerSession {
         cancellation: CableOpenCancellation,
         claims: EndpointClaims = .shared
     ) throws -> DiveComputerSession {
-        guard endpoint.transport == .serial else { throw CableError.unsupportedTransport(endpoint.transport) }
+        guard endpoint.transport == .serial || endpoint.transport == .classicBTSerial else {
+            throw CableError.unsupportedTransport(endpoint.transport)
+        }
         guard endpoint.status != .driverMissing, let path = endpoint.calloutPath, let locator = endpoint.locator else {
             throw CableError.driverMissing
         }
-        guard model.transports.contains(.serial) else { throw CableError.unsupportedTransport(.serial) }
+        guard model.transports.contains(endpoint.transport) else { throw CableError.unsupportedTransport(endpoint.transport) }
         // Checked before the pre-flight, since opening the port raises DTR.
         guard DeviceConfiguration.hasDescriptor(family: model.dcFamily, model: model.model) else {
-            throw CableError.unsupportedTransport(.serial)
+            throw CableError.unsupportedTransport(endpoint.transport)
         }
         guard !cancellation.isCancelled else { throw CableError.cancelled }
         guard lease.tryAcquire() else { throw CableError.sessionInProgress }
@@ -198,7 +201,7 @@ final class SerialTapFactory {
     }
 }
 
-/// Opens and closes the port as serial_posix will, since dc_serial_open reports busy and not permitted alike (NOACCESS).
+/// Opens and closes the port as serial_posix will, since dc_serial_open reports busy and not permitted alike (NOACCESS). On a classic-Bluetooth port this open/close cycle itself may bring the RFCOMM link up and down right before the real open; unconfirmed against real hardware.
 enum SerialPortPreflight {
     static func check(_ path: String) -> CableError? {
         let fd = Darwin.open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)

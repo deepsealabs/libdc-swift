@@ -40,6 +40,9 @@ final class SerialHardwareTests: XCTestCase {
             let padded = String(repeating: "0", count: digits.count - standIn.count) + standIn
             pairs.append((Array(digits.utf8), Array(padded.utf8)))
         }
+        // Shearwater sends its serial as 8 ASCII hex digits (shearwater_petrel.c).
+        pairs.append((Array(String(format: "%08X", serial).utf8), Array(String(format: "%08X", standInSerial).utf8)))
+        pairs.append((Array(String(format: "%08x", serial).utf8), Array(String(format: "%08x", standInSerial).utf8)))
         return pairs.filter { $0.pattern != $0.replacement }
     }
 
@@ -65,6 +68,10 @@ final class SerialHardwareTests: XCTestCase {
         let wide = DCRecordScrubber.replacing(Self.serialPatterns(1_234_567))
         XCTAssertEqual(wide.scrub([0x87, 0xD6, 0x12, 0x00], .inbound), [0x39, 0x05, 0x00, 0x00])
         XCTAssertEqual(wide.scrub(Array("1234567".utf8), .inbound), Array("0001337".utf8))
+        // Shearwater's 8 ASCII hex digit encoding, either case.
+        let ascii = DCRecordScrubber.replacing(Self.serialPatterns(0x00BC_614E))
+        XCTAssertEqual(ascii.scrub(Array("00BC614E".utf8), .inbound), Array("00000539".utf8))
+        XCTAssertEqual(ascii.scrub(Array("00bc614e".utf8), .inbound), Array("00000539".utf8))
     }
 
     func testARealComputerDownloadsRecordsAndStopsAtItsFingerprint() throws {
@@ -72,10 +79,6 @@ final class SerialHardwareTests: XCTestCase {
         guard let path = environment["LIBDC_SERIAL_PORT"], let name = environment["LIBDC_SERIAL_MODEL"] else {
             throw XCTSkip("Set LIBDC_SERIAL_PORT to a /dev/cu.* port and LIBDC_SERIAL_MODEL to a serial model's name to run against a real computer")
         }
-        let serialModels = DeviceCatalog.models(for: .serial)
-        let model = try XCTUnwrap(serialModels.first { $0.name.caseInsensitiveCompare(name) == .orderedSame },
-                                  "No serial model named \(name); serial models: \(serialModels.map(\.name).joined(separator: ", "))")
-
         let discovery = IOKitCableDiscovery()
         discovery.start()
         defer { discovery.stop() }
@@ -84,7 +87,10 @@ final class SerialHardwareTests: XCTestCase {
         log("\(endpoint.displayName) \(Self.hex(endpoint.vendorID)):\(Self.hex(endpoint.productID)), \(endpoint.status.rawValue), "
             + "adapter serial \(endpoint.usbSerialNumber ?? "none"), \(endpoint.candidates.count) candidates")
         XCTAssertEqual(endpoint.status, .ready)
-        XCTAssertTrue(endpoint.candidates.contains(model), "the cable's hint doesn't offer \(model.name)")
+        // The endpoint's own candidates, not models(for: .serial), so a .classicBTSerial port (Shearwater) resolves too.
+        let model = try XCTUnwrap(endpoint.candidates.first { $0.name.caseInsensitiveCompare(name) == .orderedSame },
+                                  "No model named \(name) on \(endpoint.transport.rawValue); candidates: "
+                                      + endpoint.candidates.map(\.name).joined(separator: ", "))
 
         // First download: everything, recorded.
         let fingerprints = DeviceFingerprintStorage(userDefaults: isolatedDefaults("fp"))
