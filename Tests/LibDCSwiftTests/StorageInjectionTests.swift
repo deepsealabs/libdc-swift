@@ -1,11 +1,7 @@
 import XCTest
 @testable import LibDCSwift
 
-/// `DeviceStorage` and `DeviceFingerprintStorage` were `UserDefaults.standard`
-/// singletons, so tests could only run against the real store and would pollute
-/// each other. Both now take an injected `UserDefaults` suite (default
-/// `.standard`, unchanged for every production call site, which all go through
-/// `.shared`).
+/// Exercises `DeviceStorage` and `DeviceFingerprintStorage` through an injected `UserDefaults` suite, isolated from the real store.
 final class StorageInjectionTests: XCTestCase {
 
     private func isolatedSuite(_ name: String) -> UserDefaults {
