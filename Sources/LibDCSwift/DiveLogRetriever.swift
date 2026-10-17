@@ -6,6 +6,13 @@ import LibDCBridge
 import UIKit
 #endif
 
+/// The flag the per-dive callback reads as its cancel switch.
+protocol RetrievalFlagHolder: AnyObject {
+    var isRetrievingLogs: Bool { get set }
+}
+
+extension CoreBluetoothManager: RetrievalFlagHolder {}
+
 public class DiveLogRetriever {
     public class CallbackContext {
         var logCount: Int = 1
@@ -342,6 +349,7 @@ public class DiveLogRetriever {
             onProgress: ((Int, Int) -> Void)? = nil,
             completion: @escaping (Bool) -> Void
         ) {
+            markRetrievalStarted(bluetoothManager)
             let retrievalQueue = DispatchQueue(label: "com.libdcswift.retrieval", qos: .userInitiated)
             
             retrievalQueue.async {
@@ -350,6 +358,7 @@ public class DiveLogRetriever {
                 guard let dcDevice = devicePtr.pointee.device else {
                     DispatchQueue.main.async {
                         viewModel.setDetailedError("No device connection found", status: DC_STATUS_IO)
+                        markRetrievalFinished(bluetoothManager)
                         completion(false)
                     }
                     return
@@ -471,6 +480,7 @@ public class DiveLogRetriever {
                     let downloadSucceeded = outcome.succeeded
                     let shouldSaveFingerprint = outcome.saveFingerprint
                     let emptyReadOnly = outcome.emptyReadOnly
+                    markRetrievalFinished(bluetoothManager)
 
                     // Record a stable status key for analytics before routing.
                     viewModel.lastDownloadStatus = emptyReadOnly
@@ -529,5 +539,19 @@ public class DiveLogRetriever {
 
     public static func getCurrentContext() -> CallbackContext? {
         return currentContext
+    }
+
+    // Set on the caller's turn, not later on the retrieval queue, so a cancel issued right after the call isn't overwritten.
+    static func markRetrievalStarted(_ holder: RetrievalFlagHolder) {
+        if Thread.isMainThread {
+            holder.isRetrievingLogs = true
+        } else {
+            DispatchQueue.main.sync { holder.isRetrievingLogs = true }
+        }
+    }
+
+    // Runs before completion so a download started from the completion handler keeps its flag.
+    static func markRetrievalFinished(_ holder: RetrievalFlagHolder) {
+        holder.isRetrievingLogs = false
     }
 }
