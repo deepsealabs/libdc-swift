@@ -504,7 +504,10 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
 }
 
 void libdc_close_device_data(device_data_t *data) {
+    if (!data) return;
     close_device_data(data);
+    data->fingerprint_context = NULL;
+    data->lookup_fingerprint = NULL;
 }
 
 dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata) {
