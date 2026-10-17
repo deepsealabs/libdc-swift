@@ -174,6 +174,7 @@ extension DeviceCatalog {
     /// IOUSBLib stream in place of libusb); hosts label them "Beta" there. No cable path has run on a real computer yet.
     public static let betaFamilies: [DCTransport: Set<DeviceConfiguration.DeviceFamily>] = [
         .usb: [.atomicsCobalt],
+        .classicBTSerial: [.shearwaterPetrel, .shearwaterPredator],
     ]
 }
 
