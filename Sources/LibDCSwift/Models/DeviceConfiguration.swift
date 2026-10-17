@@ -551,7 +551,9 @@ import LibDCBridge
         deviceDataPtr: UnsafeMutablePointer<device_data_t>,
         deviceName: String,
         storage: DeviceStorage,
-        requireKnownModel: Bool
+        requireKnownModel: Bool,
+        transport: DCTransport? = nil,
+        locator: DiveComputerLocator? = nil
     ) {
         guard deviceDataPtr.pointee.have_devinfo != 0 else {
             logDebug("Device info not yet available for \(deviceName)")
@@ -575,7 +577,9 @@ import LibDCBridge
                     uuid: deviceAddress,
                     name: deviceName,
                     family: storedDevice.family,
-                    model: actualModel
+                    model: actualModel,
+                    transport: transport,
+                    locator: locator
                 )
             }
         } else if let deviceInfo = fromName(deviceName) {
@@ -585,7 +589,9 @@ import LibDCBridge
                     uuid: deviceAddress,
                     name: deviceName,
                     family: deviceInfo.family,
-                    model: actualModel
+                    model: actualModel,
+                    transport: transport,
+                    locator: locator
                 )
             }
         }
