@@ -135,7 +135,8 @@ let package = Package(
             resources: [
                 .copy("Fixtures/suunto_nautic_1787752091.sbem"),
                 .copy("Fixtures/logbook_entries_multi.bin"),
-                .copy("Fixtures/suunto_nautic_1787752091.golden.json")
+                .copy("Fixtures/suunto_nautic_1787752091.golden.json"),
+                .copy("Fixtures/reefnet_sensus_synthetic.dcrec")
             ]
         )
     ]
