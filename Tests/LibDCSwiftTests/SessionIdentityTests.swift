@@ -213,4 +213,150 @@ final class SessionIdentityTests: XCTestCase {
                                                viewModel: DiveDataViewModel(fingerprintStore: fingerprints)))
         XCTAssertEqual(elsewhere.divesDownloaded, 2, "another adapter may be another unit")
     }
+
+    // MARK: - No DEVINFO
+
+    /// Citizen Hyper Aqualand: one dive, its whole memory in 32-byte packets ending in 0xFF; the driver never sends DEVINFO.
+    final class FakeAqualand {
+        private let memory: [UInt8]
+        private var index = 0
+        private let lock = NSLock()
+
+        init() {
+            var memory = [UInt8](repeating: 0x20, count: 64)
+            memory.replaceSubrange(5..<13, with: [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18])
+            memory[63] = 0xFF
+            self.memory = memory
+        }
+
+        func hostWrote(_ bytes: UnsafeRawBufferPointer) {
+            lock.lock(); defer { lock.unlock() }
+            if bytes.first == 0x7F { index = 0 }
+        }
+
+        func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            let n = min(size, memory.count - index)
+            guard n > 0 else { return 0 }
+            memory.withUnsafeBufferPointer { buffer.copyMemory(from: $0.baseAddress! + index, byteCount: n) }
+            index += n
+            return n
+        }
+    }
+
+    private static let aqualandFingerprint = Data([0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18])
+
+    private func openAqualand(_ fake: FakeAqualand, devices: DeviceStorage, locator: DiveComputerLocator? = nil) throws -> DiveComputerSession {
+        keepAlive.append(fake)
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        var cbs = dc_custom_cbs_t()
+        cbs.read = { userdata, data, size, actual in
+            let n = Unmanaged<FakeAqualand>.fromOpaque(userdata!).takeUnretainedValue().hostRead(into: data!, size: size)
+            actual?.pointee = n
+            return n == 0 ? DC_STATUS_TIMEOUT : DC_STATUS_SUCCESS
+        }
+        cbs.write = { userdata, data, size, actual in
+            Unmanaged<FakeAqualand>.fromOpaque(userdata!).takeUnretainedValue().hostWrote(UnsafeRawBufferPointer(start: data, count: size))
+            actual?.pointee = size
+            return DC_STATUS_SUCCESS
+        }
+        var iostream: OpaquePointer?
+        XCTAssertEqual(dc_custom_open(&iostream, context, DC_TRANSPORT_SERIAL, &cbs, Unmanaged.passUnretained(fake).toOpaque()), DC_STATUS_SUCCESS)
+        let session = try DiveComputerSession.open(
+            iostream: try XCTUnwrap(iostream), context: try XCTUnwrap(context), family: DC_FAMILY_CITIZEN_AQUALAND, model: 0,
+            displayName: "Citizen Hyper Aqualand", storageKey: "serial:aqualand", locator: locator,
+            deviceStorage: devices, lease: DiveComputerSessionLease())
+        addTeardownBlock { session.close() }
+        return session
+    }
+
+    /// The Aqualand parser wants a real dump; the hook counts the dives that reach it.
+    private func downloadAqualand(_ session: DiveComputerSession, viewModel: DiveDataViewModel, parsed: inout Int) -> DiveDownloadResult? {
+        let done = expectation(description: "download")
+        var result: DiveDownloadResult?
+        var count = 0
+        let hook: DiveLogRetriever.ParseHook = { _, _ in
+            count += 1
+            return DiveComputerSessionTests.stubDive()
+        }
+        DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel, parseHook: hook) { result = $0; done.fulfill() }
+        wait(for: [done], timeout: 10)
+        parsed += count
+        return result
+    }
+
+    func testAFamilyWithoutDevinfoGetsTheOpenedDescriptorsIdentity() throws {
+        let fingerprints = DeviceFingerprintStorage(userDefaults: isolatedSuite("noDevinfo"))
+        let devices = DeviceStorage(userDefaults: isolatedSuite("noDevinfoDev"), fingerprints: fingerprints)
+        var parsed = 0
+        for _ in 0..<2 {
+            let session = try openAqualand(FakeAqualand(), devices: devices)
+            let result = try XCTUnwrap(downloadAqualand(session, viewModel: DiveDataViewModel(fingerprintStore: fingerprints), parsed: &parsed))
+            XCTAssertEqual(result.outcome, .completed)
+            XCTAssertEqual(result.divesDownloaded, 1)
+            let identity = try XCTUnwrap(result.identity, "no DEVINFO, but the opened descriptor names the computer")
+            XCTAssertEqual(identity.family, .citizenAqualand)
+            XCTAssertEqual(identity.model, 0)
+            XCTAssertEqual(identity.canonicalName, "Citizen Hyper Aqualand")
+            XCTAssertNil(identity.serial)
+            XCTAssertEqual(identity.transport, .serial)
+            XCTAssertEqual(identity.deviceKey, "md:citizen hyper aqualand")
+            XCTAssertEqual(session.identity, identity)
+            XCTAssertNil(result.fingerprintCommit, "no serial and no stand-in: every download is full")
+        }
+        XCTAssertEqual(parsed, 2)
+        XCTAssertTrue(fingerprints.loadFingerprints().isEmpty)
+    }
+
+    func testAFamilyWithoutDevinfoStopsAtItsAdapterKeyedFingerprint() throws {
+        let fingerprints = DeviceFingerprintStorage(userDefaults: isolatedSuite("noDevinfoAdapter"))
+        let devices = DeviceStorage(userDefaults: isolatedSuite("noDevinfoAdapterDev"), fingerprints: fingerprints)
+        let fake = FakeAqualand()
+        var parsed = 0
+
+        let first = try XCTUnwrap(downloadAqualand(try openAqualand(fake, devices: devices, locator: Self.adapter),
+                                                   viewModel: DiveDataViewModel(fingerprintStore: fingerprints), parsed: &parsed))
+        XCTAssertEqual(first.outcome, .completed)
+        let commit = try XCTUnwrap(first.fingerprintCommit)
+        XCTAssertEqual(commit.fingerprint, Self.aqualandFingerprint)
+        commit.acknowledge()
+        XCTAssertEqual(fingerprints.loadFingerprints().first?.key, "md:citizen hyper aqualand@adapter:0403:6001:TEST-ADAPTER-1")
+        XCTAssertEqual(parsed, 1)
+
+        let session = try openAqualand(fake, devices: devices, locator: Self.adapter)
+        let again = try XCTUnwrap(downloadAqualand(session, viewModel: DiveDataViewModel(fingerprintStore: fingerprints), parsed: &parsed))
+        XCTAssertEqual(again.outcome, .noNewDives)
+        XCTAssertEqual(again.divesDownloaded, 0)
+        XCTAssertEqual(parsed, 1)
+        // The fingerprint was set on the device, so the driver skips the dive itself.
+        let counting: dc_dive_callback_t = { _, _, _, _, userdata in
+            userdata!.assumingMemoryBound(to: Int.self).pointee += 1
+            return 1
+        }
+        var offered = 0
+        let status = withUnsafeMutablePointer(to: &offered) { dc_device_foreach(session.devicePtr.pointee.device, counting, $0) }
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(offered, 0)
+
+        let otherAdapter = DiveComputerLocator.serial(path: "/dev/cu.usbserial-TEST", usbSerial: "TEST-ADAPTER-2", vid: 0x0403, pid: 0x6001)
+        let elsewhere = try XCTUnwrap(downloadAqualand(try openAqualand(fake, devices: devices, locator: otherAdapter),
+                                                       viewModel: DiveDataViewModel(fingerprintStore: fingerprints), parsed: &parsed))
+        XCTAssertEqual(elsewhere.divesDownloaded, 1, "another adapter may be another unit")
+    }
+
+    func testAFamilyWithoutDevinfoDownloadsInFullWhenFingerprintsAreOff() throws {
+        let fingerprints = DeviceFingerprintStorage(userDefaults: isolatedSuite("noDevinfoOff"))
+        fingerprints.saveFingerprint(Self.aqualandFingerprint,
+                                     for: DiveComputerIdentity(family: .citizenAqualand, model: 0, serial: nil, transport: .serial),
+                                     standIn: Self.adapter.unitStandIn)
+        let devices = DeviceStorage(userDefaults: isolatedSuite("noDevinfoOffDev"), fingerprints: fingerprints)
+        let session = try openAqualand(FakeAqualand(), devices: devices, locator: Self.adapter)
+        let done = expectation(description: "download")
+        var result: DiveDownloadResult?
+        DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: DiveDataViewModel(fingerprintStore: fingerprints), useFingerprint: false,
+                                          parseHook: { _, _ in DiveComputerSessionTests.stubDive() }) { result = $0; done.fulfill() }
+        wait(for: [done], timeout: 10)
+        XCTAssertEqual(result?.divesDownloaded, 1)
+    }
 }

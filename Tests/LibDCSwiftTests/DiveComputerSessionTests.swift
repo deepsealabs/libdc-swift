@@ -323,7 +323,7 @@ final class DiveComputerSessionTests: XCTestCase {
         return session
     }
 
-    private static func stubDive() -> DiveData {
+    static func stubDive() -> DiveData {
         DiveData(number: 1, datetime: Date(timeIntervalSince1970: 1_700_000_000), maxDepth: 6, avgDepth: 3, divetime: 900,
                  temperature: 20, profile: [], tankPressure: [], gasMix: nil, gasMixCount: nil, gasMixes: nil,
                  salinity: nil, atmospheric: nil, surfaceTemperature: nil, minTemperature: nil, maxTemperature: nil,

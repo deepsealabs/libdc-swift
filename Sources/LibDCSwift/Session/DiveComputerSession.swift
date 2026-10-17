@@ -189,10 +189,11 @@ public final class DiveComputerSession {
 
     var fingerprintStandIn: String? { locator?.unitStandIn }
 
-    /// Reads the identity from the device's DEVINFO and keeps it; nil before DEVINFO.
+    /// Reads the identity from DEVINFO (or the descriptor, for a family that never sends it) and keeps it; nil before DEVINFO.
     @discardableResult
     func refreshIdentity() -> DiveComputerIdentity? {
-        guard let identity = DiveComputerIdentity(device: devicePtr, transport: identityTransport) else { return self.identity }
+        guard let identity = DiveComputerIdentity(device: devicePtr, transport: identityTransport)
+                ?? DiveComputerIdentity(descriptorOf: devicePtr, transport: identityTransport) else { return self.identity }
         lock.lock()
         currentIdentity = identity
         lock.unlock()

@@ -614,6 +614,8 @@ public class DiveLogRetriever {
                 }
 
                 var storedFingerprint: Data? = nil
+                // Set on the device before the walk, for a family that never sends DEVINFO and so never runs the C lookup.
+                var devinfoLessFingerprint: Data?
                 // Try to get fingerprint if we already have device info (from a previous connection)
                 if devicePtr.pointee.have_devinfo != 0, let session {
                     if let identity = session.refreshIdentity() {
@@ -630,6 +632,12 @@ public class DiveLogRetriever {
                     if useFingerprint {
                         storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceTypeForFingerprint, serial: serial)
                     }
+                } else if let session, DiveComputerIdentity(descriptorOf: devicePtr, transport: session.identityTransport) != nil,
+                          let identity = session.refreshIdentity() {
+                    if useFingerprint {
+                        storedFingerprint = viewModel.getFingerprint(for: identity, standIn: session.fingerprintStandIn)
+                    }
+                    devinfoLessFingerprint = storedFingerprint ?? Data()
                 }
 
                 let context = CallbackContext(
@@ -676,6 +684,14 @@ public class DiveLogRetriever {
                     devicePtr.pointee.fingerprint_context = nil
                     devicePtr.pointee.lookup_fingerprint = nil
                     dc_device_set_fingerprint(dcDevice, nil, 0)
+                }
+                if useFingerprint, let devinfoLessFingerprint {
+                    let status = devinfoLessFingerprint.withUnsafeBytes {
+                        dc_device_set_fingerprint(dcDevice, $0.bindMemory(to: UInt8.self).baseAddress, UInt32($0.count))
+                    }
+                    if status != DC_STATUS_SUCCESS {
+                        logWarning("Couldn't set the stored fingerprint on \(deviceName): DC_STATUS_\(statusName(status))")
+                    }
                 }
                 
                 let enumStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
