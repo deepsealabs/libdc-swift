@@ -50,7 +50,7 @@ extension DiveComputerSession {
         deviceStorage: DeviceStorage,
         lease: DiveComputerSessionLease,
         cancellation: CableOpenCancellation,
-        claims: SerialPortClaims = .shared
+        claims: EndpointClaims = .shared
     ) throws -> DiveComputerSession {
         guard endpoint.transport == .serial else { throw CableError.unsupportedTransport(endpoint.transport) }
         guard endpoint.status != .driverMissing, let path = endpoint.calloutPath, let locator = endpoint.locator else {

@@ -248,7 +248,7 @@ final class SerialCableSessionTests: XCTestCase {
         let gone = CableEndpoint.serialPort(path: "/dev/cu.libdcswift-no-such-port", vendorID: 0x0403, productID: 0x6001)
         XCTAssertEqual(cableOpenError(gone, model: ghost, lease: lease), .unsupportedTransport(.serial), "refused before notFound")
         XCTAssertFalse(lease.isHeld)
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
         // And the next open on the same lease goes through.
         let session = try openCable(CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC Mk2"), lease: lease)
         XCTAssertTrue(lease.isHeld)
@@ -272,7 +272,7 @@ final class SerialCableSessionTests: XCTestCase {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
         XCTAssertFalse(lease.isHeld)
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
     }
 
     func testCancellingAnOpenBlockedInAHandshakeReadThrowsCancelledPromptly() async throws {
@@ -299,7 +299,7 @@ final class SerialCableSessionTests: XCTestCase {
         }
         XCTAssertLessThan(milliseconds(since: cancelled), 150)
         XCTAssertFalse(lease.isHeld)
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
     }
 
     func testACancelLandingAfterTheOpenClosesTheSessionInsteadOfReturningIt() throws {
@@ -316,7 +316,7 @@ final class SerialCableSessionTests: XCTestCase {
         }
         XCTAssertTrue(session.isClosed)
         XCTAssertFalse(lease.isHeld)
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
     }
 
     // MARK: - open_serial_device
