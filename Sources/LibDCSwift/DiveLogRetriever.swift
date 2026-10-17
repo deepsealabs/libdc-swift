@@ -262,7 +262,9 @@ public class DiveLogRetriever {
                     deviceDataPtr: devicePtr,
                     deviceName: context.deviceName,
                     storage: context.deviceStorage,
-                    requireKnownModel: true
+                    requireKnownModel: true,
+                    transport: context.session?.identityTransport,
+                    locator: context.session?.locator
                 )
             } else {
                 DeviceConfiguration.updateDeviceConfigurationFromHardware(

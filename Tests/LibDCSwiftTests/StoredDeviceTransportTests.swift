@@ -1,7 +1,9 @@
 import XCTest
+import Clibdivecomputer
+import LibDCBridge
 @testable import LibDCSwift
 
-/// `StoredDevice.transport` and `locatorKey`, per-record decoding, and lookups across transports.
+/// `StoredDevice.transport` and `locator`, per-record decoding, fingerprint keys, and lookups across transports.
 final class StoredDeviceTransportTests: XCTestCase {
 
     private static let storageKey = "com.libdc.storedDevices"
@@ -34,7 +36,7 @@ final class StoredDeviceTransportTests: XCTestCase {
         let perdix = try XCTUnwrap(storage.getStoredDevice(uuid: "AAAAAAAA-0000-0000-0000-000000000001"))
         XCTAssertNil(perdix.transport)
         XCTAssertEqual(perdix.effectiveTransport, .ble)
-        XCTAssertNil(perdix.locatorKey)
+        XCTAssertNil(perdix.locator)
         XCTAssertEqual(perdix.family, .shearwaterPetrel)
         XCTAssertEqual(perdix.model, 11)
         XCTAssertEqual(perdix.serial, "0badf00d")
@@ -52,12 +54,22 @@ final class StoredDeviceTransportTests: XCTestCase {
 
     func testTransportAndLocatorRoundTrip() throws {
         let device = StoredDevice(uuid: "dc:00010005:00c0ffee", name: "Suunto D5", family: .suuntoEonSteel, model: 2, serial: "00c0ffee",
-                                  transport: .usbHID, locatorKey: "usbhid:1493:0035:1")
+                                  transport: .usbHID, locator: .usbHID(vid: 0x1493, pid: 0x0035, registryID: 1))
         let decoded = try JSONDecoder().decode(StoredDevice.self, from: JSONEncoder().encode(device))
         XCTAssertEqual(decoded.transport, .usbHID)
         XCTAssertEqual(decoded.effectiveTransport, .usbHID)
+        XCTAssertEqual(decoded.locator, .usbHID(vid: 0x1493, pid: 0x0035, registryID: 1))
         XCTAssertEqual(decoded.locatorKey, "usbhid:1493:0035:1")
         XCTAssertEqual(decoded.lastConnected, device.lastConnected)
+    }
+
+    func testALocatorThisVersionCantReadDropsOnlyTheLocator() {
+        let json = """
+        [{"uuid":"U1","name":"A","family":"suuntoVyper","model":10,"lastConnected":1,"transport":"serial",        "locator":{"thunderbolt":{"port":"3"}}}]
+        """
+        let (storage, _) = storage(json: json, "futureLocator")
+        XCTAssertEqual(storage.getStoredDevice(uuid: "U1")?.transport, .serial)
+        XCTAssertNil(storage.getStoredDevice(uuid: "U1")?.locator)
     }
 
     func testAnUnknownFamilyDropsOnlyThatRecord() {
@@ -101,18 +113,22 @@ final class StoredDeviceTransportTests: XCTestCase {
         XCTAssertEqual(reloaded.getAllStoredDevices()?.map(\.uuid), ["U1", "U3"])
     }
 
+    private static func adapter(_ usbSerial: String?) -> DiveComputerLocator {
+        .serial(path: "/dev/cu.usbserial-TEST", usbSerial: usbSerial, vid: 0x0403, pid: 0x6001)
+    }
+
     // MARK: - storeDevice
 
     func testStoringAgainKeepsTransportAndLocatorUnlessGiven() {
         let storage = DeviceStorage(userDefaults: isolatedSuite("store"))
         storage.storeDevice(uuid: "K", name: "Suunto Vyper", family: .suuntoVyper, model: 0x0A, serial: "00000042",
-                            transport: .serial, locatorKey: "serial:ADAPTER-1")
+                            transport: .serial, locator: Self.adapter("ADAPTER-1"))
         storage.storeDevice(uuid: "K", name: "Suunto Vyper", family: .suuntoVyper, model: 0x0A)
         XCTAssertEqual(storage.getStoredDevice(uuid: "K")?.transport, .serial)
         XCTAssertEqual(storage.getStoredDevice(uuid: "K")?.locatorKey, "serial:ADAPTER-1")
         XCTAssertEqual(storage.getStoredDevice(uuid: "K")?.serial, "00000042")
 
-        storage.storeDevice(uuid: "K", name: "Suunto Vyper", family: .suuntoVyper, model: 0x0A, locatorKey: "serial:ADAPTER-2")
+        storage.storeDevice(uuid: "K", name: "Suunto Vyper", family: .suuntoVyper, model: 0x0A, locator: Self.adapter("ADAPTER-2"))
         XCTAssertEqual(storage.getStoredDevice(uuid: "K")?.locatorKey, "serial:ADAPTER-2")
         XCTAssertEqual(storage.getStoredDevice(uuid: "K")?.transport, .serial)
     }
@@ -137,6 +153,67 @@ final class StoredDeviceTransportTests: XCTestCase {
         XCTAssertNil(storage.storedDevice(family: .oceansS1, serial: ""))
     }
 
+    func testTheSessionPathStoresANewRecordWithItsTransportAndLocator() throws {
+        let storage = DeviceStorage(userDefaults: isolatedSuite("hardware"))
+        let ptr = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        ptr.initialize(to: device_data_t())
+        defer { ptr.deallocate() }
+        ptr.pointee.have_devinfo = 1
+        ptr.pointee.devinfo.model = 8
+        let locator = DiveComputerLocator.classicBTSerial(path: "/dev/cu.Perdix-Test")
+        XCTAssertNotEqual(DeviceConfiguration.fromName("Perdix Test")?.model, 8)
+        DeviceConfiguration.updateDeviceConfigurationFromHardware(
+            deviceAddress: "btserial:test", deviceDataPtr: ptr, deviceName: "Perdix Test", storage: storage,
+            requireKnownModel: true, transport: .classicBTSerial, locator: locator)
+        let stored = try XCTUnwrap(storage.getStoredDevice(uuid: "btserial:test"), "the hardware's model differs from the name's")
+        XCTAssertEqual(stored.family, .shearwaterPetrel)
+        XCTAssertEqual(stored.model, 8)
+        XCTAssertEqual(stored.transport, .classicBTSerial, "not read as BLE, so reconcileUUID leaves it alone")
+        XCTAssertEqual(stored.locator, locator)
+        XCTAssertFalse(storage.reconcileUUID(name: "Perdix Test", newUUID: "PERIPHERAL"))
+    }
+
+    // MARK: - Fingerprint key
+
+    func testASerialZeroCableRecordKeysItsFingerprintByItsAdapter() {
+        let device = StoredDevice(uuid: "serial:edy", name: "Cressi Edy", family: .cressiEdy, model: 0x08, serial: "00000000",
+                                  transport: .serial, locator: Self.adapter("TEST-ADAPTER-1"))
+        let identity = DiveComputerIdentity(family: .cressiEdy, model: 0x08, serial: nil, transport: .serial)
+        XCTAssertEqual(device.fingerprintStorageKey, identity.storageKey(standIn: Self.adapter("TEST-ADAPTER-1").unitStandIn))
+        XCTAssertTrue(device.fingerprintStorageKey?.hasSuffix("@adapter:0403:6001:TEST-ADAPTER-1") == true)
+
+        let noSerialAdapter = StoredDevice(uuid: "serial:edy", name: "Cressi Edy", family: .cressiEdy, model: 0x08,
+                                           transport: .serial, locator: Self.adapter(nil))
+        XCTAssertNil(noSerialAdapter.fingerprintStorageKey, "nothing outlives a replug, so nothing was stored")
+        XCTAssertNil(StoredDevice(uuid: "serial:edy", name: "Cressi Edy", family: .cressiEdy, model: 0x08, transport: .serial)
+            .fingerprintStorageKey)
+    }
+
+    func testABLERecordStandsInWithItsLocatorElseItsUUID() {
+        let identity = DiveComputerIdentity(family: .oceansS1, model: 0, serial: nil, transport: .ble)
+        let legacy = StoredDevice(uuid: "PERIPHERAL-1", name: "Oceans S1", family: .oceansS1, model: 0, serial: "00000000")
+        XCTAssertEqual(legacy.fingerprintStorageKey, identity.storageKey(standIn: "ble:PERIPHERAL-1"))
+        let located = StoredDevice(uuid: "PERIPHERAL-2", name: "Oceans S1", family: .oceansS1, model: 0, serial: "00000000",
+                                   transport: .ble, locator: .ble(uuid: "PERIPHERAL-1"))
+        XCTAssertEqual(located.fingerprintStorageKey, identity.storageKey(standIn: "ble:PERIPHERAL-1"), "the locator the fingerprint was keyed by")
+    }
+
+    func testRemovingASerialZeroCableDeviceClearsItsAdapterKeyedFingerprint() throws {
+        let fingerprints = DeviceFingerprintStorage(userDefaults: isolatedSuite("removeCableFp"))
+        let storage = DeviceStorage(userDefaults: isolatedSuite("removeCable"), fingerprints: fingerprints)
+        let locator = Self.adapter("TEST-ADAPTER-1")
+        storage.storeDevice(uuid: "serial:edy", name: "Cressi Edy", family: .cressiEdy, model: 0x08, serial: "00000000",
+                            transport: .serial, locator: locator)
+        let identity = DiveComputerIdentity(family: .cressiEdy, model: 0x08, serial: nil, transport: .serial)
+        fingerprints.saveFingerprint(Data([1, 2, 3, 4]), for: identity, standIn: locator.unitStandIn)
+        let other = DiveComputerIdentity(family: .cressiEdy, model: 0x08, serial: nil, transport: .serial)
+        fingerprints.saveFingerprint(Data([5, 6, 7, 8]), for: other, standIn: Self.adapter("TEST-ADAPTER-2").unitStandIn)
+        XCTAssertEqual(fingerprints.loadFingerprints().count, 2)
+
+        storage.removeDevice(uuid: "serial:edy")
+        XCTAssertEqual(fingerprints.loadFingerprints().map(\.fingerprint), [Data([5, 6, 7, 8])], "another adapter's unit stays")
+    }
+
     // MARK: - reconcileUUID
 
     func testReconcileLeavesCableRecordsAlone() {
@@ -150,9 +227,9 @@ final class StoredDeviceTransportTests: XCTestCase {
     func testReconcileMovesTheBLERecordOfTheSameName() {
         let storage = DeviceStorage(userDefaults: isolatedSuite("reconcileBoth"))
         storage.storeDevice(uuid: "dc:hid", name: "Suunto D5", family: .suuntoEonSteel, model: 2, serial: "1", transport: .usbHID,
-                            locatorKey: "usbhid:1493:0035:1")
+                            locator: .usbHID(vid: 0x1493, pid: 0x0035, registryID: 1))
         storage.storeDevice(uuid: "OLD-PERIPHERAL", name: "Suunto D5", family: .suuntoEonSteel, model: 2, serial: "1", transport: .ble,
-                            locatorKey: "ble:OLD-PERIPHERAL")
+                            locator: .ble(uuid: "OLD-PERIPHERAL"))
         XCTAssertTrue(storage.reconcileUUID(name: "Suunto D5", newUUID: "NEW-PERIPHERAL"))
         XCTAssertNotNil(storage.getStoredDevice(uuid: "dc:hid"), "the cable record isn't the one that moved")
         XCTAssertNil(storage.getStoredDevice(uuid: "OLD-PERIPHERAL"))

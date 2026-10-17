@@ -14,11 +14,11 @@ public class StoredDevice: Codable {
    public var firmware: String?  // Firmware version reported via DC_EVENT_DEVINFO
    /// nil on records stored before cable transports, which are all BLE.
    public let transport: DCTransport?
-   /// `DiveComputerLocator.locatorKey` of the last connection: provenance only, never how the record is found.
-   public var locatorKey: String?
+   /// Where the computer was last reached: provenance, never how the record is found, and the stand-in for a computer with no serial.
+   public var locator: DiveComputerLocator?
 
    public init(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil, firmware: String? = nil,
-               transport: DCTransport? = nil, locatorKey: String? = nil) {
+               transport: DCTransport? = nil, locator: DiveComputerLocator? = nil) {
        self.uuid = uuid
        self.name = name
        self.family = family
@@ -27,11 +27,14 @@ public class StoredDevice: Codable {
        self.serial = serial
        self.firmware = firmware
        self.transport = transport
-       self.locatorKey = locatorKey
+       self.locator = locator
    }
 
    /// `transport`, with a record from before transports read as BLE.
    public var effectiveTransport: DCTransport { transport ?? .ble }
+
+   /// `locator`'s string form, for logs.
+   public var locatorKey: String? { locator?.locatorKey }
 
    private enum CodingKeys: String, CodingKey {
        case uuid
@@ -42,7 +45,7 @@ public class StoredDevice: Codable {
        case serial
        case firmware
        case transport
-       case locatorKey
+       case locator
    }
 
    public required init(from decoder: Decoder) throws {
@@ -55,7 +58,8 @@ public class StoredDevice: Codable {
        serial = try container.decodeIfPresent(String.self, forKey: .serial)  // Optional for backward compatibility
        firmware = try container.decodeIfPresent(String.self, forKey: .firmware)  // Optional for backward compatibility
        transport = try container.decodeIfPresent(DCTransport.self, forKey: .transport)
-       locatorKey = try container.decodeIfPresent(String.self, forKey: .locatorKey)
+       // Provenance only: a locator from a newer version drops alone, not the record.
+       locator = try? container.decodeIfPresent(DiveComputerLocator.self, forKey: .locator)
    }
 
    public func encode(to encoder: Encoder) throws {
@@ -68,13 +72,13 @@ public class StoredDevice: Codable {
        try container.encodeIfPresent(serial, forKey: .serial)
        try container.encodeIfPresent(firmware, forKey: .firmware)
        try container.encodeIfPresent(transport, forKey: .transport)
-       try container.encodeIfPresent(locatorKey, forKey: .locatorKey)
+       try container.encodeIfPresent(locator, forKey: .locator)
    }
 
-   /// The fingerprint key this record's computer has (`DiveComputerIdentity.storageKey`); a serial-less BLE computer stands in with its peripheral UUID.
+   /// This record's `DiveComputerIdentity.storageKey`; with no serial, its locator stands in, or a pre-locator BLE record's UUID.
    var fingerprintStorageKey: String? {
        let identity = DiveComputerIdentity(family: family, model: model, serial: serial, transport: effectiveTransport)
-       let standIn = effectiveTransport == .ble ? DiveComputerLocator.ble(uuid: uuid).unitStandIn : nil
+       let standIn = (locator ?? (effectiveTransport == .ble ? .ble(uuid: uuid) : nil))?.unitStandIn
        return identity.storageKey(standIn: standIn)
    }
 }
@@ -146,15 +150,15 @@ private struct LossyStoredDevice: Decodable {
    }
    
    public func storeDevice(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil,
-                           transport: DCTransport? = nil, locatorKey: String? = nil) {
+                           transport: DCTransport? = nil, locator: DiveComputerLocator? = nil) {
        let device = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial,
-                                 transport: transport, locatorKey: locatorKey)
+                                 transport: transport, locator: locator)
        if let index = storedDevices.firstIndex(where: { $0.uuid == uuid }) {
            // Preserve existing serial/firmware/transport/locator if new ones not provided
            let existing = storedDevices[index]
            let deviceWithSerial = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial ?? existing.serial,
                                                firmware: existing.firmware, transport: transport ?? existing.transport,
-                                               locatorKey: locatorKey ?? existing.locatorKey)
+                                               locator: locator ?? existing.locator)
            storedDevices[index] = deviceWithSerial
            logDebug("Updated stored device: \(name)")
        } else {
@@ -191,7 +195,7 @@ private struct LossyStoredDevice: Decodable {
        }
        let old = storedDevices[index]
        storedDevices[index] = StoredDevice(uuid: newUUID, name: old.name, family: old.family, model: old.model, serial: old.serial, firmware: old.firmware,
-                                           transport: old.transport, locatorKey: old.locatorKey)
+                                           transport: old.transport, locator: old.locator)
        saveDevices()
        logInfo("Reconciled stored device \(name): UUID \(old.uuid) -> \(newUUID)")
        return true
