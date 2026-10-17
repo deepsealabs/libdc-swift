@@ -376,7 +376,7 @@ extension DiveComputerSession {
         let transport = devicePtr.pointee.iostream.map { dc_iostream_get_transport($0) } ?? locator.transport.dcValue
         let session = DiveComputerSession(devicePtr: devicePtr, displayName: displayName, storageKey: storageKey,
                                           transport: transport, locator: locator, deviceStorage: deviceStorage,
-                                          ownsDevice: true, lease: lease)
+                                          ownsDevice: true, lease: lease, closeCoordinator: RetrievalCloseCoordinator())
         session.installCancelIfCable()
         return session
     }
