@@ -31,6 +31,40 @@ final class SilentDevice: FakeSerialDevice {
     func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int { 0 }
 }
 
+/// An OSTC 3 that takes a download's INIT and then goes silent, as one lifted off its cable mid-download does.
+final class FakeOSTC3: FakeSerialDevice {
+    static let initCommand: UInt8 = 0xBB
+    static let ready: UInt8 = 0x4D
+    static let exitCommand: UInt8 = 0xFF
+
+    private let lock = NSLock()
+    private var inbox: [UInt8] = []
+    private var outbox: [UInt8] = []
+    private var answered = false
+
+    var received: [UInt8] {
+        lock.lock(); defer { lock.unlock() }
+        return inbox
+    }
+
+    func hostWrote(_ bytes: UnsafeRawBufferPointer) {
+        lock.lock(); defer { lock.unlock() }
+        inbox += bytes
+        guard !answered, bytes.contains(Self.initCommand) else { return }
+        answered = true
+        outbox = [Self.initCommand, Self.ready]
+    }
+
+    func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let n = min(size, outbox.count)
+        guard n > 0 else { return 0 }
+        outbox.withUnsafeBufferPointer { buffer.copyMemory(from: $0.baseAddress!, byteCount: n) }
+        outbox.removeFirst(n)
+        return n
+    }
+}
+
 /// A pseudo-terminal whose slave is the port under test and whose master a fake computer answers on.
 final class PtyLink {
     let master: Int32
@@ -229,6 +263,13 @@ extension XCTestCase {
         let session = try result.get()
         addTeardownBlock { session.close() }
         return session
+    }
+
+    /// Polls `condition` until it holds or `timeout` passes.
+    func waitFor(_ timeout: TimeInterval = 2, _ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline { usleep(5_000) }
+        return condition()
     }
 
     /// The `CableError` an open throws, failing the test if it opens or throws something else.

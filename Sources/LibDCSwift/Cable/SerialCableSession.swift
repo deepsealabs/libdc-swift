@@ -153,7 +153,7 @@ final class SerialTapFactory {
         return stream
     }
 
-    /// From here the tap gives up when the session is cancelled (or closed), as well as when the open was.
+    /// From here the tap also gives up once the session is cancelled, closing (an owned cable session cancels itself first) or released.
     func attach(_ session: DiveComputerSession) {
         let cancellation = cancellation
         tap?.setCancellation { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }

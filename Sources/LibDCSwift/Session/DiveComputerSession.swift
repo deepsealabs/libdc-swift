@@ -234,7 +234,7 @@ public final class DiveComputerSession {
         cancelled = true
     }
 
-    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends.
+    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends. On macOS an owned cable session is cancelled first, so its close never waits on a silent computer.
     public func close() {
         lock.lock()
         guard !closed else { lock.unlock(); return }
@@ -300,6 +300,14 @@ public final class DiveComputerSession {
     }
 
     private func teardown() {
+#if os(macOS)
+        // The close's quit command still goes out; a silent computer would otherwise hold each ack read for the driver's timeout.
+        if ownsDevice, transport != DC_TRANSPORT_BLE {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+#endif
         if cancelInstalled {
             libdc_set_cancel(devicePtr, nil, nil)
             cancelInstalled = false
