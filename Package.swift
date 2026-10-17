@@ -86,6 +86,7 @@ let package = Package(
                 "ViewModels/DiveDataViewModel.swift",
                 "Parser/GenericParser.swift",
                 "DiveLogRetriever.swift",
+                "RetrievalCloseCoordinator.swift",
                 "SuuntoNauticExplorer.swift",
                 "AutoSync/AutoSyncPolicy.swift",
                 "AutoSync/NauticSyncLink.swift",
