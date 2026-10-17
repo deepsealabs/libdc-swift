@@ -343,12 +343,15 @@ public class DiveLogRetriever {
             completion: @escaping (Bool) -> Void
         ) {
             let retrievalQueue = DispatchQueue(label: "com.libdcswift.retrieval", qos: .userInitiated)
-            
+            // Before the hop, so a close from here on can't free the device under the queued download.
+            bluetoothManager.beginRetrieval(devicePtr)
+
             retrievalQueue.async {
                 DispatchQueue.main.async { viewModel.resetProgress() }
                 
                 guard let dcDevice = devicePtr.pointee.device else {
                     DispatchQueue.main.async {
+                        bluetoothManager.endRetrieval(devicePtr)
                         viewModel.setDetailedError("No device connection found", status: DC_STATUS_IO)
                         completion(false)
                     }
@@ -405,6 +408,8 @@ public class DiveLogRetriever {
                         onProgress?(Int(devicePtr.pointee.progress.current), Int(devicePtr.pointee.progress.maximum))
                     }
                 }
+                let progressTimerStopped = DispatchSemaphore(value: 0)
+                progressTimer.setCancelHandler { progressTimerStopped.signal() }
                 progressTimer.resume()
                 
                 if useFingerprint {
@@ -417,7 +422,13 @@ public class DiveLogRetriever {
                     dc_device_set_fingerprint(dcDevice, nil, 0)
                 }
                 
-                let enumStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
+                let foreachStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
+                // A download cut short by a close must never pass as complete or advance the fingerprint.
+                let closedMidDownload = bluetoothManager.isCloseDeferred(devicePtr)
+                if closedMidDownload {
+                    logWarning("Download stopped because the device is being closed")
+                }
+                let enumStatus = closedMidDownload ? DC_STATUS_CANCELLED : foreachStatus
 
                 // Log errors for debugging
                 if enumStatus != DC_STATUS_SUCCESS && enumStatus != DC_STATUS_PROTOCOL {
@@ -425,6 +436,8 @@ public class DiveLogRetriever {
                 }
 
                 progressTimer.cancel()
+                // The handler reads devicePtr, which a held-back close frees.
+                progressTimerStopped.wait()
 
                 // Sync the device clock to system time while the BLE session is still open.
                 // Runs after a normal successful download, and also on the "no new dives"
@@ -463,6 +476,8 @@ public class DiveLogRetriever {
 
                 let family = dc_device_get_type(dcDevice)
                 DispatchQueue.main.async {
+                    // Before completion, so the host never sees a device a held-back close is about to free.
+                    bluetoothManager.endRetrieval(devicePtr)
                     let outcome = DiveLogRetriever.outcome(status: enumStatus, family: family,
                                                            fingerprintMatched: context.fingerprintMatched,
                                                            hasNewDives: context.hasNewDives,

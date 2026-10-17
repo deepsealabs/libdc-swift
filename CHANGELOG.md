@@ -57,6 +57,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - DC Tester: Download Dives says "No new dives since the last download" instead of "Downloaded 0 dive(s)" when the fingerprint stops it
 - DC Tester: a failed download suggests reconnecting first and only calls a dive gone when `/Logbook/Entries` no longer lists it; Capture raw on a `/Summary` path fetches every page (#56)
 
+## [1.17.9] - 2026-10-17
+### Added
+- `CoreBluetoothManager.isIOCancelled()`: true while a close waits for a download to stop; the BLE iostream then answers `DC_STATUS_CANCELLED`
+
+### Fixed
+- `close(clearDevicePtr: true)` no longer frees a device `DiveLogRetriever.retrieveDiveLogs` is still downloading from. It used to close and deallocate the device while `dc_device_foreach` was still running on it, so the download's next read used freed memory and crashed (`EXC_BAD_ACCESS` in `dc_iostream_read`, seen on Suunto Nautic/Ocean right after the driver logged "Retrying the stream"). The close now cancels the download (BLE reads, writes and sleeps answer `DC_STATUS_CANCELLED`, and the device's cancel check is set) and runs, once, when `dc_device_foreach` has returned and before the retrieval's completion. That completion reports failure with the usual interrupted/incomplete status, and the fingerprint is not advanced. `openBLEDevice` waits for a close held back this way before opening another device (capped like its wait for the disconnect)
+
 ## [1.7.0] - 2026-07-14
 ### Changed
 - Synced vendored libdivecomputer to upstream HEAD (`8e564eb`, `v0.9.0-74-g8e564eb`):

@@ -78,6 +78,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var truncatedStreams = Int.max
         /// Lose the link after this many chunks of the next /Data stream.
         var dropAfterChunks: Int?
+        /// Reads, writes and sleeps answer CANCELLED, as the BLE iostream does once the device is closed mid-download.
+        var ioCancelled = false
+        /// Set `ioCancelled` once this many bytes of the next /Data stream have been read.
+        var cancelIOAfterStreamBytes: Int?
+        private var streamBytesRead: Int?
         /// Value resources the watch can be subscribed to.
         var unsyncedCount: UInt16 = 0
         var busy: UInt8 = 0
@@ -204,6 +209,15 @@ final class SuuntoNauticTransportTests: XCTestCase {
             return true
         }
 
+        /// I/O calls answered CANCELLED.
+        private(set) var cancelledCalls = 0
+
+        func answersCancelled() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            if ioCancelled { cancelledCalls += 1 }
+            return ioCancelled
+        }
+
         // Watch -> host bytes; nil once the link is down and nothing is left in flight.
         func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int? {
             lock.lock(); defer { lock.unlock() }
@@ -211,6 +225,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
             guard n > 0 else { return linkUp ? 0 : nil }
             rx.withUnsafeBufferPointer { buffer.copyMemory(from: $0.baseAddress! + rxIndex, byteCount: n) }
             rxIndex += n
+            if let read = streamBytesRead, let limit = cancelIOAfterStreamBytes {
+                streamBytesRead = read + n
+                if read + n >= limit {
+                    ioCancelled = true
+                    cancelIOAfterStreamBytes = nil
+                    streamBytesRead = nil
+                }
+            }
             if let end = helloAckEnd, rxIndex >= end { helloAckEnd = nil }
             if rxIndex == rx.count { rx.removeAll(keepingCapacity: true); rxIndex = 0 }
             return n
@@ -315,6 +337,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 }
                 streamsServed += 1
                 streamedPaths.append(path)
+                if cancelIOAfterStreamBytes != nil { streamBytesRead = 0 }
                 send([0xA5, 0x08, 0x08, 0x00] + msgid + h + [0x01, 0x80, 0x00] + Self.u16(200))
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
@@ -469,7 +492,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var cbs = dc_custom_cbs_t()
         cbs.set_timeout = { _, _ in DC_STATUS_SUCCESS }
         cbs.read = { userdata, data, size, actual in
-            guard let n = SuuntoNauticTransportTests.watch(userdata).hostRead(into: data!, size: size) else {
+            let watch = SuuntoNauticTransportTests.watch(userdata)
+            if watch.answersCancelled() {
+                actual?.pointee = 0
+                return DC_STATUS_CANCELLED
+            }
+            guard let n = watch.hostRead(into: data!, size: size) else {
                 actual?.pointee = 0
                 return DC_STATUS_IO
             }
@@ -477,7 +505,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
             return n == 0 ? DC_STATUS_TIMEOUT : DC_STATUS_SUCCESS
         }
         cbs.write = { userdata, data, size, actual in
-            guard SuuntoNauticTransportTests.watch(userdata).hostWrote(UnsafeRawBufferPointer(start: data, count: size)) else {
+            let watch = SuuntoNauticTransportTests.watch(userdata)
+            if watch.answersCancelled() {
+                actual?.pointee = 0
+                return DC_STATUS_CANCELLED
+            }
+            guard watch.hostWrote(UnsafeRawBufferPointer(start: data, count: size)) else {
                 actual?.pointee = 0
                 return DC_STATUS_IO
             }
@@ -485,7 +518,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
             return DC_STATUS_SUCCESS
         }
         cbs.purge = { _, _ in DC_STATUS_SUCCESS }
-        cbs.sleep = { _, _ in DC_STATUS_SUCCESS }
+        cbs.sleep = { userdata, _ in
+            SuuntoNauticTransportTests.watch(userdata).answersCancelled() ? DC_STATUS_CANCELLED : DC_STATUS_SUCCESS
+        }
         cbs.close = { _ in DC_STATUS_SUCCESS }
 
         let userdata = Unmanaged.passUnretained(watch).toOpaque()
@@ -741,6 +776,39 @@ final class SuuntoNauticTransportTests: XCTestCase {
         }
         XCTAssertNotEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(delivered.map(\.fingerprint), [dives[2].id])
+    }
+
+    // MARK: - A close mid-download: the iostream answers CANCELLED
+
+    func testCancelledReadMidStreamEndsForeachWithoutRetrying() throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_960_000 + UInt32($0) * 7200, profileBytes: 60_000) }
+        let watch = FakeWatch(dives: dives)
+        let device = try open(watch)
+
+        // The newest dive arrives; the close lands part-way through the next one's stream.
+        let (status, delivered) = foreach(device) { n in
+            if n == 1 { watch.mutate { $0.cancelIOAfterStreamBytes = 5_000 } }
+        }
+        XCTAssertEqual(status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dives[2].id], "nothing past the cancelled dive")
+        XCTAssertEqual(watch.cancelledCalls, 1, "the first cancelled read ends it: no retry back-off, no new request")
+        XCTAssertEqual(watch.streamsServed, 2)
+        XCTAssertEqual(watch.getPaths.filter { $0.hasSuffix("/Data") }.count, 2)
+        XCTAssertFalse(watch.getPaths.contains("/Logbook/byId/\(dives[1].id)/Summary"), "no request after the cancel")
+    }
+
+    func testCancelledWriteBetweenDivesEndsForeach() throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_970_000 + UInt32($0) * 7200, profileBytes: 4000) }
+        let watch = FakeWatch(dives: dives)
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device) { n in
+            if n == 1 { watch.mutate { $0.ioCancelled = true } }
+        }
+        XCTAssertEqual(status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dives[2].id])
+        XCTAssertEqual(watch.cancelledCalls, 1)
+        XCTAssertEqual(watch.streamsServed, 1)
     }
 
     func testEmptyLogbookEntryIsSkipped() throws {

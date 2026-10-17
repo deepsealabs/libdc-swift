@@ -91,6 +91,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     private let writeConfirmSemaphore = DispatchSemaphore(value: 0) // Signals when a with-response write completes
     private var lastWriteError: Error? // Result of the most recent with-response write
     private var _deviceDataPtr: UnsafeMutablePointer<device_data_t>?
+    let retrievalClose = RetrievalCloseCoordinator()
     private var connectionCompletion: ((Bool) -> Void)?
     private var totalBytesReceived: Int = 0
     private var lastDataReceived: Date?
@@ -277,7 +278,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// failure (`DC_STATUS_IO`) — collapsing both into one boolean
     /// previously meant every transient readiness timeout was reported as
     /// an unrecoverable I/O error.
+    /// A cancelled write (`isIOCancelled()`) returns 2; `ble_write` reports `DC_STATUS_CANCELLED`.
     @objc public func write(_ data: Data!) -> Int {
+        if isIOCancelled() { return 2 }
         guard let peripheral = self.peripheral,
               let characteristic = self.writeCharacteristic else { return 2 }
         // Choose the write type from the characteristic's properties rather than always using
@@ -371,6 +374,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         let timeout: TimeInterval = self.timeout > 0 ? Double(self.timeout) / 1000.0 : 3.0
 
         while Date().timeIntervalSince(startTime) < timeout {
+            // close() wakes this wait when it cancels a download; don't hand it another packet.
+            if isIOCancelled() { return nil }
             var outData: Data?
 
             queue.sync {
@@ -406,8 +411,64 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return nil
     }
     
+    // MARK: - Downloads in flight
+
+    /// True while a close waits for a download to stop; link I/O then answers `DC_STATUS_CANCELLED`.
+    @objc public func isIOCancelled() -> Bool {
+        retrievalClose.isCancelRequested
+    }
+
+    /// So close() waits for this download instead of freeing the device under it.
+    func beginRetrieval(_ devicePtr: UnsafeMutablePointer<device_data_t>) {
+        retrievalClose.begin(UnsafeMutableRawPointer(devicePtr))
+    }
+
+    /// On main, once the download is done with the device: runs a close it held back.
+    func endRetrieval(_ devicePtr: UnsafeMutablePointer<device_data_t>) {
+        retrievalClose.end(UnsafeMutableRawPointer(devicePtr))?()
+    }
+
+    func isCloseDeferred(_ devicePtr: UnsafeMutablePointer<device_data_t>) -> Bool {
+        retrievalClose.isCloseDeferred(UnsafeMutableRawPointer(devicePtr))
+    }
+
+    private func cancelRetrieval(on devicePtr: UnsafeMutablePointer<device_data_t>) {
+        // Drivers polling the cancel check stop too; the signal wakes a read blocked on the semaphore.
+        if let device = devicePtr.pointee.device {
+            dc_device_set_cancel(device, { _ in 1 }, nil)
+        }
+        dataAvailableSemaphore.signal()
+    }
+
+    private func closeAfterRetrieval(_ devicePtr: UnsafeMutablePointer<device_data_t>) {
+        // A device opened since is not this close's to tear down.
+        guard openedDeviceDataPtr == devicePtr else {
+            logWarning("The device a download held was replaced before the download stopped; not closing it")
+            return
+        }
+        closeLink(clearDevicePtr: true)
+    }
+
     // MARK: - Device Management
+
+    /// A device `DiveLogRetriever` is still downloading from is closed once the download has stopped.
     @objc public func close(clearDevicePtr: Bool = false) {
+        if clearDevicePtr, let devicePtr = openedDeviceDataPtr {
+            let decision = retrievalClose.requestClose(UnsafeMutableRawPointer(devicePtr)) { [weak self] in
+                self?.closeAfterRetrieval(devicePtr)
+            }
+            if decision != .closeNow {
+                if decision == .deferred {
+                    logWarning("Close requested while a download is using the device; cancelling it and closing once it stops")
+                }
+                cancelRetrieval(on: devicePtr)
+                return
+            }
+        }
+        closeLink(clearDevicePtr: clearDevicePtr)
+    }
+
+    private func closeLink(clearDevicePtr: Bool) {
         isDisconnecting = true
         // isPeripheralReady/connectedDevice are NOT published here when there's
         // an actual peripheral to disconnect — didDisconnectPeripheral is the
@@ -486,22 +547,36 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
 
     /// Closes the open device and its link, then blocks until the peripheral
-    /// has actually disconnected (capped at `timeout`), so a connect that
-    /// follows doesn't race the cancel close() issues 0.5 s later. Call off
-    /// main: the wait polls main, where the CoreBluetooth callbacks land.
+    /// has actually disconnected, so a connect that follows doesn't race the
+    /// cancel close() issues 0.5 s later. A close held back by a download is
+    /// waited for first. Each wait is capped at `timeout`. Call off main: the
+    /// waits poll main, where the CoreBluetooth callbacks land.
     /// Returns the name of what was closed, or nil if nothing was open.
     @discardableResult
     func closeAndWaitForDisconnect(timeout: TimeInterval = 3) -> String? {
-        let closed: (name: String, peripheral: CBPeripheral?)? = DispatchQueue.main.sync {
+        let closed: (name: String, peripheral: CBPeripheral?, held: UnsafeMutablePointer<device_data_t>?)? = DispatchQueue.main.sync {
             guard openedDeviceDataPtr != nil || peripheral != nil else { return nil }
             let open = peripheral
             close(clearDevicePtr: true)
-            return (open?.name ?? "the open device", open)
+            // Still set only when a download is holding the close back.
+            return (open?.name ?? "the open device", open, openedDeviceDataPtr)
+        }
+        if let held = closed?.held {
+            waitForDeferredClose(of: held, timeout: timeout)
         }
         if let peripheral = closed?.peripheral {
             Self.waitForDisconnect(peripheral, timeout: timeout)
         }
         return closed?.name
+    }
+
+    private func waitForDeferredClose(of devicePtr: UnsafeMutablePointer<device_data_t>, timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if DispatchQueue.main.sync(execute: { openedDeviceDataPtr != devicePtr }) { return }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        logWarning("A download was still using the device \(Int(timeout)) s after close")
     }
 
     static func waitForDisconnect(_ peripheral: CBPeripheral, timeout: TimeInterval) {
