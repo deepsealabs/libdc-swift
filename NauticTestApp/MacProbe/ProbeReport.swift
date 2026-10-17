@@ -274,6 +274,7 @@ enum ProbeReport {
         out += ["", "## Events (newest first)", ""]
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"
+        formatter.timeZone = TimeZone(identifier: "UTC")
         for event in model.events.prefix(40) {
             out.append("- \(formatter.string(from: event.date)) \(event.text)")
         }

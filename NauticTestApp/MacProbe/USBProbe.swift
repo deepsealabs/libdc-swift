@@ -154,7 +154,7 @@ enum USBProbe {
     private static let interfaceInterfaceID100 = CFUUIDGetConstantUUIDWithBytes(
         nil, 0x73, 0xc9, 0x7a, 0xe8, 0x9e, 0xf3, 0x11, 0xd4, 0xb1, 0xd0, 0x00, 0x0a, 0x27, 0x05, 0x28, 0x61)
 
-    /// Device open, configuration, then interface 0 claimed with its pipes listed: what the L9 bulk stream needs.
+    /// Device open, configuration, then interface 0 claimed with its pipes listed: what a bulk transport needs.
     static func plugInTest(registryID: UInt64, expectCobaltPipes: Bool) -> [ProbeStep] {
         let service = Registry.service(registryID: registryID)
         guard service != 0 else { return [.failed("lookup", "device is gone")] }
