@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
@@ -71,6 +74,32 @@ jobs:
           fi
           echo "OK: no IOKit linkage or symbols in the iOS LibDCBridge slice."
 
+  test-ios-simulator:
+    name: xcodebuild test (iOS Simulator)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Boot an iOS Simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          UDID=$(xcrun simctl list devices available -j | python3 -c 'import json, sys; runtimes = json.load(sys.stdin)["devices"]; ios = [d for r, ds in runtimes.items() if r.startswith("com.apple.CoreSimulator.SimRuntime.iOS-") for d in ds]; iphones = [d for d in ios if d["name"].startswith("iPhone")]; print((iphones or ios)[0]["udid"])')
+          xcrun simctl boot "$UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+
+      - name: swift test (goldens + storage/retrieval/descriptor characterization)
+        run: >
+          xcodebuild test -scheme LibDCSwift-Package
+          -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}"
+          -derivedDataPath DerivedData-ios-sim
+          -only-testing:LibDCSwiftTests/GoldenParserTests
+          -only-testing:LibDCSwiftTests/DescriptorMatchingTests
+          -only-testing:LibDCSwiftTests/StorageInjectionTests
+          -only-testing:LibDCSwiftTests/RetrievalSeamTests
+
   dc-tester:
     name: DC Tester app (generic iOS)
     runs-on: macos-26
@@ -80,11 +109,19 @@ jobs:
           submodules: recursive
 
       - name: Install XcodeGen
+        # Not version-pinned: homebrew-core keeps one current formula, and
+        # pinning would mean building XcodeGen from a tagged commit instead.
+        # The generate-diff check below is the actual safety net -- any
+        # version drift that changes the generated project fails the build.
         run: brew install xcodegen
 
       - name: Generate NauticTestApp.xcodeproj
         working-directory: NauticTestApp
         run: xcodegen generate
+
+      - name: Fail if the generated project drifted from the committed one
+        working-directory: NauticTestApp
+        run: git diff --exit-code -- NauticTestApp.xcodeproj
 
       - name: Build NauticTestApp for generic iOS
         working-directory: NauticTestApp
