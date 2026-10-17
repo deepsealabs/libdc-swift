@@ -1,5 +1,4 @@
 import Foundation
-import CoreBluetooth
 
 extension Notification.Name {
     public static let deviceForgotten = Notification.Name("com.libdc.deviceForgotten")
@@ -13,8 +12,13 @@ public class StoredDevice: Codable {
    public let lastConnected: Date
    public var serial: String?  // Hardware serial number for fingerprint tracking
    public var firmware: String?  // Firmware version reported via DC_EVENT_DEVINFO
+   /// nil on records stored before cable transports, which are all BLE.
+   public let transport: DCTransport?
+   /// `DiveComputerLocator.locatorKey` of the last connection: provenance only, never how the record is found.
+   public var locatorKey: String?
 
-   public init(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil, firmware: String? = nil) {
+   public init(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil, firmware: String? = nil,
+               transport: DCTransport? = nil, locatorKey: String? = nil) {
        self.uuid = uuid
        self.name = name
        self.family = family
@@ -22,7 +26,12 @@ public class StoredDevice: Codable {
        self.lastConnected = Date()
        self.serial = serial
        self.firmware = firmware
+       self.transport = transport
+       self.locatorKey = locatorKey
    }
+
+   /// `transport`, with a record from before transports read as BLE.
+   public var effectiveTransport: DCTransport { transport ?? .ble }
 
    private enum CodingKeys: String, CodingKey {
        case uuid
@@ -32,6 +41,8 @@ public class StoredDevice: Codable {
        case lastConnected
        case serial
        case firmware
+       case transport
+       case locatorKey
    }
 
    public required init(from decoder: Decoder) throws {
@@ -43,6 +54,8 @@ public class StoredDevice: Codable {
        lastConnected = try container.decode(Date.self, forKey: .lastConnected)
        serial = try container.decodeIfPresent(String.self, forKey: .serial)  // Optional for backward compatibility
        firmware = try container.decodeIfPresent(String.self, forKey: .firmware)  // Optional for backward compatibility
+       transport = try container.decodeIfPresent(DCTransport.self, forKey: .transport)
+       locatorKey = try container.decodeIfPresent(String.self, forKey: .locatorKey)
    }
 
    public func encode(to encoder: Encoder) throws {
@@ -54,6 +67,22 @@ public class StoredDevice: Codable {
        try container.encode(lastConnected, forKey: .lastConnected)
        try container.encodeIfPresent(serial, forKey: .serial)
        try container.encodeIfPresent(firmware, forKey: .firmware)
+       try container.encodeIfPresent(transport, forKey: .transport)
+       try container.encodeIfPresent(locatorKey, forKey: .locatorKey)
+   }
+}
+
+/// Decodes one array element without throwing, so a record this version can't read (a newer family, say) drops alone.
+private struct LossyStoredDevice: Decodable {
+   let device: StoredDevice?
+
+   init(from decoder: Decoder) throws {
+       do {
+           device = try StoredDevice(from: decoder)
+       } catch {
+           logWarning("Skipping a stored device this version can't read: \(error)")
+           device = nil
+       }
    }
 }
 
@@ -80,10 +109,14 @@ public class StoredDevice: Codable {
        self.init(userDefaults: .standard)
    }
    
+   static func decodeDevices(_ data: Data) throws -> [StoredDevice] {
+       try JSONDecoder().decode([LossyStoredDevice].self, from: data).compactMap(\.device)
+   }
+
    private func loadDevices() {
        if let data = defaults.data(forKey: storageKey) {
            do {
-               let devices = try JSONDecoder().decode([StoredDevice].self, from: data)
+               let devices = try Self.decodeDevices(data)
                storedDevices = devices
                logDebug("Loaded \(devices.count) devices from UserDefaults")
            } catch {
@@ -105,13 +138,16 @@ public class StoredDevice: Codable {
        }
    }
    
-   public func storeDevice(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil) {
-       let device = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial)
+   public func storeDevice(uuid: String, name: String, family: DeviceConfiguration.DeviceFamily, model: UInt32, serial: String? = nil,
+                           transport: DCTransport? = nil, locatorKey: String? = nil) {
+       let device = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial,
+                                 transport: transport, locatorKey: locatorKey)
        if let index = storedDevices.firstIndex(where: { $0.uuid == uuid }) {
-           // Preserve existing serial/firmware if new ones not provided
-           let existingSerial = storedDevices[index].serial
-           let existingFirmware = storedDevices[index].firmware
-           let deviceWithSerial = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial ?? existingSerial, firmware: existingFirmware)
+           // Preserve existing serial/firmware/transport/locator if new ones not provided
+           let existing = storedDevices[index]
+           let deviceWithSerial = StoredDevice(uuid: uuid, name: name, family: family, model: model, serial: serial ?? existing.serial,
+                                               firmware: existing.firmware, transport: transport ?? existing.transport,
+                                               locatorKey: locatorKey ?? existing.locatorKey)
            storedDevices[index] = deviceWithSerial
            logDebug("Updated stored device: \(name)")
        } else {
@@ -135,18 +171,20 @@ public class StoredDevice: Codable {
    /// UUID, migrate the record to `newUUID` (preserving family/model/serial)
    /// so auto-reconnect by stored UUID keeps working. The name carries the
    /// device serial, so it identifies one physical device. Returns true if a
-   /// record was migrated.
+   /// record was migrated. Only BLE records move: a cable record of the same
+   /// name is a different connection to keep.
    @discardableResult
    public func reconcileUUID(name: String, newUUID: String) -> Bool {
        // Already stored under the current UUID -- nothing to do.
        if storedDevices.contains(where: { $0.uuid == newUUID }) {
            return false
        }
-       guard let index = storedDevices.firstIndex(where: { $0.name == name }) else {
+       guard let index = storedDevices.firstIndex(where: { $0.name == name && $0.effectiveTransport == .ble }) else {
            return false
        }
        let old = storedDevices[index]
-       storedDevices[index] = StoredDevice(uuid: newUUID, name: old.name, family: old.family, model: old.model, serial: old.serial, firmware: old.firmware)
+       storedDevices[index] = StoredDevice(uuid: newUUID, name: old.name, family: old.family, model: old.model, serial: old.serial, firmware: old.firmware,
+                                           transport: old.transport, locatorKey: old.locatorKey)
        saveDevices()
        logInfo("Reconciled stored device \(name): UUID \(old.uuid) -> \(newUUID)")
        return true
@@ -172,6 +210,14 @@ public class StoredDevice: Codable {
    
    public func getStoredDevice(uuid: String) -> StoredDevice? {
        return storedDevices.first { $0.uuid == uuid }
+   }
+
+   /// The most recently connected record of this computer on any transport; nil for an unknown (empty or all-zero) serial, which many units share.
+   public func storedDevice(family: DeviceConfiguration.DeviceFamily, serial: String) -> StoredDevice? {
+       guard let wanted = DiveComputerIdentity.normalizedSerial(serial) else { return nil }
+       return storedDevices
+           .filter { $0.family == family && DiveComputerIdentity.normalizedSerial($0.serial) == wanted }
+           .max { $0.lastConnected < $1.lastConnected }
    }
    
    public func removeDevice(uuid: String) {
@@ -213,8 +259,7 @@ public class StoredDevice: Codable {
        }
        
        do {
-           let devices = try JSONDecoder().decode([StoredDevice].self, from: data)
-           return devices
+           return try Self.decodeDevices(data)
        } catch {
            logError("Failed to decode stored devices: \(error)")
            return nil
