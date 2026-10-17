@@ -124,18 +124,7 @@ final class SerialReplayTests: XCTestCase {
 
     private func replay(_ recording: DCRecording, viewModel: DiveDataViewModel? = nil) throws
         -> (result: DiveDownloadResult, dives: [DiveData], script: ScriptedStream) {
-        var context: OpaquePointer?
-        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
-        let script = ScriptedStream(recording: recording)
-        let stream = try DCCustomStream.open(backend: script, transport: script.transport, context: context)
-        let session = try DiveComputerSession.open(
-            iostream: stream, context: try XCTUnwrap(context), family: try XCTUnwrap(recording.family),
-            model: try XCTUnwrap(recording.model), displayName: "Heinrichs Weikamp OSTC Mk2", storageKey: "serial:replay",
-            locator: .serial(path: "/dev/cu.usbserial-REPLAY", usbSerial: nil, vid: 0x0403, pid: 0x6001),
-            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
-        defer { session.close() }
-        let (result, dives) = downloadToEnd(session, viewModel: viewModel)
-        return (try XCTUnwrap(result), dives, script)
+        try replayDownload(recording, displayName: "Heinrichs Weikamp OSTC Mk2", viewModel: viewModel)
     }
 
     private func assertSameDives(_ a: [DiveData], _ b: [DiveData], file: StaticString = #filePath, line: UInt = #line) {
@@ -262,6 +251,28 @@ final class SerialReplayTests: XCTestCase {
         XCTAssertTrue(script.isComplete)
         XCTAssertEqual(second.outcome, .noNewDives)
         XCTAssertEqual(dives.count, 0)
+    }
+
+    // MARK: - Hardware recordings
+
+    /// Every recording `SerialHardwareTests` made on a real computer that has been committed to Fixtures/Hardware.
+    func testCommittedHardwareRecordingsReplay() throws {
+        let urls = Bundle.module.urls(forResourcesWithExtension: DCRecording.fileExtension, subdirectory: "Hardware") ?? []
+        try XCTSkipIf(urls.isEmpty, "No hardware recordings are committed yet")
+        for url in urls.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            let name = url.lastPathComponent
+            let recording = try DCRecording(contentsOf: url)
+            XCTAssertEqual(recording.transport, DC_TRANSPORT_SERIAL, name)
+            let family = try XCTUnwrap(recording.family.flatMap { DeviceConfiguration.DeviceFamily(dcFamily: $0) }, name)
+            let model = try XCTUnwrap(DeviceCatalog.models(for: .serial).first { $0.family == family && $0.model == recording.model },
+                                      "\(name) is for no serial model in the catalog")
+            let (result, dives, script) = try replayDownload(recording, displayName: model.name)
+            XCTAssertNil(script.deviation, name)
+            XCTAssertTrue(script.isComplete, "\(name): played \(script.consumed) of \(script.exchanges.count)")
+            XCTAssertEqual(result.outcome, .completed, name)
+            XCTAssertGreaterThan(dives.count, 0, name)
+            XCTAssertEqual(result.divesDownloaded, dives.count, name)
+        }
     }
 
     // MARK: - Stored model

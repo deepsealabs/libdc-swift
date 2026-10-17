@@ -147,7 +147,8 @@ let package = Package(
                 .copy("Fixtures/logbook_entries_multi.bin"),
                 .copy("Fixtures/suunto_nautic_1787752091.golden.json"),
                 .copy("Fixtures/reefnet_sensus_synthetic.dcrec"),
-                .copy("Fixtures/hw_ostc_mk2_synthetic.dcrec")
+                .copy("Fixtures/hw_ostc_mk2_synthetic.dcrec"),
+                .copy("Fixtures/Hardware")
             ]
         )
     ]

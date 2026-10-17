@@ -287,6 +287,23 @@ extension XCTestCase {
         }
     }
 
+    /// Replays `recording` through `ScriptedStream` in a session keyed as a cable's would be.
+    func replayDownload(_ recording: DCRecording, displayName: String, viewModel: DiveDataViewModel? = nil) throws
+        -> (result: DiveDownloadResult, dives: [DiveData], script: ScriptedStream) {
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let script = ScriptedStream(recording: recording)
+        let stream = try DCCustomStream.open(backend: script, transport: script.transport, context: context)
+        let session = try DiveComputerSession.open(
+            iostream: stream, context: try XCTUnwrap(context), family: try XCTUnwrap(recording.family),
+            model: try XCTUnwrap(recording.model), displayName: displayName, storageKey: "serial:replay",
+            locator: .serial(path: "/dev/cu.usbserial-REPLAY", usbSerial: nil, vid: 0x0403, pid: 0x6001),
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
+        defer { session.close() }
+        let (result, dives) = downloadToEnd(session, viewModel: viewModel)
+        return (try XCTUnwrap(result), dives, script)
+    }
+
     /// Runs a session download to its end and lets the view model's last main-queue turns land.
     func downloadToEnd(_ session: DiveComputerSession, viewModel: DiveDataViewModel? = nil,
                        timeout: TimeInterval = 15) -> (result: DiveDownloadResult?, dives: [DiveData]) {
