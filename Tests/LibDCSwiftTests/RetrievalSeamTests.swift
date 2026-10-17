@@ -175,6 +175,27 @@ final class RetrievalSeamTests: XCTestCase {
         return ptr
     }
 
+    /// `finalizeDiveNumbering`/`updateProgress` each hop through their own
+    /// `DispatchQueue.main.async`, on top of the completion handler's own --
+    /// a single extra drain isn't always enough under CI scheduling, so poll.
+    private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 3, file: StaticString = #filePath, line: UInt = #line) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline {
+            let step = expectation(description: "drain")
+            DispatchQueue.main.async { step.fulfill() }
+            wait(for: [step], timeout: 1)
+        }
+        XCTAssertTrue(condition(), "condition not met within \(timeout)s", file: file, line: line)
+    }
+
+    /// `updateProgress` only ever sets a terminal case after the download finishes.
+    private func isTerminal(_ progress: DiveDataViewModel.DownloadProgress) -> Bool {
+        switch progress {
+        case .inProgress, .notStarted: return false
+        default: return true
+        }
+    }
+
     private func isolatedSuite(_ name: String) -> UserDefaults {
         let suiteName = "com.libdcswift.tests.retrievalseam.\(name).\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -218,10 +239,7 @@ final class RetrievalSeamTests: XCTestCase {
         deviceStorage.storeDevice(uuid: "FAKE-UUID", name: "Suunto Ocean 123456", family: .suuntoNautic, model: 1)
 
         XCTAssertTrue(download(ptr, viewModel: viewModel, deviceStorage: deviceStorage))
-
-        let finished = expectation(description: "main queue drained")
-        DispatchQueue.main.async { finished.fulfill() }
-        wait(for: [finished], timeout: 2)
+        waitUntil { isTerminal(viewModel.progress) }
 
         XCTAssertEqual(viewModel.dives.map(\.number), [1, 2], "finalizeDiveNumbering renumbers oldest=#1")
         XCTAssertEqual(viewModel.dives.map(\.datetime).sorted(), viewModel.dives.map(\.datetime))
@@ -255,9 +273,7 @@ final class RetrievalSeamTests: XCTestCase {
         let first = try devicePtr(for: watch)
         defer { first.deallocate() }
         XCTAssertTrue(download(first, viewModel: viewModel, deviceStorage: deviceStorage))
-        let firstDrain = expectation(description: "main queue drained (first run)")
-        DispatchQueue.main.async { firstDrain.fulfill() }
-        wait(for: [firstDrain], timeout: 2)
+        waitUntil { isTerminal(viewModel.progress) }
         let afterFirstRun = viewModel.dives.count
         XCTAssertEqual(afterFirstRun, 2)
 
@@ -268,10 +284,7 @@ final class RetrievalSeamTests: XCTestCase {
         let second = try devicePtr(for: watch)
         defer { second.deallocate() }
         XCTAssertTrue(download(second, viewModel: viewModel, deviceStorage: deviceStorage))
-
-        let finished = expectation(description: "main queue drained")
-        DispatchQueue.main.async { finished.fulfill() }
-        wait(for: [finished], timeout: 2)
+        waitUntil { isTerminal(viewModel.progress) }
 
         XCTAssertEqual(viewModel.dives.count, afterFirstRun, "no new dives on the second run")
         guard case .noNewDives = viewModel.progress else { return XCTFail("expected .noNewDives, got \(viewModel.progress)") }
@@ -300,10 +313,7 @@ final class RetrievalSeamTests: XCTestCase {
             return divesOffered > 1
         })
         XCTAssertTrue(result)
-
-        let finished = expectation(description: "main queue drained")
-        DispatchQueue.main.async { finished.fulfill() }
-        wait(for: [finished], timeout: 2)
+        waitUntil { isTerminal(viewModel.progress) }
 
         XCTAssertEqual(viewModel.dives.map(\.datetime), [Date(timeIntervalSince1970: TimeInterval(1_789_757_200))])
         guard case .completed = viewModel.progress else { return XCTFail("expected .completed, got \(viewModel.progress)") }
@@ -320,10 +330,7 @@ final class RetrievalSeamTests: XCTestCase {
 
         let result = download(ptr, viewModel: viewModel, deviceStorage: deviceStorage)
         XCTAssertFalse(result, "an all-empty read is not reported as success")
-
-        let finished = expectation(description: "main queue drained")
-        DispatchQueue.main.async { finished.fulfill() }
-        wait(for: [finished], timeout: 2)
+        waitUntil { isTerminal(viewModel.progress) }
 
         XCTAssertTrue(viewModel.dives.isEmpty)
         guard case .emptyRead = viewModel.progress else { return XCTFail("expected .emptyRead, got \(viewModel.progress)") }
@@ -360,10 +367,7 @@ final class RetrievalSeamTests: XCTestCase {
         wait(for: [doneA, doneB], timeout: 5)
         XCTAssertEqual(resultA, true)
         XCTAssertEqual(resultB, true)
-
-        let finished = expectation(description: "main queue drained")
-        DispatchQueue.main.async { finished.fulfill() }
-        wait(for: [finished], timeout: 2)
+        waitUntil { isTerminal(viewModelA.progress) && isTerminal(viewModelB.progress) }
 
         XCTAssertEqual(viewModelA.dives.map(\.datetime), [Date(timeIntervalSince1970: TimeInterval(1_789_750_000))])
         XCTAssertEqual(viewModelB.dives.map(\.datetime), [Date(timeIntervalSince1970: TimeInterval(1_789_757_200))])
