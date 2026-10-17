@@ -341,9 +341,9 @@ public class DiveLogRetriever {
             return 1
         }
 
+        // One main-queue turn per dive, enqueued before the finish block, so completion sees every dive.
         DispatchQueue.main.async {
-            context.viewModel.appendDives([diveData])
-            context.viewModel.updateProgress(count: context.logCount)
+            context.viewModel.appendDownloadedDive(diveData)
         }
 
         context.hasNewDives = true
@@ -505,7 +505,7 @@ public class DiveLogRetriever {
             )
         }
 
-    /// Saves no fingerprint itself: the result's `fingerprintCommit` (complete, fully parsed walks only) waits for `acknowledge()`. Completes on main.
+    /// Saves no fingerprint itself: the result's `fingerprintCommit` (complete, fully parsed walks only) waits for `acknowledge()`. Completes on main, with every dive in `viewModel.dives`, numbered.
     public static func retrieveDiveLogs(
             session: DiveComputerSession,
             viewModel: DiveDataViewModel,
@@ -591,7 +591,7 @@ public class DiveLogRetriever {
             let policy: RetrievalPolicy = session == nil ? .legacy : .session
 
             retrievalQueue.async {
-                DispatchQueue.main.async { viewModel.resetProgress() }
+                DispatchQueue.main.async { viewModel.applyResetProgress() }
 
                 guard let dcDevice = devicePtr.pointee.device else {
                     DispatchQueue.main.async(execute: noDevice)
@@ -847,7 +847,7 @@ public class DiveLogRetriever {
             ? DiveDataViewModel.DownloadInterruption(status: statusName(enumStatus), divesDownloaded: divesDownloaded)
             : nil
         if context.hasNewDives {
-            viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
+            viewModel.applyDiveNumbering()  // Sort by date and renumber (oldest = #1) before completion reads them
         }
 
         switch outcome {
