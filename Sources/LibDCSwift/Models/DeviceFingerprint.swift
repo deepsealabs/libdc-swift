@@ -9,14 +9,32 @@ public struct DeviceFingerprint: Codable, Identifiable {
     public let serial: String
     public let fingerprint: Data
     public let timestamp: Date
+    /// `DiveComputerIdentity.storageKey`; nil on a record a 1.18 download saved that nothing has migrated.
+    public let key: String?
     
     public init(deviceType: String, serial: String, fingerprint: Data) {
+        self.init(deviceType: deviceType, serial: serial, fingerprint: fingerprint, key: nil)
+    }
+
+    init(deviceType: String, serial: String, fingerprint: Data, key: String?) {
         self.id = UUID()
         self.deviceType = deviceType
         self.serial = serial
         self.fingerprint = fingerprint
         self.timestamp = Date()
+        self.key = key
     }
+
+    private init(_ record: DeviceFingerprint, key: String) {
+        id = record.id
+        deviceType = record.deviceType
+        serial = record.serial
+        fingerprint = record.fingerprint
+        timestamp = record.timestamp
+        self.key = key
+    }
+
+    func keyed(_ key: String) -> DeviceFingerprint { DeviceFingerprint(self, key: key) }
 }
 
 /// Manages persistent storage of device fingerprints
@@ -24,6 +42,8 @@ public class DeviceFingerprintStorage {
     public static let shared = DeviceFingerprintStorage()
     private let fingerprintKey = "DeviceFingerprints"
     private let defaults: UserDefaults
+    // Every change is load-modify-save: unserialized, a launch-time migration could write back a list missing a new commit.
+    private let lock = NSRecursiveLock()
 
     /// Test seam: an isolated suite instead of `.standard`.
     init(userDefaults: UserDefaults = .standard) {
@@ -51,6 +71,7 @@ public class DeviceFingerprintStorage {
     /// Saves fingerprints to persistent storage
     /// - Parameter fingerprints: Array of DeviceFingerprint objects to save
     public func saveFingerprints(_ fingerprints: [DeviceFingerprint]) {
+        lock.lock(); defer { lock.unlock() }
         if let data = try? JSONEncoder().encode(fingerprints) {
             defaults.set(data, forKey: fingerprintKey)
         }
@@ -87,8 +108,13 @@ public class DeviceFingerprintStorage {
     ///   - deviceType: Type/model of device
     ///   - serial: Serial number of device
     public func saveFingerprint(_ fingerprint: Data, deviceType: String, serial: String) {
+        lock.lock(); defer { lock.unlock() }
         var fingerprints = loadFingerprints()
         let normalizedType = normalizeDeviceType(deviceType)
+        // A migrated record keeps its key when a 1.18-style save replaces it.
+        let key = fingerprints.first {
+            normalizeDeviceType($0.deviceType) == normalizedType && $0.serial == serial && $0.key != nil
+        }?.key
         
         // Remove existing fingerprints for this device
         fingerprints.removeAll { 
@@ -99,7 +125,8 @@ public class DeviceFingerprintStorage {
         let newFingerprint = DeviceFingerprint(
             deviceType: deviceType,
             serial: serial,
-            fingerprint: fingerprint
+            fingerprint: fingerprint,
+            key: key
         )
         
         fingerprints.append(newFingerprint)
@@ -109,6 +136,7 @@ public class DeviceFingerprintStorage {
     
     /// Clears fingerprint for specific device
     public func clearFingerprint(forDeviceType deviceType: String, serial: String) {
+        lock.lock(); defer { lock.unlock() }
         var fingerprints = loadFingerprints()
         let normalizedType = normalizeDeviceType(deviceType)
         fingerprints.removeAll {
@@ -121,6 +149,7 @@ public class DeviceFingerprintStorage {
 
     /// Clears all fingerprints for a specific device type (any serial)
     public func clearFingerprintsForDeviceType(_ deviceType: String) {
+        lock.lock(); defer { lock.unlock() }
         var fingerprints = loadFingerprints()
         let normalizedType = normalizeDeviceType(deviceType)
         let countBefore = fingerprints.count
@@ -134,7 +163,101 @@ public class DeviceFingerprintStorage {
 
     /// Clears all stored fingerprints
     public func clearAllFingerprints() {
+        lock.lock(); defer { lock.unlock() }
         defaults.removeObject(forKey: fingerprintKey)
         logInfo("🗑️ Cleared all fingerprints")
+    }
+
+    // MARK: - Keyed by identity
+
+    /// The newest fingerprint under the identity's key, else a 1.18 record of its family and serial, so unmigrated stores still stop.
+    public func getFingerprint(for identity: DiveComputerIdentity, standIn: String? = nil) -> DeviceFingerprint? {
+        guard let key = identity.storageKey(standIn: standIn) else { return nil }
+        return loadFingerprints()
+            .filter { !$0.fingerprint.isEmpty && belongs($0, to: identity, key: key) }
+            .max { $0.timestamp < $1.timestamp }
+    }
+
+    /// Replaces this computer's records with one under its key, keeping what a 1.18 reader looks up; no key, no save.
+    public func saveFingerprint(_ fingerprint: Data, for identity: DiveComputerIdentity, standIn: String? = nil) {
+        guard let key = identity.storageKey(standIn: standIn) else {
+            logInfo("No fingerprint saved for \(identity.canonicalName): it reports no serial and has no stand-in")
+            return
+        }
+        lock.lock(); defer { lock.unlock() }
+        var fingerprints = loadFingerprints()
+        let replaced = fingerprints.filter { belongs($0, to: identity, key: key) }
+        fingerprints.removeAll { belongs($0, to: identity, key: key) }
+        let deviceType = replaced.max { $0.timestamp < $1.timestamp }?.deviceType ?? identity.canonicalName
+        fingerprints.append(DeviceFingerprint(deviceType: deviceType, serial: identity.devinfoSerial,
+                                              fingerprint: fingerprint, key: key))
+        saveFingerprints(fingerprints)
+        logInfo("Saved fingerprint for \(key)")
+    }
+
+    /// Stores a fingerprint from a dive the host already has, when none is stored; seed only from a completed download (see Docs/DEVICE_IDENTITY.md).
+    @discardableResult
+    public func seedFingerprint(identity: DiveComputerIdentity, data: Data, standIn: String? = nil) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !data.isEmpty, identity.storageKey(standIn: standIn) != nil,
+              getFingerprint(for: identity, standIn: standIn) == nil else { return false }
+        saveFingerprint(data, for: identity, standIn: standIn)
+        return true
+    }
+
+    /// Clears this computer's records, keyed or 1.18.
+    public func clearFingerprint(for identity: DiveComputerIdentity, standIn: String? = nil) {
+        guard let key = identity.storageKey(standIn: standIn) else { return }
+        lock.lock(); defer { lock.unlock() }
+        var fingerprints = loadFingerprints()
+        fingerprints.removeAll { belongs($0, to: identity, key: key) }
+        saveFingerprints(fingerprints)
+    }
+
+    func clearFingerprints(forKey key: String) {
+        lock.lock(); defer { lock.unlock() }
+        var fingerprints = loadFingerprints()
+        let count = fingerprints.count
+        fingerprints.removeAll { $0.key == key }
+        if fingerprints.count != count { saveFingerprints(fingerprints) }
+    }
+
+    /// Keys 1.18 records in place, keeping what a 1.18 lookup reads; idempotent (see Docs/DEVICE_IDENTITY.md).
+    @discardableResult
+    public func migrateLegacyKeys(storedDevices: [StoredDevice] = []) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        var fingerprints = loadFingerprints()
+        var keyed = 0
+        for index in fingerprints.indices where fingerprints[index].key == nil {
+            let record = fingerprints[index]
+            guard let key = Self.legacyKey(record, storedDevices: storedDevices) else { continue }
+            fingerprints[index] = record.keyed(key)
+            keyed += 1
+        }
+        if keyed > 0 {
+            saveFingerprints(fingerprints)
+            logInfo("Keyed \(keyed) fingerprint(s) by computer identity")
+        }
+        return keyed
+    }
+
+    private static func legacyKey(_ record: DeviceFingerprint, storedDevices: [StoredDevice]) -> String? {
+        guard let family = DeviceCatalog.family(forName: record.deviceType) else { return nil }
+        if DiveComputerIdentity.normalizedSerial(record.serial) != nil {
+            return DiveComputerIdentity(family: family, model: 0, serial: record.serial, transport: .ble).storageKey()
+        }
+        let candidates = storedDevices.filter {
+            $0.family == family && $0.effectiveTransport == .ble && $0.serial != nil
+                && DiveComputerIdentity.normalizedSerial($0.serial) == nil
+        }
+        guard candidates.count == 1, let device = candidates.first else { return nil }
+        return device.fingerprintStorageKey
+    }
+
+    /// Under `key`, or a 1.18 record of the identity's family and serial.
+    private func belongs(_ record: DeviceFingerprint, to identity: DiveComputerIdentity, key: String) -> Bool {
+        if let recordKey = record.key { return recordKey == key }
+        guard let serial = identity.serial, record.serial.lowercased() == serial else { return false }
+        return DeviceCatalog.family(forName: record.deviceType) == identity.family
     }
 } 

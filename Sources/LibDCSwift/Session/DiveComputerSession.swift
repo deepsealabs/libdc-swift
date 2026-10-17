@@ -82,6 +82,8 @@ public final class DiveComputerSession {
     /// The `DeviceStorage` key for this computer (a BLE peripheral UUID, for one).
     public let storageKey: String
     public let transport: dc_transport_t
+    /// Where the computer was reached; for a computer with no serial its `unitStandIn` keys the fingerprint.
+    public let locator: DiveComputerLocator?
     let deviceStorage: DeviceStorage
 
     private let ownsDevice: Bool
@@ -93,13 +95,16 @@ public final class DiveComputerSession {
     private var closeRequested = false
     private var cancelInstalled = false
     private var lookupContext: Unmanaged<DiveDataViewModel>?
+    private var currentIdentity: DiveComputerIdentity?
 
     private init(devicePtr: UnsafeMutablePointer<device_data_t>, displayName: String, storageKey: String,
-                 transport: dc_transport_t, deviceStorage: DeviceStorage, ownsDevice: Bool, lease: DiveComputerSessionLease) {
+                 transport: dc_transport_t, locator: DiveComputerLocator?, deviceStorage: DeviceStorage, ownsDevice: Bool,
+                 lease: DiveComputerSessionLease) {
         self.devicePtr = devicePtr
         self.displayName = displayName
         self.storageKey = storageKey
         self.transport = transport
+        self.locator = locator
         self.deviceStorage = deviceStorage
         self.ownsDevice = ownsDevice
         self.lease = lease
@@ -115,6 +120,7 @@ public final class DiveComputerSession {
         model: UInt32,
         displayName: String,
         storageKey: String,
+        locator: DiveComputerLocator? = nil,
         attempts: UInt32 = 1,
         retryMilliseconds: UInt32 = 0,
         deviceStorage: DeviceStorage = .shared,
@@ -136,8 +142,8 @@ public final class DiveComputerSession {
             lease.release()
             throw DiveComputerSessionError.openFailed(status)
         }
-        let session = DiveComputerSession(devicePtr: data, displayName: displayName, storageKey: storageKey,
-                                          transport: transport, deviceStorage: deviceStorage, ownsDevice: true, lease: lease)
+        let session = DiveComputerSession(devicePtr: data, displayName: displayName, storageKey: storageKey, transport: transport,
+                                          locator: locator, deviceStorage: deviceStorage, ownsDevice: true, lease: lease)
         session.installCancelIfCable()
         return session
     }
@@ -147,14 +153,15 @@ public final class DiveComputerSession {
         devicePtr: UnsafeMutablePointer<device_data_t>,
         displayName: String,
         storageKey: String,
+        locator: DiveComputerLocator? = nil,
         deviceStorage: DeviceStorage = .shared,
         lease: DiveComputerSessionLease = .shared
     ) throws -> DiveComputerSession {
         guard devicePtr.pointee.device != nil else { throw DiveComputerSessionError.noDevice }
         guard lease.tryAcquire() else { throw DiveComputerSessionError.busy }
         let transport = devicePtr.pointee.iostream.map { dc_iostream_get_transport($0) } ?? DC_TRANSPORT_BLE
-        let session = DiveComputerSession(devicePtr: devicePtr, displayName: displayName, storageKey: storageKey,
-                                          transport: transport, deviceStorage: deviceStorage, ownsDevice: false, lease: lease)
+        let session = DiveComputerSession(devicePtr: devicePtr, displayName: displayName, storageKey: storageKey, transport: transport,
+                                          locator: locator, deviceStorage: deviceStorage, ownsDevice: false, lease: lease)
         session.installCancelIfCable()
         return session
     }
@@ -166,7 +173,40 @@ public final class DiveComputerSession {
         lease: DiveComputerSessionLease = .shared
     ) throws -> DiveComputerSession {
         try adopt(devicePtr: devicePtr, displayName: peripheral.name ?? "Unknown Device",
-                  storageKey: peripheral.identifier.uuidString, lease: lease)
+                  storageKey: peripheral.identifier.uuidString, locator: .ble(uuid: peripheral.identifier.uuidString), lease: lease)
+    }
+
+    /// The computer DEVINFO reported, once a download has seen it.
+    public var identity: DiveComputerIdentity? {
+        lock.lock(); defer { lock.unlock() }
+        return currentIdentity
+    }
+
+    /// The locator's transport, else the iostream's.
+    var identityTransport: DCTransport {
+        locator?.transport ?? DCTransport(dcValue: transport) ?? .ble
+    }
+
+    var fingerprintStandIn: String? { locator?.unitStandIn }
+
+    /// Reads the identity from DEVINFO (or the descriptor, for a family that never sends it) and keeps it; nil before DEVINFO.
+    @discardableResult
+    func refreshIdentity() -> DiveComputerIdentity? {
+        guard let identity = DiveComputerIdentity(device: devicePtr, transport: identityTransport)
+                ?? DiveComputerIdentity(descriptorOf: devicePtr, transport: identityTransport) else { return self.identity }
+        lock.lock()
+        currentIdentity = identity
+        lock.unlock()
+        return identity
+    }
+
+    /// The stored fingerprint the C lookup hands the device, keyed by identity rather than the descriptor's name.
+    func storedFingerprintForLookup() -> Data? {
+        lock.lock()
+        let viewModel = lookupContext?.takeUnretainedValue()
+        lock.unlock()
+        guard let viewModel, let identity = refreshIdentity() else { return nil }
+        return viewModel.getFingerprint(for: identity, standIn: fingerprintStandIn)
     }
 
     public var isCancelled: Bool {
@@ -222,14 +262,14 @@ public final class DiveComputerSession {
         if closeNow { teardown() }
     }
 
-    /// The C lookup can run after the caller drops its view model (a closed window), so hold it until close.
+    /// The C lookup can run after the caller drops its view model (a closed window), so hold it until close; the lookup's context is this session, which teardown withdraws.
     func retainLookupContext(_ viewModel: DiveDataViewModel) {
         let retained = Unmanaged.passRetained(viewModel)
         lock.lock()
         let previous = lookupContext
         lookupContext = retained
         lock.unlock()
-        devicePtr.pointee.fingerprint_context = retained.toOpaque()
+        devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(self).toOpaque()
         previous?.release()
     }
 
@@ -293,16 +333,19 @@ public struct DiveDownloadResult {
     public let parseFailureCount: Int
     /// Present only when every dive arrived and parsed. Nothing is saved until the host acknowledges it.
     public let fingerprintCommit: FingerprintCommit?
+    /// The computer DEVINFO reported; nil when the download ended before it.
+    public let identity: DiveComputerIdentity?
 
     public var succeeded: Bool { outcome == .completed || outcome == .noNewDives }
 
     public init(outcome: Outcome, status: dc_status_t = DC_STATUS_SUCCESS, divesDownloaded: Int = 0,
-                parseFailureCount: Int = 0, fingerprintCommit: FingerprintCommit? = nil) {
+                parseFailureCount: Int = 0, fingerprintCommit: FingerprintCommit? = nil, identity: DiveComputerIdentity? = nil) {
         self.outcome = outcome
         self.status = status
         self.divesDownloaded = divesDownloaded
         self.parseFailureCount = parseFailureCount
         self.fingerprintCommit = fingerprintCommit
+        self.identity = identity
     }
 }
 
@@ -311,6 +354,8 @@ public final class FingerprintCommit {
     public let fingerprint: Data
     public let deviceType: String
     public let serial: String
+    /// The computer the fingerprint is saved for; nil on a commit built from a device type and serial.
+    public let identity: DiveComputerIdentity?
     private let save: () -> Void
     private let lock = NSLock()
     private var acknowledged = false
@@ -320,7 +365,23 @@ public final class FingerprintCommit {
         self.fingerprint = fingerprint
         self.deviceType = deviceType
         self.serial = serial
+        identity = nil
         self.save = save
+    }
+
+    /// `deviceType` is the identity's canonical name and `serial` its DEVINFO `%08x`.
+    public init(fingerprint: Data, identity: DiveComputerIdentity, save: @escaping () -> Void) {
+        self.fingerprint = fingerprint
+        deviceType = identity.canonicalName
+        serial = identity.devinfoSerial
+        self.identity = identity
+        self.save = save
+    }
+
+    convenience init(fingerprint: Data, identity: DiveComputerIdentity, standIn: String?, viewModel: DiveDataViewModel) {
+        self.init(fingerprint: fingerprint, identity: identity) {
+            viewModel.saveFingerprint(fingerprint, for: identity, standIn: standIn)
+        }
     }
 
     convenience init(fingerprint: Data, deviceType: String, serial: String, viewModel: DiveDataViewModel) {
