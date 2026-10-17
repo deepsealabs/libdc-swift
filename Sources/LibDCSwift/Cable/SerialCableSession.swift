@@ -201,7 +201,7 @@ final class SerialTapFactory {
     }
 }
 
-/// Opens and closes the port as serial_posix will, since dc_serial_open reports busy and not permitted alike (NOACCESS).
+/// Opens and closes the port as serial_posix will, since dc_serial_open reports busy and not permitted alike (NOACCESS). On a classic-Bluetooth port this open/close cycle itself may bring the RFCOMM link up and down right before the real open; unconfirmed against real hardware.
 enum SerialPortPreflight {
     static func check(_ path: String) -> CableError? {
         let fd = Darwin.open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)

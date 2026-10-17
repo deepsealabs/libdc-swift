@@ -234,7 +234,7 @@ public final class DiveComputerSession {
         cancelled = true
     }
 
-    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends. On macOS an owned cable session is cancelled first, so its close never waits on a silent computer.
+    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends. On macOS an owned cable session is cancelled first, so its close never waits on a silent computer, but the close-time write itself (Shearwater's EXIT, say) has no cancellation and can still block indefinitely on a stalled link, so cable sessions should be closed off the main thread.
     public func close() {
         lock.lock()
         guard !closed else { lock.unlock(); return }

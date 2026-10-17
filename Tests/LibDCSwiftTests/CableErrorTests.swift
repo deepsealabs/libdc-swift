@@ -14,7 +14,7 @@ final class CableErrorTests: XCTestCase {
         XCTAssertEqual(CableError(openErrno: ENOENT), .notFound)
         XCTAssertEqual(CableError(openErrno: ENXIO), .notFound)
         XCTAssertEqual(CableError(openErrno: ENODEV), .notFound)
-        XCTAssertEqual(CableError(openErrno: ENOTCONN), .notPaired, "a classic-Bluetooth port left over from an earlier pairing")
+        XCTAssertEqual(CableError(openErrno: ENOTCONN), .bluetoothNotConnected, "a classic-Bluetooth port left over from an earlier pairing")
         XCTAssertEqual(CableError(openErrno: EIO), .portError(errno: EIO))
     }
 
@@ -96,7 +96,7 @@ final class CableErrorTests: XCTestCase {
 
     func testEveryErrorSaysSomething() {
         let all: [CableError] = [
-            .unsupportedTransport(.classicBTSerial), .driverMissing, .notPaired, .permissionDenied, .busy, .sessionInProgress,
+            .unsupportedTransport(.classicBTSerial), .driverMissing, .bluetoothNotConnected, .permissionDenied, .busy, .sessionInProgress,
             .notFound, .unplugged, .noResponse(.suuntoVyper), .cancelled, .portError(errno: EIO), .protocolError(DC_STATUS_PROTOCOL),
         ]
         for error in all {
@@ -124,7 +124,9 @@ final class CableErrorTests: XCTestCase {
         for family: DeviceConfiguration.DeviceFamily in [.shearwaterPredator, .shearwaterPetrel] {
             let message = DeviceCatalog.cableConnectInstructions(for: family)
             XCTAssertTrue(message.contains("Bluetooth"), family.rawValue)
+            XCTAssertTrue(message.contains("Upload Log"), family.rawValue)
             XCTAssertFalse(message.contains("cable"), family.rawValue)
+            XCTAssertFalse(CableError.noResponse(family).message.contains("cable"), family.rawValue)
         }
     }
 }
