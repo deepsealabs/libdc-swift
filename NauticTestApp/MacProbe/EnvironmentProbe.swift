@@ -48,7 +48,7 @@ enum EnvironmentProbe {
         "com.apple.security.files.bookmarks.app-scope"
     ]
 
-    // Outside the L0 set; any of these being present changes what a run proves.
+    // Outside the probe's intended set; any of these being present changes what a run proves.
     static let extraEntitlementKeys = [
         "com.apple.security.files.user-selected.read-only",
         "com.apple.security.get-task-allow",
