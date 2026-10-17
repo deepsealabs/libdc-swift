@@ -332,6 +332,9 @@ struct DeviceExplorerView: View {
         busy = true
         note("Download dives (\(ignoreFingerprint ? "all" : "new only"))")
         statusMessage = "Downloading dives…"
+        // The dive callback stops the download as a cancel while this is false.
+        bluetoothManager.isRetrievingLogs = true
+        bluetoothManager.currentRetrievalDevice = peripheral
         DiveLogRetriever.retrieveDiveLogs(
             from: devicePtr,
             device: peripheral,
@@ -340,6 +343,7 @@ struct DeviceExplorerView: View {
             useFingerprint: !ignoreFingerprint
         ) { success in
             DispatchQueue.main.async {
+                bluetoothManager.clearRetrievalState()
                 busy = false
                 if !success {
                     let hint = handshakeMissing && viewModel.lastDownloadStatus == "TIMEOUT" ? "\n\(Self.sleepingHint)" : ""

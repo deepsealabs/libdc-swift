@@ -147,6 +147,37 @@ final class RetrievalCloseTests: XCTestCase {
         XCTAssertEqual(ble_write_status(false, 2), DC_STATUS_IO)
     }
 
+    // MARK: - A cut-short download is judged CANCELLED
+
+    func testCloseOrHostStopIsJudgedCancelledWhateverTheDriverSaid() {
+        for status in [DC_STATUS_SUCCESS, DC_STATUS_PROTOCOL, DC_STATUS_IO, DC_STATUS_CANCELLED] {
+            XCTAssertEqual(DiveLogRetriever.downloadStatus(foreach: status, closedMidDownload: true, stoppedByHost: false),
+                           DC_STATUS_CANCELLED)
+            XCTAssertEqual(DiveLogRetriever.downloadStatus(foreach: status, closedMidDownload: false, stoppedByHost: true),
+                           DC_STATUS_CANCELLED)
+            XCTAssertEqual(DiveLogRetriever.downloadStatus(foreach: status, closedMidDownload: true, stoppedByHost: true),
+                           DC_STATUS_CANCELLED)
+        }
+    }
+
+    func testDownloadStatusIsTheDriversOtherwise() {
+        for status in [DC_STATUS_SUCCESS, DC_STATUS_PROTOCOL, DC_STATUS_TIMEOUT, DC_STATUS_IO] {
+            XCTAssertEqual(DiveLogRetriever.downloadStatus(foreach: status, closedMidDownload: false, stoppedByHost: false),
+                           status)
+        }
+    }
+
+    func testHostStopAfterSomeDivesKeepsTheFingerprint() {
+        // Drivers report a callback stop as SUCCESS; saving the newest dive then would skip the older ones for good.
+        let status = DiveLogRetriever.downloadStatus(foreach: DC_STATUS_SUCCESS, closedMidDownload: false, stoppedByHost: true)
+        let o = DiveLogRetriever.outcome(status: status, family: DC_FAMILY_SHEARWATER_PETREL,
+                                         fingerprintMatched: false, hasNewDives: true,
+                                         hadStoredFingerprint: true, emptyReadCount: 0)
+        XCTAssertFalse(o.succeeded)
+        XCTAssertFalse(o.saveFingerprint)
+        XCTAssertTrue(o.interrupted)
+    }
+
     func testCancelledDownloadKeepsTheFingerprint() {
         for newDives in [false, true] {
             let o = DiveLogRetriever.outcome(status: DC_STATUS_CANCELLED, family: DC_FAMILY_SUUNTO_NAUTIC,

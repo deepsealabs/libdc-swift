@@ -554,9 +554,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
     private final class Downloads {
         var dives: [(fingerprint: UInt32, data: [UInt8])] = []
         var onDive: ((Int) -> Void)?
+        var stopAtDive: Int?
     }
 
-    private func foreach(_ device: OpaquePointer, fingerprint: UInt32? = nil,
+    /// `stopAtDive`: the callback declines that dive (returns 0), as DiveLogRetriever does on a host stop.
+    private func foreach(_ device: OpaquePointer, fingerprint: UInt32? = nil, stopAtDive: Int? = nil,
                          onDive: ((Int) -> Void)? = nil) -> (dc_status_t, [(fingerprint: UInt32, data: [UInt8])]) {
         if var fp = fingerprint?.littleEndian {
             withUnsafeBytes(of: &fp) { raw in
@@ -565,10 +567,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
         }
         let downloads = Downloads()
         downloads.onDive = onDive
+        downloads.stopAtDive = stopAtDive
         let ptr = Unmanaged.passRetained(downloads).toOpaque()
         defer { Unmanaged<Downloads>.fromOpaque(ptr).release() }
         let status = dc_device_foreach(device, { data, size, fp, fpSize, userdata in
             let d = Unmanaged<Downloads>.fromOpaque(userdata!).takeUnretainedValue()
+            if d.stopAtDive == d.dives.count + 1 { return 0 }
             var id: UInt32 = 0
             if let fp, fpSize == 4 { id = SuuntoNauticTransportTests.le32(Array(UnsafeBufferPointer(start: fp, count: 4)), 0) }
             d.dives.append((id, Array(UnsafeBufferPointer(start: data, count: Int(size)))))
@@ -809,6 +813,27 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(delivered.map(\.fingerprint), [dives[2].id])
         XCTAssertEqual(watch.cancelledCalls, 1)
         XCTAssertEqual(watch.streamsServed, 1)
+    }
+
+    // MARK: - A host stop between dives
+
+    func testCallbackStopIsReportedAsSuccessSoTheRetrieverJudgesItCancelled() throws {
+        let dives = (0..<3).map { FakeDive(id: 1_789_980_000 + UInt32($0) * 7200, profileBytes: 4000) }
+        let watch = FakeWatch(dives: dives)
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device, stopAtDive: 2)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS, "the driver can't tell a callback stop from the end of the logbook")
+        XCTAssertEqual(delivered.map(\.fingerprint), [dives[2].id])
+
+        let judged = DiveLogRetriever.downloadStatus(foreach: status, closedMidDownload: false, stoppedByHost: true)
+        XCTAssertEqual(judged, DC_STATUS_CANCELLED)
+        let outcome = DiveLogRetriever.outcome(status: judged, family: DC_FAMILY_SUUNTO_NAUTIC,
+                                               fingerprintMatched: false, hasNewDives: true,
+                                               hadStoredFingerprint: true, emptyReadCount: 0)
+        XCTAssertFalse(outcome.succeeded)
+        XCTAssertFalse(outcome.saveFingerprint, "the two older dives are still on the watch")
+        XCTAssertTrue(outcome.interrupted)
     }
 
     func testEmptyLogbookEntryIsSkipped() throws {

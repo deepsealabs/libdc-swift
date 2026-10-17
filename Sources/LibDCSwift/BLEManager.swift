@@ -302,6 +302,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             let maxLen = peripheral.maximumWriteValueLength(for: .withoutResponse)
             var offset = 0
             repeat {
+                if isIOCancelled() { return 2 }
                 let end = maxLen > 0 ? min(offset + maxLen, data.count) : data.count
                 let chunk = (offset == 0 && end == data.count) ? data! : data.subdata(in: offset..<end)
 
@@ -311,10 +312,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                         return 2
                     }
                     drainSemaphore(writeReadySemaphore)
+                    // The cancel is set before close() signals, so a signal the drain ate shows up here.
+                    if isIOCancelled() { return 2 }
                     let graceMs = Int(Self.writeReadyGraceSeconds * 1000)
                     if writeReadySemaphore.wait(timeout: .now() + .milliseconds(graceMs)) == .timedOut {
                         logWarning("canSendWriteWithoutResponse still false after \(Self.writeReadyGraceSeconds)s, writing anyway")
                     }
+                    if isIOCancelled() { return 2 }
                 }
                 peripheral.writeValue(chunk, for: characteristic, type: .withoutResponse)
 
@@ -335,11 +339,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             // this could corrupt the exchange rather than recover it.
             drainSemaphore(writeConfirmSemaphore)
             lastWriteError = nil
+            if isIOCancelled() { return 2 }
             peripheral.writeValue(data, for: characteristic, type: .withResponse)
             if writeConfirmSemaphore.wait(timeout: .now() + .milliseconds(timeoutMs)) == .timedOut {
                 logWarning("Write withResponse timed out")
                 return 1
             }
+            // close() wakes this wait when it cancels a download; that wake is no confirmation.
+            if isIOCancelled() { return 2 }
             if let error = lastWriteError {
                 logError("Write withResponse failed: \(error.localizedDescription)")
                 return 2
@@ -433,11 +440,22 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
 
     private func cancelRetrieval(on devicePtr: UnsafeMutablePointer<device_data_t>) {
-        // Drivers polling the cancel check stop too; the signal wakes a read blocked on the semaphore.
+        // Drivers polling the cancel check stop too; the signals wake a read or write blocked on them.
         if let device = devicePtr.pointee.device {
             dc_device_set_cancel(device, { _ in 1 }, nil)
         }
         dataAvailableSemaphore.signal()
+        writeReadySemaphore.signal()
+        writeConfirmSemaphore.signal()
+    }
+
+    private static let stuckCloseWarningSeconds: TimeInterval = 10
+
+    private func warnIfCloseStillDeferred(_ devicePtr: UnsafeMutablePointer<device_data_t>) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.stuckCloseWarningSeconds) { [weak self] in
+            guard let self, self.isCloseDeferred(devicePtr) else { return }
+            logWarning("A close has waited \(Int(Self.stuckCloseWarningSeconds)) s for a download to stop; BLE I/O stays cancelled until it does")
+        }
     }
 
     private func closeAfterRetrieval(_ devicePtr: UnsafeMutablePointer<device_data_t>) {
@@ -460,6 +478,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             if decision != .closeNow {
                 if decision == .deferred {
                     logWarning("Close requested while a download is using the device; cancelling it and closing once it stops")
+                    warnIfCloseStillDeferred(devicePtr)
                 }
                 cancelRetrieval(on: devicePtr)
                 return

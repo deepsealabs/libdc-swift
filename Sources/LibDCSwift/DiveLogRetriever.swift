@@ -34,6 +34,8 @@ public class DiveLogRetriever {
         /// against the stored fingerprint entirely so a full history re-download
         /// isn't cut short by the fingerprint match early-return below.
         let useFingerprint: Bool
+        /// Drivers report a callback stop as success; this keeps a host stop from passing as complete.
+        var stoppedByHost = false
 
         var detectedFamily: dc_family_t = DC_FAMILY_NULL
         var detectedModel: UInt32 = 0
@@ -105,6 +107,12 @@ public class DiveLogRetriever {
                                interrupted: !succeeded && hasNewDives, emptyReadOnly: emptyReadOnly)
     }
 
+    /// CANCELLED whatever the driver said, so a cut-short download never advances the fingerprint past dives left on the device.
+    static func downloadStatus(foreach status: dc_status_t, closedMidDownload: Bool,
+                               stoppedByHost: Bool) -> dc_status_t {
+        closedMidDownload || stoppedByHost ? DC_STATUS_CANCELLED : status
+    }
+
     /// Stable, human-stable name for a libdivecomputer status code, used for
     /// logging and for `DiveDataViewModel.lastDownloadStatus` (analytics).
     static func statusName(_ status: dc_status_t) -> String {
@@ -142,6 +150,7 @@ public class DiveLogRetriever {
         
         if context.bluetoothManager?.isRetrievingLogs == false {
             logInfo("🛑 Download cancelled")
+            context.stoppedByHost = true
             return 0
         }
         
@@ -423,12 +432,12 @@ public class DiveLogRetriever {
                 }
                 
                 let foreachStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
-                // A download cut short by a close must never pass as complete or advance the fingerprint.
                 let closedMidDownload = bluetoothManager.isCloseDeferred(devicePtr)
                 if closedMidDownload {
                     logWarning("Download stopped because the device is being closed")
                 }
-                let enumStatus = closedMidDownload ? DC_STATUS_CANCELLED : foreachStatus
+                let enumStatus = downloadStatus(foreach: foreachStatus, closedMidDownload: closedMidDownload,
+                                                stoppedByHost: context.stoppedByHost)
 
                 // Log errors for debugging
                 if enumStatus != DC_STATUS_SUCCESS && enumStatus != DC_STATUS_PROTOCOL {
@@ -498,7 +507,10 @@ public class DiveLogRetriever {
 
                     // Handle the outcome
                     if !downloadSucceeded {
-                        if emptyReadOnly {
+                        if context.stoppedByHost {
+                            logInfo("Download stopped by the app after \(context.logCount - 1) dive(s); fingerprint kept")
+                            viewModel.updateProgress(.cancelled)
+                        } else if emptyReadOnly {
                             logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
                             viewModel.updateProgress(.emptyRead)
                         } else if outcome.interrupted {
