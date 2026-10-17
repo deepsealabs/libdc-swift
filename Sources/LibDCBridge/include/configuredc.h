@@ -156,7 +156,8 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr,
  *         or iostream or zero attempts, else the descriptor lookup's or last attempt's status
  * @note Takes ownership of data->context and iostream on every path. On success data holds
  *       them with the device, descriptor and "Vendor Product" model string, and subscribes
- *       to DEVINFO, PROGRESS and CLOCK events. On failure both are released and data is zeroed.
+ *       to DEVINFO, PROGRESS and CLOCK events, recorded in devinfo, progress and clock (each
+ *       with its have_ flag). On failure both are released and data is zeroed.
  * @note Sets the bridge's log callback and level (set_ble_debug_logging) on data->context.
  */
 dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream,
@@ -170,6 +171,14 @@ dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream
  * @return DC_STATUS_SUCCESS on success, DC_STATUS_INVALIDARGS if no device is open
  */
 dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata);
+
+/**
+ * Releases everything a successful open left in data: the device, iostream, context,
+ * descriptor, model string and fingerprint buffer
+ * @param data: Device data structure; NULL is ignored. Every pointer field is NULL afterwards
+ * @note Clear any cancel callback (libdc_set_cancel) whose userdata dies with the caller first
+ */
+void libdc_close_device_data(device_data_t *data);
 
 /**
  * Opens a BLE device with automatic identification

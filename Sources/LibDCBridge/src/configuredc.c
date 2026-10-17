@@ -285,6 +285,14 @@ static void ble_device_event_cb(dc_device_t *device, dc_event_type_t event, cons
             devdata->have_progress = 1;
         }
         break;
+    case DC_EVENT_CLOCK:
+        {
+            // Reefnet and Memomouse parsers date dives from this devtime/systime pair.
+            const dc_event_clock_t *clock = (const dc_event_clock_t *)data;
+            devdata->clock = *clock;
+            devdata->have_clock = 1;
+        }
+        break;
     default:
         break;
     }
@@ -493,6 +501,10 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
 
     return open_device_with_descriptor(data, descriptor,
         LIBDC_BLE_OPEN_ATTEMPTS, LIBDC_BLE_OPEN_RETRY_MS);
+}
+
+void libdc_close_device_data(device_data_t *data) {
+    close_device_data(data);
 }
 
 dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata) {
