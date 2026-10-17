@@ -76,19 +76,19 @@ public enum CableHints {
     static var vendorIDs: Set<UInt16> { Set(all.map(\.vendorID)) }
 }
 
-/// A serial port (or a known cable with none) a host can offer for a download.
+/// A serial port (or a known cable with none), or a USB HID dive computer, a host can offer for a download.
 public struct CableEndpoint: Identifiable, Hashable, Sendable {
     public enum Status: String, Hashable, Sendable {
         case ready
         /// A known cable is plugged in but macOS made no port for it.
         case driverMissing
-        /// A `DiveComputerSession` in this process has the port open.
+        /// A `DiveComputerSession` in this process has the port or device open.
         case busy
     }
 
-    /// The callout path, or "usb:<registry id>" for a cable with no port; stable while it stays plugged in.
+    /// The callout path, "usb:<registry id>" for a cable with no port, or "usbhid:<registry id>" for a USB HID computer; stable while it stays plugged in.
     public let id: String
-    /// `.serial` for a USB port, `.classicBTSerial` for a paired Bluetooth port.
+    /// `.serial` for a USB port, `.classicBTSerial` for a paired Bluetooth port, `.usbHID` for a computer that is itself a USB HID device.
     public let transport: DCTransport
     /// The /dev/cu.* device to open; nil when `driverMissing`.
     public let calloutPath: String?
@@ -96,16 +96,18 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
     public let productID: UInt16?
     /// The USB adapter's own serial number, when it has one; it stands in for a computer that reports none.
     public let usbSerialNumber: String?
-    /// The USB product name the adapter reports.
+    /// The USB product name the adapter (or HID computer) reports.
     public let productName: String?
     public let hint: CableHint?
     /// The models to offer, most likely first.
     public let candidates: [DCModel]
     public var status: Status
+    /// A USB HID computer's IOHIDDevice registry entry, which the open creates its IOHIDDevice from.
+    public let registryID: UInt64?
 
     public init(id: String, transport: DCTransport, calloutPath: String?, vendorID: UInt16? = nil, productID: UInt16? = nil,
                 usbSerialNumber: String? = nil, productName: String? = nil, hint: CableHint? = nil,
-                candidates: [DCModel], status: Status = .ready) {
+                candidates: [DCModel], status: Status = .ready, registryID: UInt64? = nil) {
         self.id = id
         self.transport = transport
         self.calloutPath = calloutPath
@@ -116,6 +118,7 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
         self.hint = hint
         self.candidates = candidates
         self.status = status
+        self.registryID = registryID
     }
 
     /// A USB serial port at `path`, with the hint and candidates its VID:PID gives.
@@ -127,8 +130,23 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
                              hint: hint, candidates: hint?.candidates ?? DeviceCatalog.models(for: .serial))
     }
 
-    /// Where a session on this endpoint reached the computer; nil when there is no port.
+    /// A USB HID device that is one of libdivecomputer's HID models, offering only those (`DeviceCatalog.candidates`); nil for any other device on the same VIDs, such as a Suunto watch or a Keil debug probe.
+    public static func usbHIDDevice(registryID: UInt64, vendorID: UInt16, productID: UInt16, serialNumber: String? = nil,
+                                    productName: String? = nil) -> CableEndpoint? {
+        let candidates = DeviceCatalog.candidates(vid: vendorID, pid: productID, transport: .usbHID)
+        guard !candidates.isEmpty else { return nil }
+        return CableEndpoint(id: "usbhid:" + String(registryID, radix: 16), transport: .usbHID, calloutPath: nil,
+                             vendorID: vendorID, productID: productID,
+                             usbSerialNumber: serialNumber.flatMap { $0.isEmpty ? nil : $0 }, productName: productName,
+                             candidates: candidates, registryID: registryID)
+    }
+
+    /// Where a session on this endpoint reached the computer; nil when there is no port or device to open.
     public var locator: DiveComputerLocator? {
+        if transport == .usbHID {
+            guard let registryID, let vendorID, let productID else { return nil }
+            return .usbHID(vid: vendorID, pid: productID, registryID: registryID)
+        }
         guard let calloutPath else { return nil }
         switch transport {
         case .classicBTSerial:
@@ -138,10 +156,17 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
         }
     }
 
-    /// The hint's name, else the adapter's product name, else the port's file name.
+    /// What `EndpointClaims` marks busy: the port, or the USB HID device.
+    var claimKey: String? {
+        transport == .usbHID ? id : calloutPath
+    }
+
+    /// The hint's name, else a USB HID computer's one candidate, else the product name, else the port's file name.
     public var displayName: String {
         if let hint { return hint.name }
+        if transport == .usbHID, candidates.count == 1, let only = candidates.first { return only.name }
         if let productName, !productName.isEmpty { return productName }
+        if transport == .usbHID, !candidates.isEmpty { return candidates.map(\.name).joined(separator: " or ") }
         return calloutPath.map { ($0 as NSString).lastPathComponent } ?? "USB cable"
     }
 
@@ -197,18 +222,41 @@ public struct RegistrySnapshot: Hashable, Sendable {
         }
     }
 
+    /// One IOHIDDevice on a `HIDVendors` VID, whether or not it is a model libdivecomputer knows.
+    public struct HIDDevice: Hashable, Sendable {
+        public var registryID: UInt64
+        public var vendorID: UInt16
+        public var productID: UInt16
+        public var serialNumber: String?
+        public var productName: String?
+        /// kIOHIDPrimaryUsagePageKey.
+        public var primaryUsagePage: UInt32?
+
+        public init(registryID: UInt64, vendorID: UInt16, productID: UInt16, serialNumber: String? = nil,
+                    productName: String? = nil, primaryUsagePage: UInt32? = nil) {
+            self.registryID = registryID
+            self.vendorID = vendorID
+            self.productID = productID
+            self.serialNumber = serialNumber
+            self.productName = productName
+            self.primaryUsagePage = primaryUsagePage
+        }
+    }
+
     public var ports: [Port]
     /// USB devices with a `CableHints` VID:PID, with or without a port.
     public var cableDevices: [USBDevice]
+    public var hidDevices: [HIDDevice]
 
-    public init(ports: [Port] = [], cableDevices: [USBDevice] = []) {
+    public init(ports: [Port] = [], cableDevices: [USBDevice] = [], hidDevices: [HIDDevice] = []) {
         self.ports = ports
         self.cableDevices = cableDevices
+        self.hidDevices = hidDevices
     }
 
     static let bluetoothIncomingBaseName = "Bluetooth-Incoming-Port"
 
-    /// USB ports, known cables first; then known cables with no port; then paired Bluetooth ports. Built-in ports and macOS's own Bluetooth listening port are left out.
+    /// USB HID computers; then USB ports, known cables first; then known cables with no port; then paired Bluetooth ports. Built-in ports, macOS's own Bluetooth listening port, keyboards and mice, and HID devices that are no known model are left out.
     public var endpoints: [CableEndpoint] {
         var usb: [CableEndpoint] = []
         var bluetooth: [CableEndpoint] = []
@@ -240,8 +288,14 @@ public struct RegistrySnapshot: Hashable, Sendable {
                                      productName: device.productName, hint: hint, candidates: hint.candidates,
                                      status: .driverMissing)
             }
+        let hid = hidDevices
+            .filter { $0.primaryUsagePage != HIDVendors.genericDesktopUsagePage }
+            .compactMap { device in
+                CableEndpoint.usbHIDDevice(registryID: device.registryID, vendorID: device.vendorID, productID: device.productID,
+                                           serialNumber: device.serialNumber, productName: device.productName)
+            }
         let byID: (CableEndpoint, CableEndpoint) -> Bool = { $0.id < $1.id }
-        return usb.filter { $0.hint != nil }.sorted(by: byID) + usb.filter { $0.hint == nil }.sorted(by: byID)
+        return hid.sorted(by: byID) + usb.filter { $0.hint != nil }.sorted(by: byID) + usb.filter { $0.hint == nil }.sorted(by: byID)
             + missing.sorted(by: byID) + bluetooth.sorted(by: byID)
     }
 }

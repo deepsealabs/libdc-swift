@@ -237,20 +237,22 @@ extension XCTestCase {
         return defaults
     }
 
-    /// The public async open, waited for here, with isolated storage and its own lease unless given one.
+    /// The async open, waited for here, with isolated storage and its own lease unless given one; `hidDevice` stands in for IOKit's.
     func openCable(_ endpoint: CableEndpoint, model: DCModel, discovery: CableDiscovering? = nil,
                    recorder: DCStreamRecorder? = nil, lease: DiveComputerSessionLease = DiveComputerSessionLease(),
+                   deviceStorage: DeviceStorage? = nil, hidDevice: HIDDeviceFactory? = nil,
                    timeout: TimeInterval = 10) throws -> DiveComputerSession {
         let box = OpenBox()
-        let request = SerialOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
-                                        deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: lease,
-                                        cancellation: CableOpenCancellation())
+        let request = CableOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
+                                       deviceStorage: deviceStorage ?? DeviceStorage(userDefaults: isolatedDefaults("dev")),
+                                       lease: lease, cancellation: CableOpenCancellation(),
+                                       hidDevice: hidDevice ?? IOKitHIDDevice.make)
         let done = DispatchSemaphore(value: 0)
         Task.detached {
             do {
                 box.result = .success(try await DiveComputerSession.open(
                     request.endpoint, model: request.model, discovery: request.discovery, recorder: request.recorder,
-                    deviceStorage: request.deviceStorage, lease: request.lease))
+                    deviceStorage: request.deviceStorage, lease: request.lease, hidDevice: request.hidDevice))
             } catch {
                 box.result = .failure(error)
             }
@@ -274,9 +276,10 @@ extension XCTestCase {
 
     /// The `CableError` an open throws, failing the test if it opens or throws something else.
     func cableOpenError(_ endpoint: CableEndpoint, model: DCModel, lease: DiveComputerSessionLease = DiveComputerSessionLease(),
+                        hidDevice: HIDDeviceFactory? = nil,
                         file: StaticString = #filePath, line: UInt = #line) -> CableError? {
         do {
-            _ = try openCable(endpoint, model: model, lease: lease)
+            _ = try openCable(endpoint, model: model, lease: lease, hidDevice: hidDevice)
             XCTFail("the open succeeded", file: file, line: line)
             return nil
         } catch let error as CableError {
@@ -294,10 +297,14 @@ extension XCTestCase {
         XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
         let script = ScriptedStream(recording: recording)
         let stream = try DCCustomStream.open(backend: script, transport: script.transport, context: context)
+        let locator: DiveComputerLocator = recording.transport == DC_TRANSPORT_USBHID
+            ? .usbHID(vid: 0x1493, pid: 0x0030, registryID: 0x1)
+            : .serial(path: "/dev/cu.usbserial-REPLAY", usbSerial: nil, vid: 0x0403, pid: 0x6001)
         let session = try DiveComputerSession.open(
             iostream: stream, context: try XCTUnwrap(context), family: try XCTUnwrap(recording.family),
-            model: try XCTUnwrap(recording.model), displayName: displayName, storageKey: "serial:replay",
-            locator: .serial(path: "/dev/cu.usbserial-REPLAY", usbSerial: nil, vid: 0x0403, pid: 0x6001),
+            model: try XCTUnwrap(recording.model), displayName: displayName,
+            storageKey: DCRecording.name(of: recording.transport) + ":replay",
+            locator: locator,
             deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
         defer { session.close() }
         let (result, dives) = downloadToEnd(session, viewModel: viewModel)

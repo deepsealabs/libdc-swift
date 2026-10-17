@@ -2,8 +2,9 @@
 import Foundation
 import IOKit
 import IOKit.serial
+import IOKit.hid
 
-/// A serial port or a known cable's USB device came or went.
+/// A serial port, a known cable's USB device or a USB HID computer came or went.
 public enum RegistryChange: Sendable {
     case arrived
     case removed
@@ -12,12 +13,12 @@ public enum RegistryChange: Sendable {
 /// Where `IOKitCableDiscovery` reads the registry; tests pass a fake that serves `RegistrySnapshot` fixtures.
 public protocol RegistrySource: AnyObject {
     func snapshot() -> RegistrySnapshot
-    /// Calls `changed` on `queue` as serial ports and known cables come and go, until `stopWatching()`; false if it can't watch.
+    /// Calls `changed` on `queue` as serial ports, known cables and HID devices come and go, until `stopWatching()`; false if it can't watch.
     func startWatching(on queue: DispatchQueue, changed: @escaping (RegistryChange) -> Void) -> Bool
     func stopWatching()
 }
 
-/// Serial ports and known USB-serial cables from the IORegistry, following hot-plug; it never opens a port. A cable missing altogether may be held back by an Apple silicon laptop's "Allow accessory to connect?" prompt.
+/// Serial ports, known USB-serial cables and USB HID dive computers, following hot-plug; it never opens a port or device. A cable missing altogether may be held back by an Apple silicon laptop's "Allow accessory to connect?" prompt.
 public final class IOKitCableDiscovery: CableDiscovering {
     private let source: RegistrySource
     private let settle: DispatchTimeInterval
@@ -139,7 +140,7 @@ public final class IOKitCableDiscovery: CableDiscovering {
     }
 }
 
-/// The live IORegistry. Reads use IORegistryEntryCreateCFProperty on the entry itself, never a search up the tree or IORegistryEntryGetProperty.
+/// The live IORegistry. Reads use IORegistryEntryCreateCFProperty on the entry itself, never a search up the tree or IORegistryEntryGetProperty. HID devices come from an IOHIDManager matching `HIDVendors` only, which is never opened.
 public final class IOKitRegistrySource: RegistrySource {
     private final class Subscription {
         let change: RegistryChange
@@ -161,6 +162,7 @@ public final class IOKitRegistrySource: RegistrySource {
 
     private var port: IONotificationPortRef?
     private var subscriptions: [Subscription] = []
+    private var hidWatch: HIDWatch?
 
     public init() {}
 
@@ -195,7 +197,8 @@ public final class IOKitRegistrySource: RegistrySource {
                     productName: Self.productNameKeys.lazy.compactMap { Self.string(device, $0) }.first))
             }
         }
-        return RegistrySnapshot(ports: ports, cableDevices: cables)
+        let hid = hidWatch?.devices ?? Self.hidDevices(in: Self.makeHIDManager())
+        return RegistrySnapshot(ports: ports, cableDevices: cables, hidDevices: hid)
     }
 
     public func startWatching(on queue: DispatchQueue, changed: @escaping (RegistryChange) -> Void) -> Bool {
@@ -231,6 +234,7 @@ public final class IOKitRegistrySource: RegistrySource {
                 subscription.drain(notify: false)
             }
         }
+        hidWatch = HIDWatch(queue: queue, handler: changed)
         return true
     }
 
@@ -243,6 +247,107 @@ public final class IOKitRegistrySource: RegistrySource {
         if let port {
             IONotificationPortDestroy(port)
             self.port = nil
+        }
+        hidWatch?.stop()
+        hidWatch = nil
+    }
+
+    // MARK: - HID
+
+    // Matching only these vendors means no keyboard or mouse is ever enumerated, so nothing here can raise Input Monitoring.
+    static func makeHIDManager() -> IOHIDManager {
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let matching = HIDVendors.vendorIDs.map { [kIOHIDVendorIDKey: NSNumber(value: $0)] as NSDictionary } as CFArray
+        IOHIDManagerSetDeviceMatchingMultiple(manager, matching)
+        return manager
+    }
+
+    // Matching runs when it is set, so an unscheduled manager already has the devices.
+    static func hidDevices(in manager: IOHIDManager) -> [RegistrySnapshot.HIDDevice] {
+        guard let devices = IOHIDManagerCopyDevices(manager) as NSSet? else { return [] }
+        return devices.allObjects.map { hidDevice($0 as! IOHIDDevice) }
+    }
+
+    static func hidDevice(_ device: IOHIDDevice) -> RegistrySnapshot.HIDDevice {
+        func number(_ key: String) -> NSNumber? { IOHIDDeviceGetProperty(device, key as CFString) as? NSNumber }
+        func string(_ key: String) -> String? { IOHIDDeviceGetProperty(device, key as CFString) as? String }
+        return RegistrySnapshot.HIDDevice(
+            registryID: registryID(IOHIDDeviceGetService(device)),
+            vendorID: UInt16(truncatingIfNeeded: number(kIOHIDVendorIDKey)?.intValue ?? 0),
+            productID: UInt16(truncatingIfNeeded: number(kIOHIDProductIDKey)?.intValue ?? 0),
+            serialNumber: string(kIOHIDSerialNumberKey), productName: string(kIOHIDProductKey),
+            primaryUsagePage: number(kIOHIDPrimaryUsagePageKey).map { UInt32(truncatingIfNeeded: $0.intValue) })
+    }
+
+    /// HID devices as they come and go, kept as they read on arrival because a removed device may no longer answer property reads.
+    private final class HIDWatch {
+        private let manager = IOKitRegistrySource.makeHIDManager()
+        private let handler: (RegistryChange) -> Void
+        private let lock = NSLock()
+        private var present: [UInt64: RegistrySnapshot.HIDDevice] = [:]
+        private var registryIDs: [UnsafeMutableRawPointer: UInt64] = [:]
+        private var active = true
+
+        /// Starts on the caller's `queue` and calls back on it.
+        init(queue: DispatchQueue, handler: @escaping (RegistryChange) -> Void) {
+            self.handler = handler
+            if let devices = IOHIDManagerCopyDevices(manager) as NSSet? {
+                for device in devices.allObjects.map({ $0 as! IOHIDDevice }) { _ = add(device) }
+            }
+            // Released by the cancel handler, after the last callback.
+            let context = Unmanaged.passRetained(self).toOpaque()
+            IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, device in
+                guard let context else { return }
+                Unmanaged<HIDWatch>.fromOpaque(context).takeUnretainedValue().arrived(device)
+            }, context)
+            IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, device in
+                guard let context else { return }
+                Unmanaged<HIDWatch>.fromOpaque(context).takeUnretainedValue().removed(device)
+            }, context)
+            IOHIDManagerSetDispatchQueue(manager, queue)
+            IOHIDManagerSetCancelHandler(manager) { Unmanaged<HIDWatch>.fromOpaque(context).release() }
+            IOHIDManagerActivate(manager)
+        }
+
+        var devices: [RegistrySnapshot.HIDDevice] {
+            lock.lock(); defer { lock.unlock() }
+            return Array(present.values)
+        }
+
+        func stop() {
+            lock.lock()
+            active = false
+            lock.unlock()
+            IOHIDManagerCancel(manager)
+        }
+
+        /// True for a registry entry not listed yet.
+        private func add(_ device: IOHIDDevice) -> Bool {
+            let read = IOKitRegistrySource.hidDevice(device)
+            lock.lock(); defer { lock.unlock() }
+            registryIDs[Unmanaged.passUnretained(device).toOpaque()] = read.registryID
+            guard present[read.registryID] == nil else { return false }
+            present[read.registryID] = read
+            return true
+        }
+
+        // Activation reports the devices already listed again; only new registry entries are arrivals.
+        private func arrived(_ device: IOHIDDevice) {
+            let new = add(device)
+            lock.lock()
+            let notify = new && active
+            lock.unlock()
+            if notify { handler(.arrived) }
+        }
+
+        private func removed(_ device: IOHIDDevice) {
+            let key = Unmanaged.passUnretained(device).toOpaque()
+            let serviceID = IOKitRegistrySource.registryID(IOHIDDeviceGetService(device))
+            lock.lock()
+            let registryID = registryIDs.removeValue(forKey: key) ?? serviceID
+            let notify = present.removeValue(forKey: registryID) != nil && active
+            lock.unlock()
+            if notify { handler(.removed) }
         }
     }
 
