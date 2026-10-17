@@ -225,12 +225,14 @@ final class SerialCableSessionTests: XCTestCase {
                                    candidates: DeviceCatalog.models(for: .classicBTSerial))
         XCTAssertEqual(cableOpenError(paired, model: serialOnly), .unsupportedTransport(.classicBTSerial),
                        "a Reefnet Sensus has no classicBTSerial descriptor")
+        // openCable's default case hands openSerial every other transport too; a BLE endpoint is still refused.
+        XCTAssertEqual(cableOpenError(CableEndpoint(id: link.path, transport: .ble, calloutPath: link.path, candidates: []),
+                                      model: serialOnly), .unsupportedTransport(.ble))
         XCTAssertEqual(link.termios.c_cflag, initial.c_cflag, "the port was never configured")
     }
 
     func testAPairedClassicBluetoothPortOpensAPetrelLikeAUSBSerialOne() throws {
-        // A device must be attached so something drains the master end: close() sends Shearwater's
-        // EXIT over the port, and tcdrain blocks forever on a slave nobody reads from.
+        // close() writes EXIT, so the pty needs a reader or tcdrain blocks.
         let link = try link(SilentDevice())
         let paired = CableEndpoint(id: link.path, transport: .classicBTSerial, calloutPath: link.path,
                                    candidates: DeviceCatalog.models(for: .classicBTSerial))
