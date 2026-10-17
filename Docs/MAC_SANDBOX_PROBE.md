@@ -3,8 +3,8 @@
 `DC Tester Mac` is a native macOS build of DC Tester that does one job: show,
 on real hardware, whether a sandboxed, hardened-runtime Mac app on macOS 26 can
 find, open and talk to each dive-computer cable transport. Its results decide
-which cable families ship in Currents for Mac, and which entitlements the Mac
-app asks for.
+which cable families a sandboxed Mac App Store app can support, and which
+entitlements it needs.
 
 The probe lives only in `NauticTestApp/MacProbe/` (all `#if os(macOS)`). It
 doesn't change the library. It calls IOKit, CoreBluetooth and AppKit directly,
@@ -269,8 +269,8 @@ Fill "Confirmed by" from the negative controls above.
 | com.apple.security.device.usb | USB-HID, IOUSBLib | `device.usb` control, with a HID device attached or a manual Plug-in test | |
 | com.apple.security.device.bluetooth | BLE | `device.bluetooth` control | |
 | com.apple.security.files.user-selected.read-write | Garmin volume pick | `user-selected.read-only` control: if it passes, read-only is enough | |
-| com.apple.security.files.bookmarks.app-scope | Garmin volume across launches | `files.bookmarks.app-scope` control: may not be needed on current macOS | Recheck bookmark persistence with the team-signed Currents Mac build: an ad-hoc bookmark is bound to that build's cdhash, so its result doesn't carry over |
-| com.apple.security.network.client | Not in the probe build; Currents Mac needs it for Supabase | | |
+| com.apple.security.files.bookmarks.app-scope | Garmin volume across launches | `files.bookmarks.app-scope` control: may not be needed on current macOS | Recheck bookmark persistence with a team-signed app build: an ad-hoc bookmark is bound to that build's cdhash, so its result doesn't carry over |
+| com.apple.security.network.client | Not in the probe build; a consumer app needs it for its own backend | | |
 
 ### Raw reports
 
