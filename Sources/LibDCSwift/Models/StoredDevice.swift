@@ -70,6 +70,13 @@ public class StoredDevice: Codable {
        try container.encodeIfPresent(transport, forKey: .transport)
        try container.encodeIfPresent(locatorKey, forKey: .locatorKey)
    }
+
+   /// The fingerprint key this record's computer has (`DiveComputerIdentity.storageKey`); a serial-less BLE computer stands in with its peripheral UUID.
+   var fingerprintStorageKey: String? {
+       let identity = DiveComputerIdentity(family: family, model: model, serial: serial, transport: effectiveTransport)
+       let standIn = effectiveTransport == .ble ? DiveComputerLocator.ble(uuid: uuid).unitStandIn : nil
+       return identity.storageKey(standIn: standIn)
+   }
 }
 
 /// Decodes one array element without throwing, so a record this version can't read (a newer family, say) drops alone.
@@ -219,6 +226,12 @@ private struct LossyStoredDevice: Decodable {
            .filter { $0.family == family && DiveComputerIdentity.normalizedSerial($0.serial) == wanted }
            .max { $0.lastConnected < $1.lastConnected }
    }
+
+   /// Gives the fingerprint store's 1.18 records their identity keys (`DeviceFingerprintStorage.migrateLegacyKeys`), using these records for computers with no serial.
+   @discardableResult
+   public func migrateFingerprintKeys() -> Int {
+       fingerprints.migrateLegacyKeys(storedDevices: storedDevices)
+   }
    
    public func removeDevice(uuid: String) {
        // Get device info before removing for fingerprint cleanup
@@ -238,6 +251,10 @@ private struct LossyStoredDevice: Decodable {
                    logWarning("⚠️ Device has no serial stored and unknown model - fingerprint may not be cleared")
                }
            }
+       }
+
+       if let key = storedDevices.first(where: { $0.uuid == uuid })?.fingerprintStorageKey {
+           fingerprints.clearFingerprints(forKey: key)
        }
 
        storedDevices.removeAll { $0.uuid == uuid }

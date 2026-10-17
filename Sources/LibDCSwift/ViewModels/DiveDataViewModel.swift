@@ -172,7 +172,30 @@ public class DiveDataViewModel: ObservableObject {
             serial: serial
         )?.timestamp
     }
-    
+
+    /// `DeviceFingerprintStorage.getFingerprint(for:standIn:)` on this view model's store.
+    public func getFingerprint(for identity: DiveComputerIdentity, standIn: String? = nil) -> Data? {
+        fingerprintStore.getFingerprint(for: identity, standIn: standIn)?.fingerprint
+    }
+
+    /// `DeviceFingerprintStorage.saveFingerprint(_:for:standIn:)` on this view model's store; an empty fingerprint is ignored.
+    public func saveFingerprint(_ fingerprint: Data, for identity: DiveComputerIdentity, standIn: String? = nil) {
+        guard !fingerprint.isEmpty else {
+            logWarning("Attempted to save an empty fingerprint - ignoring")
+            return
+        }
+        fingerprintStore.saveFingerprint(fingerprint, for: identity, standIn: standIn)
+        objectWillChange.send()
+    }
+
+    /// `DeviceFingerprintStorage.seedFingerprint(identity:data:standIn:)` on this view model's store.
+    @discardableResult
+    public func seedFingerprint(identity: DiveComputerIdentity, data: Data, standIn: String? = nil) -> Bool {
+        let seeded = fingerprintStore.seedFingerprint(identity: identity, data: data, standIn: standIn)
+        if seeded { objectWillChange.send() }
+        return seeded
+    }
+
     // Add this to your existing DownloadProgress enum if not already present
     public enum DownloadProgress: Equatable {
         case notStarted
