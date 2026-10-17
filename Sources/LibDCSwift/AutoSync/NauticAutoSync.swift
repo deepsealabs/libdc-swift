@@ -730,53 +730,15 @@ private final class ConnectAttempt {
 public final class NauticLinkLease {
     public static let shared = NauticLinkLease()
 
-    private let lock = NSLock()
-    private var held = false
-    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+    private let lease = DiveComputerSessionLease()
 
     public init() {}
 
-    public var isHeld: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return held
-    }
+    public var isHeld: Bool { lease.isHeld }
 
     /// Waits in turn; throws `CancellationError` if the task is cancelled meanwhile.
-    public func acquire() async throws {
-        let id = UUID()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                lock.lock()
-                if Task.isCancelled {
-                    lock.unlock()
-                    continuation.resume(throwing: CancellationError())
-                } else if !held {
-                    held = true
-                    lock.unlock()
-                    continuation.resume()
-                } else {
-                    waiters.append((id, continuation))
-                    lock.unlock()
-                }
-            }
-        } onCancel: {
-            lock.lock()
-            let waiter = waiters.firstIndex { $0.id == id }.map { waiters.remove(at: $0) }
-            lock.unlock()
-            waiter?.continuation.resume(throwing: CancellationError())
-        }
-    }
+    public func acquire() async throws { try await lease.acquire() }
 
     /// Hands the lease to the next waiter, if any.
-    public func release() {
-        lock.lock()
-        guard !waiters.isEmpty else {
-            held = false
-            lock.unlock()
-            return
-        }
-        let next = waiters.removeFirst()
-        lock.unlock()
-        next.continuation.resume()
-    }
+    public func release() { lease.release() }
 }

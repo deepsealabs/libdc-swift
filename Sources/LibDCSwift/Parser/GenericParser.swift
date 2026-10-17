@@ -333,10 +333,41 @@ public class GenericParser {
         fingerprint: Data? = nil,
         fallbackDate: Date? = nil
     ) throws -> DiveData {
+        try parseDiveData(
+            dcFamily: family.asDCFamily,
+            model: model,
+            diveNumber: diveNumber,
+            diveData: diveData,
+            dataSize: dataSize,
+            context: context,
+            fingerprint: fingerprint,
+            fallbackDate: fallbackDate,
+            clock: nil
+        )
+    }
+
+    /// The `DC_EVENT_CLOCK` pair a download reported: the device's tick count and the host time read with it.
+    struct DeviceClock: Equatable {
+        let devtime: UInt32
+        let systime: dc_ticks_t
+    }
+
+    /// `parseDiveData` for any `dc_family_t`, with the download's clock for parsers that date dives by device ticks.
+    static func parseDiveData(
+        dcFamily: dc_family_t,
+        model: UInt32,
+        diveNumber: Int,
+        diveData: UnsafePointer<UInt8>,
+        dataSize: Int,
+        context: OpaquePointer? = nil,
+        fingerprint: Data? = nil,
+        fallbackDate: Date? = nil,
+        clock: DeviceClock?
+    ) throws -> DiveData {
         var parser: OpaquePointer?
         
         // Create parser based on device family
-        let rc = create_parser_for_device(&parser, context, family.asDCFamily, model, diveData, size_t(dataSize))
+        let rc = create_parser_for_device(&parser, context, dcFamily, model, diveData, size_t(dataSize))
 
         guard rc == DC_STATUS_SUCCESS, parser != nil else {
             logError("Parser creation failed with status: \(rc)")
@@ -345,6 +376,14 @@ public class GenericParser {
         
         defer {
             dc_parser_destroy(parser)
+        }
+
+        if let clock {
+            // Same rule as dc_parser_new: parsers without a clock hook ignore it.
+            let clockStatus = dc_parser_set_clock(parser, clock.devtime, clock.systime)
+            guard clockStatus == DC_STATUS_SUCCESS || clockStatus == DC_STATUS_UNSUPPORTED else {
+                throw ParserError.parserCreationFailed(clockStatus)
+            }
         }
         
         // Get dive time
@@ -381,7 +420,7 @@ public class GenericParser {
             maxDepth: wrapper.data.maxDepth,
             sampled: wrapper.calculateAverageDepth(upTo: divetime))
         // Other families keep the sampled maximum; their field semantics aren't verified.
-        let maxDepth = family == .suuntoNautic
+        let maxDepth = dcFamily == DC_FAMILY_SUUNTO_NAUTIC
             ? resolveMaxDepth(field: getField(parser, type: DC_FIELD_MAXDEPTH), sampled: wrapper.data.maxDepth)
             : wrapper.data.maxDepth
 
@@ -478,7 +517,7 @@ public class GenericParser {
             // Suunto app reads separately, see issue #29), so display is left to
             // localize into the viewer's timezone.
             var calendar = Calendar(identifier: .gregorian)
-            if family == .suuntoNautic {
+            if dcFamily == DC_FAMILY_SUUNTO_NAUTIC {
                 calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
             }
             guard let d = calendar.date(from: dateComponents) else {
