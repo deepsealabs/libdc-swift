@@ -17,7 +17,7 @@ bool libdc_has_custom_baud(void)
 
 // Native macOS only: TARGET_OS_OSX is 0 on iOS and Mac Catalyst, like the .macOS-only serial defines.
 #if TARGET_OS_OSX
-#define LIBDC_CABLE_TRANSPORTS (DC_TRANSPORT_SERIAL | DC_TRANSPORT_USBHID)
+#define LIBDC_CABLE_TRANSPORTS (DC_TRANSPORT_SERIAL | DC_TRANSPORT_USBHID | DC_TRANSPORT_USB)
 #else
 #define LIBDC_CABLE_TRANSPORTS DC_TRANSPORT_NONE
 #endif
