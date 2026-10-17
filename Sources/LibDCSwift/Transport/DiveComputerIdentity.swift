@@ -37,7 +37,7 @@ public struct DiveComputerIdentity: Codable, Hashable, Sendable {
         return "md:" + canonicalName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    /// The fingerprint store's key: "dc:<family>:<serial>" (unlike `deviceKey`, two families' equal serials never share it), else "md:<canonical name>@<standIn>", else nil and every download fetches every dive, since a model-only key would be shared by every unit of the model.
+    /// The fingerprint key: "dc:<family>:<serial>", else "md:<canonical name>@<standIn>", else nil (see Docs/DEVICE_IDENTITY.md).
     public func storageKey(standIn: String? = nil) -> String? {
         if let serial { return "dc:" + String(format: "%08x", family.asDCFamily.rawValue) + ":" + serial }
         guard let standIn, !standIn.isEmpty else { return nil }
@@ -55,7 +55,7 @@ public struct DiveComputerIdentity: Codable, Hashable, Sendable {
 }
 
 extension DiveComputerIdentity {
-    /// DEVINFO's identity for an open device, with the model a session parses with: the reported one when a descriptor knows it, else the opened descriptor's. nil before DEVINFO.
+    /// DEVINFO's identity, with the model a session parses with; nil before DEVINFO.
     public init?(device devicePtr: UnsafeMutablePointer<device_data_t>, transport: DCTransport) {
         let data = devicePtr.pointee
         guard data.have_devinfo != 0 else { return nil }
@@ -81,7 +81,7 @@ extension DiveComputerIdentity {
     }
 }
 
-/// Where a computer was reached this time: provenance for records and logs, never identity, since ports, registry IDs and BLE identifiers change.
+/// Where a computer was reached: provenance, never identity, since ports and BLE identifiers change.
 public enum DiveComputerLocator: Codable, Hashable, Sendable {
     case ble(uuid: String)
     case serial(path: String, usbSerial: String?, vid: UInt16?, pid: UInt16?)
@@ -115,7 +115,7 @@ public enum DiveComputerLocator: Codable, Hashable, Sendable {
         }
     }
 
-    /// What `DiveComputerIdentity.storageKey(standIn:)` takes for a computer with no serial: the cable adapter's USB serial, or the peripheral's identifier on this host. nil where nothing outlives a replug.
+    /// The `storageKey(standIn:)` stand-in for a computer with no serial; nil where nothing outlives a replug.
     public var unitStandIn: String? {
         switch self {
         case .ble(let uuid):
