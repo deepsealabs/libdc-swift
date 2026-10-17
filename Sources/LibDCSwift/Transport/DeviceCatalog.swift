@@ -167,3 +167,19 @@ extension DCModel {
         "\(family.rawValue):\(model):\(name)"
     }
 }
+
+#if os(macOS)
+extension DeviceCatalog {
+    /// The families a cable transport reaches with no download from a real computer confirmed yet; hosts label them "Beta" there.
+    public static let betaFamilies: [DCTransport: Set<DeviceConfiguration.DeviceFamily>] = [
+        .usb: [.atomicsCobalt],
+    ]
+}
+
+extension DCModel {
+    /// This model's download over `transport` hasn't been confirmed on a real computer yet, so hosts label it "Beta" there.
+    public func isBeta(on transport: DCTransport) -> Bool {
+        DeviceCatalog.betaFamilies[transport]?.contains(family) ?? false
+    }
+}
+#endif
