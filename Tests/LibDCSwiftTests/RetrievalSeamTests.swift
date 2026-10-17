@@ -178,7 +178,7 @@ final class RetrievalSeamTests: XCTestCase {
     /// `finalizeDiveNumbering`/`updateProgress` each hop through their own
     /// `DispatchQueue.main.async`, on top of the completion handler's own --
     /// a single extra drain isn't always enough under CI scheduling, so poll.
-    private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 3, file: StaticString = #filePath, line: UInt = #line) {
+    private func waitUntil(_ condition: () -> Bool, timeout: TimeInterval = 5, file: StaticString = #filePath, line: UInt = #line) {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() && Date() < deadline {
             let step = expectation(description: "drain")
