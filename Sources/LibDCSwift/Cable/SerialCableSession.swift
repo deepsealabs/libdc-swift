@@ -8,7 +8,7 @@ extension DiveComputerSession {
     /// open(2) stuck on a CDC-ACM node after wake (Apple FB6153687) holds only its own open; the lease still allows one session.
     static let cableQueue = DispatchQueue(label: "com.libdcswift.cable", attributes: .concurrent)
 
-    /// Opens `model` on a serial endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
+    /// Opens `model` on a serial or USB HID endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
     public static func open(
         _ endpoint: CableEndpoint,
         model: DCModel,
@@ -17,14 +17,25 @@ extension DiveComputerSession {
         deviceStorage: DeviceStorage = .shared,
         lease: DiveComputerSessionLease = .shared
     ) async throws -> DiveComputerSession {
+        try await open(endpoint, model: model, discovery: discovery, recorder: recorder, deviceStorage: deviceStorage,
+                       lease: lease, hidDevice: IOKitHIDDevice.make)
+    }
+
+    /// `hidDevice` makes the IOHIDDevice a USB HID endpoint names; tests pass fakes.
+    static func open(
+        _ endpoint: CableEndpoint,
+        model: DCModel,
+        discovery: CableDiscovering?,
+        recorder: DCStreamRecorder?,
+        deviceStorage: DeviceStorage,
+        lease: DiveComputerSessionLease,
+        hidDevice: @escaping HIDDeviceFactory
+    ) async throws -> DiveComputerSession {
         let cancellation = CableOpenCancellation()
-        let request = SerialOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
-                                        deviceStorage: deviceStorage, lease: lease, cancellation: cancellation)
-        let session = try await runCableOpen(cancellation: cancellation) {
-            try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
-                           recorder: request.recorder, deviceStorage: request.deviceStorage,
-                           lease: request.lease, cancellation: request.cancellation)
-        }
+        let request = CableOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
+                                       deviceStorage: deviceStorage, lease: lease, cancellation: cancellation,
+                                       hidDevice: hidDevice)
+        let session = try await runCableOpen(cancellation: cancellation) { try openCable(request) }
         return try handOver(session, cancellation: cancellation)
     }
 
@@ -45,6 +56,19 @@ extension DiveComputerSession {
         } onCancel: {
             cancellation.cancel()
             gate.finish(.failure(CableError.cancelled))
+        }
+    }
+
+    static func openCable(_ request: CableOpenRequest) throws -> DiveComputerSession {
+        switch request.endpoint.transport {
+        case .usbHID:
+            return try openHID(request.endpoint, model: request.model, discovery: request.discovery, recorder: request.recorder,
+                               deviceStorage: request.deviceStorage, lease: request.lease,
+                               cancellation: request.cancellation, makeDevice: request.hidDevice)
+        default:
+            return try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
+                                  recorder: request.recorder, deviceStorage: request.deviceStorage,
+                                  lease: request.lease, cancellation: request.cancellation)
         }
     }
 
@@ -117,8 +141,11 @@ extension DiveComputerSession {
     }
 }
 
+/// Makes the IOHIDDevice a USB HID endpoint names, or nil once it is gone.
+typealias HIDDeviceFactory = (CableEndpoint) -> HIDDeviceIO?
+
 /// An open's arguments, handed to the cable queue; the open is their only user until it returns.
-struct SerialOpenRequest: @unchecked Sendable {
+struct CableOpenRequest: @unchecked Sendable {
     let endpoint: CableEndpoint
     let model: DCModel
     let discovery: CableDiscovering?
@@ -126,6 +153,7 @@ struct SerialOpenRequest: @unchecked Sendable {
     let deviceStorage: DeviceStorage
     let lease: DiveComputerSessionLease
     let cancellation: CableOpenCancellation
+    var hidDevice: HIDDeviceFactory = IOKitHIDDevice.make
 }
 
 /// Resumes an open's continuation once: with the open's result, or with `cancelled` when the task is cancelled first.
