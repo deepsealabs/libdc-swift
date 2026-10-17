@@ -100,6 +100,8 @@ let package = Package(
                 "AutoSync/NauticAutoSync.swift",
                 "AutoSync/CoreBluetoothNauticConnector.swift",
                 "Session/DiveComputerSession.swift",
+                "Transport/DCTransport.swift",
+                "Transport/DeviceCatalog.swift",
                 "Streams/DCIOStreamBackend.swift",
                 "Streams/DCCustomStream.swift",
                 "Streams/TapStream.swift",
