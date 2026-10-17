@@ -187,7 +187,7 @@ another's model. Key per-computer records on `DiveDownloadResult.identity` (`dev
 |---|---|
 | `unsupportedTransport` | A model with no `.serial` or `.classicBTSerial` descriptor on this endpoint's transport |
 | `driverMissing` | An endpoint with no port; see `endpoint.driverMissingMessage` |
-| `notPaired` | ENOTCONN on a `.classicBTSerial` port: pair the computer again in System Settings > Bluetooth |
+| `bluetoothNotConnected` | ENOTCONN on a `.classicBTSerial` port: start Upload Log on the computer and keep it near the Mac |
 | `permissionDenied` | EPERM, EACCES: usually a sandbox without `device.serial` |
 | `busy` | EBUSY: another app (often the computer maker's) has the port |
 | `sessionInProgress` | Another session is open or still closing, or another open is in progress on the port |
@@ -198,7 +198,7 @@ another's model. Key per-computer records on `DiveDownloadResult.identity` (`dev
 | `portError(errno:)` | Any other errno from opening the port |
 | `protocolError(status)` | Anything else libdivecomputer reports once the port is open |
 
-## Classic Bluetooth (Shearwater) — Beta
+## Classic Bluetooth (Shearwater), Beta
 
 Shearwater has no download cable. The Predator, Petrel, Petrel 2, Nerd and Perdix instead carry a classic
 Bluetooth (not BLE) radio, which macOS's built-in `IOUserBluetoothSerialDriver` turns into a `/dev/cu.*`
@@ -212,10 +212,14 @@ Petrel and Nerd, which don't. No real computer has confirmed a download over thi
 (`DeviceCatalog.betaFamilies[.classicBTSerial]`), and `CableEndpoint.isBeta` follows. Hosts should label them
 "Beta".
 
-A port that exists from an earlier pairing but whose computer isn't connected now (off, out of range, or
-unpaired since) fails the pre-flight `open` with `ENOTCONN`, read as `CableError.notPaired`: pair the computer
-again in System Settings > Bluetooth. That errno mapping hasn't been confirmed against real hardware. A
-computer that is paired and in range but silent still reads as `noResponse`, as any serial computer does.
+A port that exists from an earlier pairing but whose computer isn't connected now (off, out of range, or not
+in Upload Log) fails the pre-flight `open` with `ENOTCONN`, read as `CableError.bluetoothNotConnected`. That
+errno mapping hasn't been confirmed against real hardware. A computer that is paired, in range and in Upload
+Log but silent still reads as `noResponse`, as any serial computer does.
+
+Every paired Serial Port Profile port is offered all 5 Shearwater models regardless of its name, so a
+non-Shearwater SPP device (a GPS, a phone, an OBD adapter) also shows up here once it's paired. Narrowing
+candidates by the port's own name is a follow-up, once HIL shows what Shearwater's ports are actually called.
 
 ## Fixtures
 
@@ -224,6 +228,9 @@ serial number before a recording is saved, and a recording never holds a port pa
 `Tests/LibDCSwiftTests/Fixtures/hw_ostc_mk2_synthetic.dcrec` is a classic OSTC download recorded over a pty
 through `DiveComputerSession.open`, from an emulator built from `hw_ostc.c`. Its values are synthetic, and its
 serial is scrubbed to a stand-in. Run the tests with `LIBDC_REGENERATE_DCREC=1` to record it again.
+`shearwater_petrel_serial_synthetic.dcrec` is the same, over a `.classicBTSerial` endpoint, from an emulator
+built from `shearwater_common.c`'s SLIP framing: RDBI DEVINFO, then a one-page manifest with no dive header,
+so the walk ends with none. `ShearwaterSerialReplayTests` regenerates it the same way.
 
 ### Recording a real computer
 
