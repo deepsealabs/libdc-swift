@@ -546,7 +546,13 @@ import LibDCBridge
         let actualModel = deviceDataPtr.pointee.devinfo.model
         func storable(_ family: DeviceFamily) -> Bool {
             guard requireKnownModel else { return true }
-            guard actualModel != 0, hasDescriptor(family: family.asDCFamily, model: actualModel) else {
+#if os(macOS)
+            // As in DiveComputerIdentity: the Cobalt 1 reports model 0.
+            let named = actualModel != 0 || family == .atomicsCobalt
+#else
+            let named = actualModel != 0
+#endif
+            guard named, hasDescriptor(family: family.asDCFamily, model: actualModel) else {
                 logWarning("Hardware reports model \(actualModel) for \(deviceName), which no descriptor knows; keeping the stored model")
                 return false
             }
