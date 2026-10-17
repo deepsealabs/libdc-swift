@@ -242,9 +242,11 @@ final class SerialCableSessionTests: XCTestCase {
     func testFailedOpensLeaveTheLeaseFreeAndThePortUnclaimed() throws {
         let link = try link(SilentDevice())
         let lease = DiveComputerSessionLease()
-        // Unknown to the descriptor table, so the C open stops before the port.
+        // Unknown to the descriptor table, so the open stops before the pre-flight touches the port.
         let ghost = DCModel(vendor: "Test", product: "Ghost", family: .hwOstc, model: 99, transports: [.serial], canonicalName: "Test Ghost")
-        XCTAssertEqual(cableOpenError(CableFixtures.endpoint(link), model: ghost, lease: lease), .protocolError(DC_STATUS_UNSUPPORTED))
+        XCTAssertEqual(cableOpenError(CableFixtures.endpoint(link), model: ghost, lease: lease), .unsupportedTransport(.serial))
+        let gone = CableEndpoint.serialPort(path: "/dev/cu.libdcswift-no-such-port", vendorID: 0x0403, productID: 0x6001)
+        XCTAssertEqual(cableOpenError(gone, model: ghost, lease: lease), .unsupportedTransport(.serial), "refused before notFound")
         XCTAssertFalse(lease.isHeld)
         XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
         // And the next open on the same lease goes through.

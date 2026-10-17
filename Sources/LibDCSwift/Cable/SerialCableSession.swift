@@ -57,6 +57,10 @@ extension DiveComputerSession {
             throw CableError.driverMissing
         }
         guard model.transports.contains(.serial) else { throw CableError.unsupportedTransport(.serial) }
+        // Checked before the pre-flight, since opening the port raises DTR.
+        guard DeviceConfiguration.hasDescriptor(family: model.dcFamily, model: model.model) else {
+            throw CableError.unsupportedTransport(.serial)
+        }
         guard !cancellation.isCancelled else { throw CableError.cancelled }
         guard lease.tryAcquire() else { throw CableError.sessionInProgress }
         var leaseHeld = true
