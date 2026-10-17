@@ -109,7 +109,9 @@ let package = Package(
                 "Streams/TapStream.swift",
                 "Streams/DCRecording.swift",
                 "Streams/ScriptedStream.swift",
-                "Cable/CableEndpoint.swift"
+                "Cable/CableEndpoint.swift",
+                "Cable/CableDiscovery.swift",
+                "Cable/IOKitCableDiscovery.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
@@ -117,7 +119,8 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("CoreBluetooth"),
-                .linkedFramework("Foundation")
+                .linkedFramework("Foundation"),
+                .linkedFramework("IOKit", .when(platforms: [.macOS]))
             ]
         ),
         .plugin(
