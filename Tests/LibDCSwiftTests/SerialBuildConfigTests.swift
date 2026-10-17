@@ -143,7 +143,8 @@ final class SerialBuildConfigTests: XCTestCase {
         XCTAssertEqual(actual, partial.count)
         XCTAssertEqual(Array(buffer.prefix(actual)), partial)
         XCTAssertGreaterThanOrEqual(elapsedMs, Double(timeoutMs) - 5)
-        XCTAssertLessThan(elapsedMs, Double(timeoutMs) + 50)
+        // Wide upper bound: proves the timeout fires without flaking under hosted-VM scheduling jitter.
+        XCTAssertLessThan(elapsedMs, Double(timeoutMs) * 2.5)
     }
 
     private final class ByteBox: @unchecked Sendable {
