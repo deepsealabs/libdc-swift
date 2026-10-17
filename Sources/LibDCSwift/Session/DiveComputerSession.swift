@@ -3,7 +3,7 @@ import CoreBluetooth
 import Clibdivecomputer
 import LibDCBridge
 
-/// One open `device_data_t` at a time across transports: a second session (another window, say) is refused, not layered on.
+/// One open `DiveComputerSession` at a time: a second (another window, say) is refused, not layered on. `NauticLinkLease` and legacy BLE connections don't take it.
 public final class DiveComputerSessionLease {
     public static let shared = DiveComputerSessionLease()
 
