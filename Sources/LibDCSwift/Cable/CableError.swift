@@ -4,10 +4,12 @@ import Clibdivecomputer
 
 /// Why a cable session didn't open, or a cable download ended early, in terms a host can show.
 public enum CableError: Error, Equatable {
-    /// No cable opener for this transport (a paired Bluetooth port, for now), or the model isn't reachable over it or has no libdivecomputer descriptor; nothing touched the port.
+    /// No cable opener for this endpoint's transport, or the model isn't reachable over it or has no libdivecomputer descriptor; nothing touched the port.
     case unsupportedTransport(DCTransport)
     /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where.
     case driverMissing
+    /// The paired classic-Bluetooth port exists from an earlier pairing, but the computer isn't connected over Bluetooth now (ENOTCONN).
+    case notPaired
     /// The app may not open the port (EPERM, EACCES) or USB device (kIOReturnNotPermitted): a sandboxed app without `com.apple.security.device.serial` or `device.usb`, say.
     case permissionDenied
     /// Another app has the port open exclusively (EBUSY), or has seized the USB device (kIOReturnExclusiveAccess), often the computer maker's own app.
@@ -34,6 +36,7 @@ public enum CableError: Error, Equatable {
         case EBUSY: self = .busy
         case EPERM, EACCES: self = .permissionDenied
         case ENOENT, ENXIO, ENODEV: self = .notFound
+        case ENOTCONN: self = .notPaired
         default: self = .portError(errno: code)
         }
     }
@@ -91,6 +94,8 @@ public enum CableError: Error, Equatable {
             return "This dive computer can't be downloaded over this connection (\(transport.rawValue))."
         case .driverMissing:
             return "macOS made no serial port for this cable. Install the driver for its USB-serial chip, then unplug the cable and plug it in again."
+        case .notPaired:
+            return "This dive computer isn't connected over Bluetooth. Pair the computer in System Settings > Bluetooth first, then try again."
         case .permissionDenied:
             return "This app isn't allowed to open the cable's serial port or the dive computer's USB connection."
         case .busy:
@@ -152,6 +157,9 @@ extension DeviceCatalog {
             return "Attach the Suunto USB cable so it clicks onto the computer's contacts, then wake the computer."
         case .uwatecSmart:
             return "Connect the computer's USB cable, then wake the computer."
+        case .shearwaterPredator, .shearwaterPetrel:
+            // No cable: these reach the serial path only over a paired classic-Bluetooth SPP port.
+            return "Wake the computer. If it doesn't reconnect, open System Settings > Bluetooth and reconnect it there."
         default:
             return "Wake the computer, attach the cable, and start its PC, download or transfer mode if it has one."
         }

@@ -215,16 +215,34 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertEqual(cableOpenError(endpoint, model: try CableFixtures.model("Oceanic Atom 2.0")), .driverMissing)
     }
 
-    func testOnlySerialEndpointsAndSerialModelsOpen() throws {
+    func testOnlySerialAndClassicBTEndpointsAndTheirOwnModelsOpen() throws {
         let link = try link()
         let initial = link.termios
-        let paired = CableEndpoint(id: link.path, transport: .classicBTSerial, calloutPath: link.path,
-                                   candidates: DeviceCatalog.models(for: .classicBTSerial))
-        let petrel = try XCTUnwrap(DeviceCatalog.models(for: .classicBTSerial).first)
-        XCTAssertEqual(cableOpenError(paired, model: petrel), .unsupportedTransport(.classicBTSerial))
         let bleOnly = try XCTUnwrap(DeviceCatalog.models(for: .ble).first { !$0.transports.contains(.serial) })
         XCTAssertEqual(cableOpenError(CableFixtures.endpoint(link), model: bleOnly), .unsupportedTransport(.serial))
+        let serialOnly = try CableFixtures.model("Reefnet Sensus")
+        let paired = CableEndpoint(id: link.path, transport: .classicBTSerial, calloutPath: link.path,
+                                   candidates: DeviceCatalog.models(for: .classicBTSerial))
+        XCTAssertEqual(cableOpenError(paired, model: serialOnly), .unsupportedTransport(.classicBTSerial),
+                       "a Reefnet Sensus has no classicBTSerial descriptor")
         XCTAssertEqual(link.termios.c_cflag, initial.c_cflag, "the port was never configured")
+    }
+
+    func testAPairedClassicBluetoothPortOpensAPetrelLikeAUSBSerialOne() throws {
+        // A device must be attached so something drains the master end: close() sends Shearwater's
+        // EXIT over the port, and tcdrain blocks forever on a slave nobody reads from.
+        let link = try link(SilentDevice())
+        let paired = CableEndpoint(id: link.path, transport: .classicBTSerial, calloutPath: link.path,
+                                   candidates: DeviceCatalog.models(for: .classicBTSerial))
+        let petrel = try XCTUnwrap(DeviceCatalog.models(for: .classicBTSerial).first { $0.name == "Shearwater Petrel" })
+        let session = try openCable(paired, model: petrel)
+        XCTAssertEqual(session.transport, DC_TRANSPORT_SERIAL)
+        XCTAssertEqual(session.locator, .classicBTSerial(path: link.path))
+        XCTAssertEqual(session.storageKey, "btserial:" + link.path)
+        // shearwater_common_setup: 115200 8N1, no handshake needed to open.
+        XCTAssertEqual(link.termios.outputSpeed, speed_t(B115200))
+        XCTAssertEqual(link.termios.c_cflag & tcflag_t(CSIZE), tcflag_t(CS8))
+        XCTAssertEqual(link.termios.c_cflag & tcflag_t(PARENB), 0)
     }
 
     func testASecondSessionIsRefusedBeforeThePortOpens() throws {

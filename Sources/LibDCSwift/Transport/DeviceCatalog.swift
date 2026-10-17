@@ -173,6 +173,7 @@ extension DeviceCatalog {
     /// The families a cable transport reaches with no download from a real computer confirmed yet; hosts label them "Beta" there.
     public static let betaFamilies: [DCTransport: Set<DeviceConfiguration.DeviceFamily>] = [
         .usb: [.atomicsCobalt],
+        .classicBTSerial: [.shearwaterPetrel, .shearwaterPredator],
     ]
 }
 
