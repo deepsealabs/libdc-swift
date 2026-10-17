@@ -57,6 +57,10 @@ public class DiveLogRetriever {
         var deviceHadStoredFingerprint: Bool = false
         /// Test seam: wraps a session dive's parse, given the dive's fingerprint.
         var parseHook: ParseHook?
+        /// The session a session download runs on; nil for the `CBPeripheral` download.
+        var session: DiveComputerSession?
+        /// The session's computer, from DEVINFO.
+        var identity: DiveComputerIdentity?
         private var descriptorCheck: (family: dc_family_t, model: UInt32, known: Bool)?
 
         init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, isCancelled: @escaping () -> Bool, deviceStorage: DeviceStorage = .shared, useFingerprint: Bool = true, policy: RetrievalPolicy = .legacy) {
@@ -220,9 +224,15 @@ public class DiveLogRetriever {
             if let desc = devicePtr.pointee.descriptor {
                 context.detectedFamily = dc_descriptor_get_type(desc)
             }
+            context.identity = context.session?.refreshIdentity()
 
             // Update stored device with serial for fingerprint cleanup when forgetting
-            if let serial = context.deviceSerial {
+            if let session = context.session {
+                // A reported 0 is no serial: stored, it would match every unit of the family.
+                if let serial = context.identity?.serial {
+                    session.deviceStorage.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
+                }
+            } else if let serial = context.deviceSerial {
                 context.deviceStorage.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
             }
 
@@ -234,7 +244,11 @@ public class DiveLogRetriever {
             }
 
             // Now that we have device info, load the stored fingerprint if we don't have it yet
-            if context.useFingerprint,
+            if context.useFingerprint, context.storedFingerprint == nil, let session = context.session {
+                if let identity = context.identity {
+                    context.storedFingerprint = context.viewModel.getFingerprint(for: identity, standIn: session.fingerprintStandIn)
+                }
+            } else if context.useFingerprint,
                context.storedFingerprint == nil,
                let deviceType = context.deviceTypeFromLibDC,
                let serial = context.deviceSerial {
@@ -431,6 +445,25 @@ public class DiveLogRetriever {
         }
         return nil
     }
+
+    /// A session's lookup: its context is the session, which keys the stored fingerprint by the computer's identity.
+    private static let sessionFingerprintLookup: @convention(c) (
+        UnsafeMutableRawPointer?,
+        UnsafePointer<CChar>?,
+        UnsafePointer<CChar>?,
+        UnsafeMutablePointer<Int>?
+    ) -> UnsafeMutablePointer<UInt8>? = { context, _, _, size in
+        guard let context, let size else { return nil }
+        size.pointee = 0
+        let session = Unmanaged<DiveComputerSession>.fromOpaque(context).takeUnretainedValue()
+        // malloc, not Swift's allocator: the C side free()s it.
+        guard let fingerprint = session.storedFingerprintForLookup(), !fingerprint.isEmpty,
+              let raw = malloc(fingerprint.count) else { return nil }
+        let buffer = raw.assumingMemoryBound(to: UInt8.self)
+        fingerprint.copyBytes(to: buffer, count: fingerprint.count)
+        size.pointee = fingerprint.count
+        return buffer
+    }
     
     private static var currentContext: CallbackContext?
 
@@ -582,7 +615,16 @@ public class DiveLogRetriever {
 
                 var storedFingerprint: Data? = nil
                 // Try to get fingerprint if we already have device info (from a previous connection)
-                if devicePtr.pointee.have_devinfo != 0 {
+                if devicePtr.pointee.have_devinfo != 0, let session {
+                    if let identity = session.refreshIdentity() {
+                        if let serial = identity.serial {
+                            deviceStorage.updateDeviceSerial(uuid: deviceUUID, serial: serial)
+                        }
+                        if useFingerprint {
+                            storedFingerprint = viewModel.getFingerprint(for: identity, standIn: session.fingerprintStandIn)
+                        }
+                    }
+                } else if devicePtr.pointee.have_devinfo != 0 {
                     let serial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
                     deviceStorage.updateDeviceSerial(uuid: deviceUUID, serial: serial)
                     if useFingerprint {
@@ -602,6 +644,8 @@ public class DiveLogRetriever {
                 )
                 context.devicePtr = devicePtr
                 context.parseHook = parseHook
+                context.session = session
+                context.identity = session?.identity
                 
                 let contextPtr = UnsafeMutableRawPointer(Unmanaged.passRetained(context).toOpaque())
                 
@@ -621,10 +665,11 @@ public class DiveLogRetriever {
                 if useFingerprint {
                     if let session {
                         session.retainLookupContext(viewModel)
+                        devicePtr.pointee.lookup_fingerprint = sessionFingerprintLookup
                     } else {
                         devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
+                        devicePtr.pointee.lookup_fingerprint = fingerprintLookup
                     }
-                    devicePtr.pointee.lookup_fingerprint = fingerprintLookup
                 } else {
                     session?.releaseLookupContext()
                     // An earlier download on this connection may have set one on the device.
@@ -790,10 +835,12 @@ public class DiveLogRetriever {
         let divesDownloaded = context.logCount - 1 - context.emptyReadCount
 
         var commit: FingerprintCommit?
-        // A family that reports no fingerprints has nothing to commit, so every download fetches all its dives.
-        if commits, let lastFP = context.lastFingerprint, !lastFP.isEmpty, let serial = context.deviceSerial {
-            commit = FingerprintCommit(fingerprint: lastFP, deviceType: fingerprintDeviceType(context),
-                                       serial: serial, viewModel: viewModel)
+        let identity = context.identity ?? context.session?.identity
+        let standIn = context.session?.fingerprintStandIn
+        // No fingerprints (Suunto Solution), or no serial and no stand-in to key one by: every download fetches every dive.
+        if commits, let lastFP = context.lastFingerprint, !lastFP.isEmpty, let identity,
+           identity.storageKey(standIn: standIn) != nil {
+            commit = FingerprintCommit(fingerprint: lastFP, identity: identity, standIn: standIn, viewModel: viewModel)
         }
 
         viewModel.lastDownloadInterruption = legacy.interrupted && outcome != .cancelled
@@ -834,7 +881,7 @@ public class DiveLogRetriever {
         }
 
         return DiveDownloadResult(outcome: outcome, status: enumStatus, divesDownloaded: divesDownloaded,
-                                  parseFailureCount: context.parseFailureCount, fingerprintCommit: commit)
+                                  parseFailureCount: context.parseFailureCount, fingerprintCommit: commit, identity: identity)
     }
 
     static func unreadableDivesMessage(unreadable: Int, downloaded: Int) -> String {
