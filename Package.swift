@@ -98,7 +98,8 @@ let package = Package(
                 "AutoSync/AutoSyncPolicy.swift",
                 "AutoSync/NauticSyncLink.swift",
                 "AutoSync/NauticAutoSync.swift",
-                "AutoSync/CoreBluetoothNauticConnector.swift"
+                "AutoSync/CoreBluetoothNauticConnector.swift",
+                "Session/DiveComputerSession.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
