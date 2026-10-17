@@ -160,6 +160,55 @@ final class StorageInjectionTests: XCTestCase {
         XCTAssertNil(storageB.getStoredDevice(uuid: "UUID-1"))
     }
 
+    func testRemoveDeviceWithASerialClearsOnlyThatDevicesFingerprint() {
+        let fingerprintSuite = isolatedSuite("fpRemove1")
+        let fingerprints = DeviceFingerprintStorage(userDefaults: fingerprintSuite)
+        let storage = DeviceStorage(userDefaults: isolatedSuite("devRemove1"), fingerprints: fingerprints)
+        storage.storeDevice(uuid: "UUID-1", name: "Watch", family: .suuntoNautic, model: 1, serial: "s1")
+        fingerprints.saveFingerprint(Data([0x01]), deviceType: "Suunto Ocean", serial: "s1")
+
+        storage.removeDevice(uuid: "UUID-1")
+        XCTAssertNil(storage.getStoredDevice(uuid: "UUID-1"))
+        XCTAssertNil(fingerprints.getFingerprint(forDeviceType: "Suunto Ocean", serial: "s1"))
+    }
+
+    func testRemoveDeviceWithNoSerialClearsEverySerialForThatModel() {
+        let fingerprintSuite = isolatedSuite("fpRemove2")
+        let fingerprints = DeviceFingerprintStorage(userDefaults: fingerprintSuite)
+        let storage = DeviceStorage(userDefaults: isolatedSuite("devRemove2"), fingerprints: fingerprints)
+        storage.storeDevice(uuid: "UUID-1", name: "Watch", family: .suuntoNautic, model: 1)
+        fingerprints.saveFingerprint(Data([0x01]), deviceType: "Suunto Ocean", serial: "unknown-serial")
+
+        storage.removeDevice(uuid: "UUID-1")
+        XCTAssertNil(fingerprints.getFingerprint(forDeviceType: "Suunto Ocean", serial: "unknown-serial"))
+    }
+
+    func testRemoveDeviceWithAnUnknownModelLeavesFingerprintsAlone() {
+        let fingerprintSuite = isolatedSuite("fpRemove3")
+        let fingerprints = DeviceFingerprintStorage(userDefaults: fingerprintSuite)
+        let storage = DeviceStorage(userDefaults: isolatedSuite("devRemove3"), fingerprints: fingerprints)
+        // model 0xFFFF for .suuntoNautic matches no supportedModels entry.
+        storage.storeDevice(uuid: "UUID-1", name: "Watch", family: .suuntoNautic, model: 0xFFFF, serial: "s1")
+        fingerprints.saveFingerprint(Data([0x01]), deviceType: "Unrelated", serial: "other")
+
+        storage.removeDevice(uuid: "UUID-1")
+        XCTAssertNil(storage.getStoredDevice(uuid: "UUID-1"), "device record is still removed")
+        XCTAssertNotNil(fingerprints.getFingerprint(forDeviceType: "Unrelated", serial: "other"), "unrelated fingerprint untouched")
+    }
+
+    func testRemoveDeviceUsesTheInjectedFingerprintStoreNotTheSharedOne() {
+        let fingerprints = DeviceFingerprintStorage(userDefaults: isolatedSuite("fpRemove4"))
+        let storage = DeviceStorage(userDefaults: isolatedSuite("devRemove4"), fingerprints: fingerprints)
+        storage.storeDevice(uuid: "UUID-1", name: "Watch", family: .suuntoNautic, model: 1, serial: "s1")
+        fingerprints.saveFingerprint(Data([0x01]), deviceType: "Suunto Ocean", serial: "s1")
+        DeviceFingerprintStorage.shared.saveFingerprint(Data([0x02]), deviceType: "Suunto Ocean", serial: "s1")
+        addTeardownBlock { DeviceFingerprintStorage.shared.clearFingerprint(forDeviceType: "Suunto Ocean", serial: "s1") }
+
+        storage.removeDevice(uuid: "UUID-1")
+        XCTAssertNil(fingerprints.getFingerprint(forDeviceType: "Suunto Ocean", serial: "s1"), "injected store must be cleared")
+        XCTAssertNotNil(DeviceFingerprintStorage.shared.getFingerprint(forDeviceType: "Suunto Ocean", serial: "s1"), "the real store must be untouched")
+    }
+
     func testUpdateStoredDevicesReplacesTheWholeList() {
         let storage = DeviceStorage(userDefaults: isolatedSuite("dev8"))
         storage.storeDevice(uuid: "UUID-1", name: "A", family: .suuntoNautic, model: 0)
