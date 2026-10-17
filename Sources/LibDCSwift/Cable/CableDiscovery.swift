@@ -84,11 +84,11 @@ final class CableEndpointFeed {
     func updates() -> AsyncStream<[CableEndpoint]> {
         AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             let id = UUID()
+            // Yielded under the lock, as republish yields, so a newer list is never overtaken by this one.
             lock.lock()
             continuations[id] = continuation
-            let current = published
+            continuation.yield(published)
             lock.unlock()
-            continuation.yield(current)
             continuation.onTermination = { [weak self] _ in
                 guard let self else { return }
                 self.lock.lock()
@@ -112,23 +112,20 @@ final class CableEndpointFeed {
         republish()
     }
 
+    /// Reads the claims and yields under the feed's lock, so concurrent republishes land in order; claims never call a feed while holding their own lock.
     func republish() {
-        let claimed = claims.claimedPaths
         lock.lock()
+        defer { lock.unlock() }
+        let claimed = claims.claimedPaths
         let next = base.map { endpoint -> CableEndpoint in
             guard endpoint.status == .ready, let path = endpoint.calloutPath, claimed.contains(path) else { return endpoint }
             var busy = endpoint
             busy.status = .busy
             return busy
         }
-        guard next != published else {
-            lock.unlock()
-            return
-        }
+        guard next != published else { return }
         published = next
-        let targets = Array(continuations.values)
-        lock.unlock()
-        targets.forEach { $0.yield(next) }
+        continuations.values.forEach { $0.yield(next) }
     }
 
     func watch(_ endpointID: CableEndpoint.ID, session: DiveComputerSession) {

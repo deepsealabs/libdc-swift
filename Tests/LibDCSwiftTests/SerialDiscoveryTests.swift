@@ -234,6 +234,12 @@ final class SerialDiscoveryTests: XCTestCase {
         return box.values
     }
 
+    /// Both are lock-protected; the test hands them to concurrentPerform.
+    private struct Racers: @unchecked Sendable {
+        let claims: SerialPortClaims
+        let feed: CableEndpointFeed
+    }
+
     private final class Collected: @unchecked Sendable {
         private let lock = NSLock()
         private var all: [[CableEndpoint]] = []
@@ -286,6 +292,29 @@ final class SerialDiscoveryTests: XCTestCase {
         claims.release("/dev/cu.usbserial-A")
         XCTAssertEqual(feedA.endpoints.map(\.status), [.ready, .driverMissing])
         XCTAssertEqual(feedB.endpoints.map(\.status), [.ready])
+    }
+
+    func testConcurrentRepublishesEndOnTheLatestState() async throws {
+        let claims = SerialPortClaims()
+        let feed = CableEndpointFeed(claims: claims)
+        let endpoint = CableEndpoint.serialPort(path: "/dev/cu.usbserial-A", vendorID: 0x0403, productID: 0x6001)
+        let path = try XCTUnwrap(endpoint.calloutPath)
+        feed.replace([endpoint])
+        let stream = feed.updates()
+        let racers = Racers(claims: claims, feed: feed)
+        // A claim released on one thread while a registry read republishes on another.
+        DispatchQueue.concurrentPerform(iterations: 20_000) { i in
+            if i % 2 == 0 {
+                racers.claims.claim(path)
+                racers.claims.release(path)
+            } else {
+                racers.feed.replace([endpoint])
+            }
+        }
+        XCTAssertEqual(feed.endpoints.map(\.status), [.ready])
+        var newest = stream.makeAsyncIterator()
+        let last = await newest.next()
+        XCTAssertEqual(last?.map(\.status), [.ready], "the last value yielded is the published one")
     }
 
     // MARK: - IOKitCableDiscovery over a fake registry
