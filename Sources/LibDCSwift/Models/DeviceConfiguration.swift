@@ -428,17 +428,42 @@ import LibDCBridge
         deviceDataPtr: UnsafeMutablePointer<device_data_t>,
         deviceName: String
     ) {
+        updateDeviceConfigurationFromHardware(
+            deviceAddress: deviceAddress,
+            deviceDataPtr: deviceDataPtr,
+            deviceName: deviceName,
+            storage: .shared,
+            requireKnownModel: false
+        )
+    }
+
+    /// With `requireKnownModel`, model 0 (not reported) or one no descriptor knows is never stored, since the next open looks it up.
+    static func updateDeviceConfigurationFromHardware(
+        deviceAddress: String,
+        deviceDataPtr: UnsafeMutablePointer<device_data_t>,
+        deviceName: String,
+        storage: DeviceStorage,
+        requireKnownModel: Bool
+    ) {
         guard deviceDataPtr.pointee.have_devinfo != 0 else {
             logDebug("Device info not yet available for \(deviceName)")
             return
         }
         
         let actualModel = deviceDataPtr.pointee.devinfo.model
+        func storable(_ family: DeviceFamily) -> Bool {
+            guard requireKnownModel else { return true }
+            guard actualModel != 0, hasDescriptor(family: family.asDCFamily, model: actualModel) else {
+                logWarning("⚠️ Hardware reports model \(actualModel) for \(deviceName), which no descriptor knows; keeping the stored model")
+                return false
+            }
+            return true
+        }
         
-        if let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: deviceAddress) {
-            if storedDevice.model != actualModel {
+        if let storedDevice = storage.getStoredDevice(uuid: deviceAddress) {
+            if storedDevice.model != actualModel, storable(storedDevice.family) {
                 logInfo("🔄 Updating stored device model from \(storedDevice.model) to actual model \(actualModel) for \(deviceName)")
-                DeviceStorage.shared.storeDevice(
+                storage.storeDevice(
                     uuid: deviceAddress,
                     name: deviceName,
                     family: storedDevice.family,
@@ -446,9 +471,9 @@ import LibDCBridge
                 )
             }
         } else if let deviceInfo = fromName(deviceName) {
-            if deviceInfo.model != actualModel {
+            if deviceInfo.model != actualModel, storable(deviceInfo.family) {
                 logInfo("🔄 Storing device with actual model \(actualModel) (name suggested \(deviceInfo.model)) for \(deviceName)")
-                DeviceStorage.shared.storeDevice(
+                storage.storeDevice(
                     uuid: deviceAddress,
                     name: deviceName,
                     family: deviceInfo.family,
@@ -456,6 +481,14 @@ import LibDCBridge
                 )
             }
         }
+    }
+
+    /// Whether `find_descriptor_by_model` resolves this family and model.
+    static func hasDescriptor(family: dc_family_t, model: UInt32) -> Bool {
+        var descriptor: OpaquePointer?
+        guard find_descriptor_by_model(&descriptor, family, model) == DC_STATUS_SUCCESS, let descriptor else { return false }
+        dc_descriptor_free(descriptor)
+        return true
     }
     
     public static func fromName(_ name: String) -> (family: DeviceFamily, model: UInt32)? {
