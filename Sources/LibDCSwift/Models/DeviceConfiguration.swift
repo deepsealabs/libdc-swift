@@ -552,6 +552,17 @@ import LibDCBridge
             }
             return true
         }
+
+        func unstoredGuess() -> (family: DeviceFamily, model: UInt32)? {
+#if os(macOS)
+            // A cable's name is the catalog's, which a BLE name pattern can match to another family; the opened descriptor can't.
+            if let transport, transport != .ble, let descriptor = deviceDataPtr.pointee.descriptor,
+               let family = DeviceFamily(dcFamily: dc_descriptor_get_type(descriptor)) {
+                return (family, dc_descriptor_get_model(descriptor))
+            }
+#endif
+            return fromName(deviceName)
+        }
         
         if let storedDevice = storage.getStoredDevice(uuid: deviceAddress) {
             if storedDevice.model != actualModel, storable(storedDevice.family) {
@@ -565,7 +576,7 @@ import LibDCBridge
                     locator: locator
                 )
             }
-        } else if let deviceInfo = fromName(deviceName) {
+        } else if let deviceInfo = unstoredGuess() {
             if deviceInfo.model != actualModel, storable(deviceInfo.family) {
                 logInfo("🔄 Storing device with actual model \(actualModel) (name suggested \(deviceInfo.model)) for \(deviceName)")
                 storage.storeDevice(

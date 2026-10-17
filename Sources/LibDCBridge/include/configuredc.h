@@ -6,6 +6,7 @@
  *------------------------------------------------------------------*/
 #include <stdbool.h>
 #include <stdint.h>
+#include <TargetConditionals.h>
 #include <libdivecomputer/common.h>
 #include <libdivecomputer/iostream.h>
 #include <libdivecomputer/context.h>
@@ -232,6 +233,42 @@ bool libdc_has_custom_baud(void);
  * none on iOS. Use this rather than dc_context_get_transports, which always reports SERIAL.
  */
 unsigned int libdc_cable_transports(void);
+
+#if TARGET_OS_OSX
+/*--------------------------------------------------------------------
+ * Serial Cable Functions (macOS)
+ *------------------------------------------------------------------*/
+/** dc_device_open attempts open_serial_device makes: a computer that didn't answer one open won't answer a retry on the same port */
+#define LIBDC_SERIAL_OPEN_ATTEMPTS 1
+
+/**
+ * Wraps an opened iostream in another one (a tap that logs, records or cancels)
+ * @param context: The context inner was opened on
+ * @param inner: The opened iostream; the wrapper owns it from this call on, on every path
+ * @param userdata: open_serial_device's wrap_userdata
+ * @return The iostream to open the device on, owning inner; NULL if wrapping failed, with inner already closed
+ */
+typedef dc_iostream_t *(*libdc_iostream_wrap_t)(dc_context_t *context, dc_iostream_t *inner, void *userdata);
+
+/**
+ * Opens a dive computer on a serial port (macOS only)
+ * @param data: Device data structure. data->context must be set; every other field is reset
+ * @param path: The port's callout device, such as /dev/cu.usbserial-XXXX
+ * @param family: Device family
+ * @param model: Device model
+ * @param wrap: Wraps the opened port before the device opens on it; NULL opens on the port itself
+ * @param wrap_userdata: Passed to wrap
+ * @return DC_STATUS_SUCCESS on success; DC_STATUS_INVALIDARGS for a NULL data, context or path;
+ *         the descriptor lookup's status for an unknown family and model, before the port is opened;
+ *         dc_serial_open's status if the port won't open, and wrap is then never called;
+ *         DC_STATUS_NOMEMORY if wrap returns NULL; else open_device_on_iostream's
+ * @note Takes ownership of data->context on every path, as open_device_on_iostream does, and opens
+ *       the device through it with LIBDC_SERIAL_OPEN_ATTEMPTS and no retry wait. On failure data is zeroed
+ * @note Sets the bridge's log callback and level on data->context before the port opens
+ */
+dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
+    libdc_iostream_wrap_t wrap, void *wrap_userdata);
+#endif
 
 #ifdef __cplusplus
 }

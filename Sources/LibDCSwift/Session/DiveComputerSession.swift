@@ -96,6 +96,10 @@ public final class DiveComputerSession {
     private var cancelInstalled = false
     private var lookupContext: Unmanaged<DiveDataViewModel>?
     private var currentIdentity: DiveComputerIdentity?
+#if os(macOS)
+    private var unplugged = false
+    private var teardownActions: [() -> Void] = []
+#endif
 
     private init(devicePtr: UnsafeMutablePointer<device_data_t>, displayName: String, storageKey: String,
                  transport: dc_transport_t, locator: DiveComputerLocator?, deviceStorage: DeviceStorage, ownsDevice: Bool,
@@ -230,7 +234,7 @@ public final class DiveComputerSession {
         cancelled = true
     }
 
-    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends.
+    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends. On macOS an owned cable session is cancelled first, so its close never waits on a silent computer.
     public func close() {
         lock.lock()
         guard !closed else { lock.unlock(); return }
@@ -296,6 +300,14 @@ public final class DiveComputerSession {
     }
 
     private func teardown() {
+#if os(macOS)
+        // The close's quit command still goes out; a silent computer would otherwise hold each ack read for the driver's timeout.
+        if ownsDevice, transport != DC_TRANSPORT_BLE {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+#endif
         if cancelInstalled {
             libdc_set_cancel(devicePtr, nil, nil)
             cancelInstalled = false
@@ -306,9 +318,60 @@ public final class DiveComputerSession {
             devicePtr.deinitialize(count: 1)
             devicePtr.deallocate()
         }
+#if os(macOS)
+        runTeardownActions()
+#endif
         lease.release()
     }
 }
+
+#if os(macOS)
+extension DiveComputerSession {
+    /// A session owning a device a cable opener opened on `lease`, which it already holds.
+    static func openedCable(devicePtr: UnsafeMutablePointer<device_data_t>, displayName: String, storageKey: String,
+                            locator: DiveComputerLocator, deviceStorage: DeviceStorage,
+                            lease: DiveComputerSessionLease) -> DiveComputerSession {
+        let transport = devicePtr.pointee.iostream.map { dc_iostream_get_transport($0) } ?? locator.transport.dcValue
+        let session = DiveComputerSession(devicePtr: devicePtr, displayName: displayName, storageKey: storageKey,
+                                          transport: transport, locator: locator, deviceStorage: deviceStorage,
+                                          ownsDevice: true, lease: lease)
+        session.installCancelIfCable()
+        return session
+    }
+
+    /// Cancelled because its cable went away (see `CableDiscovering.cancelOnRemoval`).
+    public var wasUnplugged: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return unplugged
+    }
+
+    func markUnplugged() {
+        lock.lock(); defer { lock.unlock() }
+        unplugged = true
+        cancelled = true
+    }
+
+    /// Runs once the device is closed, or at once if the session already is.
+    func onTeardown(_ action: @escaping () -> Void) {
+        lock.lock()
+        guard !closed else {
+            lock.unlock()
+            action()
+            return
+        }
+        teardownActions.append(action)
+        lock.unlock()
+    }
+
+    private func runTeardownActions() {
+        lock.lock()
+        let actions = teardownActions
+        teardownActions.removeAll()
+        lock.unlock()
+        actions.forEach { $0() }
+    }
+}
+#endif
 
 /// How a `retrieveDiveLogs(session:...)` download ended.
 public struct DiveDownloadResult {

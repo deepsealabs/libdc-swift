@@ -63,7 +63,8 @@ let package = Package(
             sources: [
                 "src/configuredc.c",
                 "src/BLEBridge.m",
-                "src/transport_caps.c"
+                "src/transport_caps.c",
+                "src/cable_open.c"
             ],
             publicHeadersPath: "include",
             cSettings: [
@@ -107,7 +108,12 @@ let package = Package(
                 "Streams/DCCustomStream.swift",
                 "Streams/TapStream.swift",
                 "Streams/DCRecording.swift",
-                "Streams/ScriptedStream.swift"
+                "Streams/ScriptedStream.swift",
+                "Cable/CableEndpoint.swift",
+                "Cable/CableError.swift",
+                "Cable/CableDiscovery.swift",
+                "Cable/IOKitCableDiscovery.swift",
+                "Cable/SerialCableSession.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
@@ -115,7 +121,8 @@ let package = Package(
             ],
             linkerSettings: [
                 .linkedFramework("CoreBluetooth"),
-                .linkedFramework("Foundation")
+                .linkedFramework("Foundation"),
+                .linkedFramework("IOKit", .when(platforms: [.macOS]))
             ]
         ),
         .plugin(
@@ -139,7 +146,9 @@ let package = Package(
                 .copy("Fixtures/suunto_nautic_1787752091.sbem"),
                 .copy("Fixtures/logbook_entries_multi.bin"),
                 .copy("Fixtures/suunto_nautic_1787752091.golden.json"),
-                .copy("Fixtures/reefnet_sensus_synthetic.dcrec")
+                .copy("Fixtures/reefnet_sensus_synthetic.dcrec"),
+                .copy("Fixtures/hw_ostc_mk2_synthetic.dcrec"),
+                .copy("Fixtures/Hardware")
             ]
         )
     ]
