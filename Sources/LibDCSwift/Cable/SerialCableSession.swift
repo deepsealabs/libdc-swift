@@ -19,7 +19,7 @@ extension DiveComputerSession {
         let cancellation = CableOpenCancellation()
         let request = SerialOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
                                         deviceStorage: deviceStorage, lease: lease, cancellation: cancellation)
-        return try await withTaskCancellationHandler {
+        let session = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<DiveComputerSession, Error>) in
                 cableQueue.async {
                     continuation.resume(with: Result {
@@ -32,6 +32,14 @@ extension DiveComputerSession {
         } onCancel: {
             cancellation.cancel()
         }
+        return try handOver(session, cancellation: cancellation)
+    }
+
+    /// A cancel that landed after the open's last check has already poisoned the session's tap, so it is closed, not returned.
+    static func handOver(_ session: DiveComputerSession, cancellation: CableOpenCancellation) throws -> DiveComputerSession {
+        guard cancellation.isCancelled || Task.isCancelled else { return session }
+        session.close()
+        throw CableError.cancelled
     }
 
     static func openSerial(

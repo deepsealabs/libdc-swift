@@ -257,6 +257,50 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
     }
 
+    func testCancellingAnOpenBlockedInAHandshakeReadThrowsCancelledPromptly() async throws {
+        let silent = SilentDevice()
+        let link = try link(silent)
+        let endpoint = CableFixtures.endpoint(link)
+        let model = try CableFixtures.model("Tecdiving DiveComputer.eu")
+        let lease = DiveComputerSessionLease()
+        let storage = DeviceStorage(userDefaults: isolatedDefaults("dev"))
+        let task = Task { try await DiveComputerSession.open(endpoint, model: model, deviceStorage: storage, lease: lease) }
+        // Once INIT is out, dc_device_open waits 1000 ms per try, several times, for the device info.
+        let deadline = Date().addingTimeInterval(5)
+        while silent.bytesReceived == 0, Date() < deadline { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertGreaterThan(silent.bytesReceived, 0, "the handshake went out")
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let cancelled = DispatchTime.now()
+        task.cancel()
+        do {
+            let session = try await task.value
+            session.close()
+            XCTFail("the open succeeded")
+        } catch {
+            XCTAssertEqual(error as? CableError, .cancelled)
+        }
+        XCTAssertLessThan(milliseconds(since: cancelled), 150)
+        XCTAssertFalse(lease.isHeld)
+        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+    }
+
+    func testACancelLandingAfterTheOpenClosesTheSessionInsteadOfReturningIt() throws {
+        let link = try link()
+        let lease = DiveComputerSessionLease()
+        let cancellation = CableOpenCancellation()
+        let session = try DiveComputerSession.openSerial(
+            CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC Mk2"), discovery: nil, recorder: nil,
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: lease, cancellation: cancellation)
+        XCTAssertIdentical(try DiveComputerSession.handOver(session, cancellation: cancellation), session)
+        cancellation.cancel()
+        XCTAssertThrowsError(try DiveComputerSession.handOver(session, cancellation: cancellation)) {
+            XCTAssertEqual($0 as? CableError, .cancelled)
+        }
+        XCTAssertTrue(session.isClosed)
+        XCTAssertFalse(lease.isHeld)
+        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+    }
+
     // MARK: - open_serial_device
 
     private func newContext() throws -> OpaquePointer {
