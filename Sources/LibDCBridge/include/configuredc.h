@@ -126,6 +126,10 @@ void event_cb(dc_device_t *device, dc_event_type_t event, const void *data, void
  */
 char* get_formatted_device_name(const char *name);
 
+/** dc_device_open attempts open_ble_device makes on one BLE link, and the wait between them */
+#define LIBDC_BLE_OPEN_ATTEMPTS 5
+#define LIBDC_BLE_OPEN_RETRY_MS 3000
+
 /**
  * Opens a BLE device connection
  * @param data: Device data structure to initialize
@@ -133,9 +137,30 @@ char* get_formatted_device_name(const char *name);
  * @param family: Device family
  * @param model: Device model
  * @return DC_STATUS_SUCCESS on success
+ * @note Connects only once the descriptor resolves, then opens through the same path as
+ *       open_device_on_iostream with LIBDC_BLE_OPEN_ATTEMPTS / LIBDC_BLE_OPEN_RETRY_MS
  */
 dc_status_t open_ble_device(device_data_t *data, const char *devaddr, 
     dc_family_t family, unsigned int model);
+
+/**
+ * Opens a device on an iostream the caller has already opened
+ * @param data: Device data structure. data->context must be the context iostream was
+ *              opened on; every other field is reset
+ * @param iostream: The open iostream
+ * @param family: Device family
+ * @param model: Device model
+ * @param attempts: dc_device_open attempts on this iostream (at least 1)
+ * @param retry_ms: Wait between attempts, in milliseconds
+ * @return DC_STATUS_SUCCESS on success, DC_STATUS_INVALIDARGS for a NULL data, context
+ *         or iostream or zero attempts, else the descriptor lookup's or last attempt's status
+ * @note Takes ownership of data->context and iostream on every path. On success data holds
+ *       them with the device, descriptor and "Vendor Product" model string, and subscribes
+ *       to DEVINFO, PROGRESS and CLOCK events. On failure both are released and data is zeroed.
+ * @note Sets the bridge's log callback and level (set_ble_debug_logging) on data->context.
+ */
+dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream,
+    dc_family_t family, unsigned int model, unsigned int attempts, unsigned int retry_ms);
 
 /**
  * Reopens a device with a different model, reusing the existing BLE connection
