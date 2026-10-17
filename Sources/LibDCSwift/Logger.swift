@@ -31,15 +31,29 @@ public enum PacketDirection: String {
     case outbound
 }
 
-/// A single raw BLE packet, forwarded to `Logger.onPacket` when `shouldShowRawData` is enabled.
+/// A single raw packet (BLE, or a cable stream's on macOS), forwarded to `Logger.onPacket` when `shouldShowRawData` is enabled.
 /// Distinct from `LogEvent` (human-readable log lines) — this carries the actual bytes so a host
 /// app can build real packet-level diagnostics (e.g. attach a capture to a bug report) rather than
 /// scraping byte counts out of a formatted message string.
 public struct PacketEvent {
+    public static let bleChannel = "ble"
+
     public let direction: PacketDirection
     public let data: Data
+    /// The BLE characteristic; empty on other channels.
     public let characteristicUUID: String
+    /// The link the bytes crossed: `bleChannel`, or a cable stream's channel ("serial", "usbhid").
+    public let channel: String
     public let timestamp: Date
+
+    init(direction: PacketDirection, data: Data, characteristicUUID: String, channel: String = PacketEvent.bleChannel,
+         timestamp: Date) {
+        self.direction = direction
+        self.data = data
+        self.characteristicUUID = characteristicUUID
+        self.channel = channel
+        self.timestamp = timestamp
+    }
 
     /// Uppercase hex, space-separated, wrapped to 16 bytes per line.
     public var hexDump: String {
@@ -112,6 +126,16 @@ public class Logger {
         guard shouldShowRawData else { return }
         onPacket?(PacketEvent(direction: direction, data: data, characteristicUUID: characteristicUUID, timestamp: Date()))
     }
+
+    #if os(macOS)
+    /// `logPacket` for a cable stream, which has no characteristic.
+    func logPacket(direction: PacketDirection, data: Data, channel: String) {
+        dataCounter += 1
+        totalBytesReceived += data.count
+        guard shouldShowRawData else { return }
+        onPacket?(PacketEvent(direction: direction, data: data, characteristicUUID: "", channel: channel, timestamp: Date()))
+    }
+    #endif
 
     public func setShowRawData(_ show: Bool) {
         shouldShowRawData = show

@@ -99,7 +99,12 @@ let package = Package(
                 "AutoSync/NauticSyncLink.swift",
                 "AutoSync/NauticAutoSync.swift",
                 "AutoSync/CoreBluetoothNauticConnector.swift",
-                "Session/DiveComputerSession.swift"
+                "Session/DiveComputerSession.swift",
+                "Streams/DCIOStreamBackend.swift",
+                "Streams/DCCustomStream.swift",
+                "Streams/TapStream.swift",
+                "Streams/DCRecording.swift",
+                "Streams/ScriptedStream.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
@@ -130,7 +135,8 @@ let package = Package(
             resources: [
                 .copy("Fixtures/suunto_nautic_1787752091.sbem"),
                 .copy("Fixtures/logbook_entries_multi.bin"),
-                .copy("Fixtures/suunto_nautic_1787752091.golden.json")
+                .copy("Fixtures/suunto_nautic_1787752091.golden.json"),
+                .copy("Fixtures/reefnet_sensus_synthetic.dcrec")
             ]
         )
     ]
