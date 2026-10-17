@@ -102,6 +102,7 @@ let package = Package(
                 "Session/DiveComputerSession.swift",
                 "Transport/DCTransport.swift",
                 "Transport/DeviceCatalog.swift",
+                "Transport/DiveComputerIdentity.swift",
                 "Streams/DCIOStreamBackend.swift",
                 "Streams/DCCustomStream.swift",
                 "Streams/TapStream.swift",
