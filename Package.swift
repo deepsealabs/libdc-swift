@@ -108,7 +108,8 @@ let package = Package(
                 "Streams/DCCustomStream.swift",
                 "Streams/TapStream.swift",
                 "Streams/DCRecording.swift",
-                "Streams/ScriptedStream.swift"
+                "Streams/ScriptedStream.swift",
+                "Cable/CableEndpoint.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
