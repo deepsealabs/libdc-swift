@@ -253,14 +253,15 @@ import LibDCBridge
     /// The manager holds one open device on one link. Opening another on top
     /// of it leaves the old link up and its state behind, so the new open can
     /// talk to the old watch (libdc-swift#75). Close it and wait for the
-    /// disconnect first, the same handoff auto download makes. A device an
-    /// auto download session holds the lease for is that session's to close.
+    /// disconnect first, the same handoff auto download makes. While an auto
+    /// download or a `DiveComputerSession` holds its lease, the device is that
+    /// session's to close.
     private static func closeOpenDeviceFirst(opening name: String) {
         guard !Thread.isMainThread else {
             logWarning("openBLEDevice called on main; not closing the open device first")
             return
         }
-        guard !NauticLinkLease.shared.isHeld else { return }
+        guard !NauticLinkLease.shared.isHeld, !DiveComputerSessionLease.shared.isHeld else { return }
         if let closed = CoreBluetoothManager.sharedManager.closeAndWaitForDisconnect() {
             logInfo("Closed \(closed) before opening \(name)")
         }
