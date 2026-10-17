@@ -6,7 +6,7 @@ import Clibdivecomputer
 public enum CableError: Error, Equatable {
     /// No cable opener for this transport (a paired Bluetooth port, for now), or the model isn't reachable over it.
     case unsupportedTransport(DCTransport)
-    /// macOS has no driver for the cable, so it made no port; `CableHint.driverURL` says where to get one.
+    /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where.
     case driverMissing
     /// The app may not open the port (EPERM, EACCES): a sandboxed app without `com.apple.security.device.serial`, say.
     case permissionDenied
@@ -88,7 +88,7 @@ public enum CableError: Error, Equatable {
         case .unsupportedTransport(let transport):
             return "This dive computer can't be downloaded over this connection (\(transport.rawValue))."
         case .driverMissing:
-            return "macOS has no driver for this cable. Install the cable maker's driver, then unplug the cable and plug it in again."
+            return "macOS made no serial port for this cable. Install the driver for its USB-serial chip, then unplug the cable and plug it in again."
         case .permissionDenied:
             return "This app isn't allowed to open the cable's serial port."
         case .busy:

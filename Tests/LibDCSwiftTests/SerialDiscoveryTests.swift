@@ -74,6 +74,24 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertTrue(endpoint.candidates.contains { $0.name == "Oceanic Atom 2.0" })
     }
 
+    func testADriverMissingEndpointSaysWhichDriverAndWhere() throws {
+        let pelagic = try XCTUnwrap(RegistrySnapshot(cableDevices: [Self.pelagic]).endpoints.first)
+        let message = try XCTUnwrap(pelagic.driverMissingMessage)
+        XCTAssertTrue(message.contains("Oceanic/Pelagic USB cable"), message)
+        XCTAssertTrue(message.contains("https://ftdichip.com/"), message)
+        // macOS 26.4 drives the Suunto cable itself; an older macOS might not, so it still gets FTDI's page.
+        let suunto = try XCTUnwrap(RegistrySnapshot(cableDevices: [Self.suunto]).endpoints.first)
+        XCTAssertEqual(suunto.status, .driverMissing)
+        XCTAssertEqual(suunto.hint?.needsVendorDriver, false)
+        let fallback = try XCTUnwrap(suunto.driverMissingMessage)
+        XCTAssertTrue(fallback.contains("Unplug it and plug it in again"), fallback)
+        XCTAssertTrue(fallback.contains("https://ftdichip.com/"), fallback)
+        let cp210x = try XCTUnwrap(RegistrySnapshot(cableDevices: [Self.cp210x]).endpoints.first)
+        XCTAssertNil(cp210x.hint?.driverURL)
+        XCTAssertTrue(try XCTUnwrap(cp210x.driverMissingMessage).contains("Silicon Labs CP210x"))
+        XCTAssertNil(CableEndpoint.serialPort(path: "/dev/cu.usbserial-A", vendorID: 0x0403, productID: 0x6001).driverMissingMessage)
+    }
+
     func testAKnownCableWithAPortIsReady() throws {
         // The same Pelagic cable once the chip maker's driver has made its port.
         let snapshot = RegistrySnapshot(ports: [Port(calloutPath: "/dev/cu.usbserial-PELAGIC1", parent: .usb(Self.pelagic))],
@@ -154,7 +172,9 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertEqual(suunto.brand, "Suunto")
         XCTAssertTrue(suunto.exclusive)
         XCTAssertFalse(suunto.needsVendorDriver)
+        XCTAssertEqual(suunto.driverURL?.host, "ftdichip.com", "the fallback if macOS's own driver made no port")
         let cressi = try hint(0x0403, 0x87D0)
+        XCTAssertEqual(cressi.driverURL?.host, "ftdichip.com")
         XCTAssertEqual(cressi.brand, "Cressi")
         XCTAssertTrue(cressi.exclusive)
         XCTAssertTrue(cressi.candidates.contains { $0.name == "Cressi Leonardo" })
@@ -166,6 +186,7 @@ final class SerialDiscoveryTests: XCTestCase {
             XCTAssertEqual(ostc.brand, "Heinrichs Weikamp")
             XCTAssertFalse(ostc.exclusive)
             XCTAssertEqual(ostc.families.first, .hwOstc)
+            XCTAssertEqual(ostc.driverURL?.host, "ftdichip.com")
         }
         for (vid, pid) in [(0x10C4, 0xEA60), (0x10C4, 0xEA70), (0x067B, 0x2303), (0x067B, 0x2304), (0x1A86, 0x7523), (0x1A86, 0x55D4)] {
             let chip = try hint(UInt16(vid), UInt16(pid))
@@ -173,6 +194,7 @@ final class SerialDiscoveryTests: XCTestCase {
             XCTAssertTrue(chip.families.isEmpty)
             XCTAssertFalse(chip.exclusive)
             XCTAssertFalse(chip.needsVendorDriver)
+            XCTAssertNil(chip.driverURL)
         }
         XCTAssertNil(CableHints.hint(vendorID: 0x0403, productID: 0x6010), "multi-channel FTDI chips are JTAG adapters, not dive cables")
         XCTAssertEqual(CableHints.vendorIDs, [0x0403, 0x10C4, 0x067B, 0x1A86])
