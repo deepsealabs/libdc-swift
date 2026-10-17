@@ -78,6 +78,37 @@ final class SessionIdentityTests: XCTestCase {
     private static let adapter = DiveComputerLocator.serial(path: "/dev/cu.usbserial-TEST", usbSerial: "TEST-ADAPTER-1",
                                                             vid: 0x0403, pid: 0x6001)
 
+    // MARK: - Completion
+
+    func testEveryDiveIsInTheViewModelWhenCompletionRuns() throws {
+        let fingerprints = DeviceFingerprintStorage(userDefaults: isolatedSuite("order"))
+        let devices = DeviceStorage(userDefaults: isolatedSuite("orderDev"), fingerprints: fingerprints)
+        let viewModel = DiveDataViewModel(fingerprintStore: fingerprints)
+        let session = try open(sensus(serial: 0x1234), devices: devices)
+        let parsed = DispatchSemaphore(value: 0)
+        let hook: DiveLogRetriever.ParseHook = { _, parse in
+            defer { parsed.signal() }
+            return try parse()
+        }
+
+        let done = expectation(description: "download")
+        var seen: (count: Int, numbers: [Int], result: DiveDownloadResult)?
+        DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel, parseHook: hook) { result in
+            seen = (viewModel.dives.count, viewModel.dives.map(\.number), result)
+            done.fulfill()
+        }
+        // Main stays busy until both dives and the finish are queued, the order in which the last dive used to land late.
+        for _ in 0..<2 { XCTAssertEqual(parsed.wait(timeout: .now() + 10), .success) }
+        Thread.sleep(forTimeInterval: 0.2)
+        wait(for: [done], timeout: 10)
+
+        let (count, numbers, result) = try XCTUnwrap(seen)
+        XCTAssertEqual(result.outcome, .completed)
+        XCTAssertEqual(result.divesDownloaded, 2)
+        XCTAssertEqual(count, result.divesDownloaded, "a host converting dives in completion, then acknowledging, gets all of them")
+        XCTAssertEqual(numbers, [1, 2], "numbered oldest first")
+    }
+
     // MARK: - A serial
 
     func testTheResultTheSessionAndTheCommitCarryTheIdentity() throws {

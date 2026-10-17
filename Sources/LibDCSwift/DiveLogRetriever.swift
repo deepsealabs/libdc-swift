@@ -440,9 +440,9 @@ public class DiveLogRetriever {
             return 1
         }
 
+        // One main-queue turn per dive, enqueued before the finish block, so completion sees every dive.
         DispatchQueue.main.async {
-            context.viewModel.appendDives([diveData])
-            context.viewModel.updateProgress(count: context.logCount)
+            context.viewModel.appendDownloadedDive(diveData)
         }
 
         context.hasNewDives = true
@@ -607,7 +607,7 @@ public class DiveLogRetriever {
             )
         }
 
-    /// Saves no fingerprint itself: the result's `fingerprintCommit` (complete walks with no held dive; unreadable dives are skipped) waits for `acknowledge()`. Completes on main.
+    /// Saves no fingerprint itself: the result's `fingerprintCommit` (complete walks with no held dive; unreadable dives are skipped) waits for `acknowledge()`. Completes on main, with every dive in `viewModel.dives`, numbered.
     public static func retrieveDiveLogs(
             session: DiveComputerSession,
             viewModel: DiveDataViewModel,
@@ -698,7 +698,7 @@ public class DiveLogRetriever {
             closeCoordinator.begin(UnsafeMutableRawPointer(devicePtr))
 
             retrievalQueue.async {
-                DispatchQueue.main.async { viewModel.resetProgress() }
+                DispatchQueue.main.async { viewModel.applyResetProgress() }
 
                 guard let dcDevice = devicePtr.pointee.device else {
                     DispatchQueue.main.async {
@@ -974,7 +974,7 @@ public class DiveLogRetriever {
             : nil
         viewModel.lastUnreadableDives = skipped
         if context.hasNewDives {
-            viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
+            viewModel.applyDiveNumbering()  // Sort by date and renumber (oldest = #1) before completion reads them
         }
         if !skipped.isEmpty {
             logWarning("\(skipped.count) dive(s) failed to parse again; skipped as unreadable, the commit moves past them")

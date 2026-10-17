@@ -240,7 +240,7 @@ final class RetrievalSeamTests: XCTestCase {
         drain()
         XCTAssertEqual(viewModel.progress, .inProgress(1))
 
-        // appendDives queues its count a turn late, so it can follow the download's own end.
+        // A host's appendDives queues its count a turn late, so it can follow the download's own end.
         viewModel.updateProgress(.completed)
         viewModel.updateProgress(count: 2)
         drain()
@@ -256,6 +256,40 @@ final class RetrievalSeamTests: XCTestCase {
         viewModel.updateProgress(count: 4)
         drain()
         XCTAssertEqual(viewModel.progress, .inProgress(4), "the next download counts again")
+    }
+
+    func testEveryDiveIsInTheViewModelWhenCompletionRuns() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
+        let ptr = try devicePtr(for: watch)
+        defer { ptr.deallocate() }
+        let viewModel = DiveDataViewModel(fingerprintStore: DeviceFingerprintStorage(userDefaults: isolatedSuite("fp")))
+        let offered = DispatchSemaphore(value: 0)
+        let done = expectation(description: "download")
+        var countInCompletion: Int?
+        DiveLogRetriever.retrieveDiveLogs(
+            from: ptr, deviceName: "Suunto Ocean 123456", deviceUUID: "FAKE-UUID", viewModel: viewModel,
+            isCancelled: { offered.signal(); return false }, markFinished: {},
+            deviceStorage: DeviceStorage(userDefaults: isolatedSuite("dev")),
+            completion: { success in
+                XCTAssertTrue(success)
+                countInCompletion = viewModel.dives.count
+                done.fulfill()
+            })
+        // Main stays busy until both dives are offered and the finish is queued, the order in which the last dive used to land late.
+        for _ in 0..<2 { XCTAssertEqual(offered.wait(timeout: .now() + 10), .success) }
+        Thread.sleep(forTimeInterval: 0.3)
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(countInCompletion, 2)
+    }
+
+    func testTheDownloadsOwnResetLandsBeforeTheHandshakeFlag() throws {
+        let watch = FakeWatch(dives: [Self.diveA])
+        let ptr = try devicePtr(for: watch)
+        defer { ptr.deallocate() }
+        let viewModel = DiveDataViewModel(fingerprintStore: DeviceFingerprintStorage(userDefaults: isolatedSuite("fp")))
+        XCTAssertTrue(download(ptr, viewModel: viewModel, deviceStorage: DeviceStorage(userDefaults: isolatedSuite("dev"))))
+        waitUntil { isTerminal(viewModel.progress) }
+        XCTAssertEqual(viewModel.lastHandshakeAcknowledged, true)
     }
 
     func testDownloadReportsDivesOldestFirstWithSerialKeyedFingerprint() throws {
