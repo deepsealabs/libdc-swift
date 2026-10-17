@@ -295,6 +295,15 @@ public struct DiveDownloadResult {
     public let fingerprintCommit: FingerprintCommit?
 
     public var succeeded: Bool { outcome == .completed || outcome == .noNewDives }
+
+    public init(outcome: Outcome, status: dc_status_t = DC_STATUS_SUCCESS, divesDownloaded: Int = 0,
+                parseFailureCount: Int = 0, fingerprintCommit: FingerprintCommit? = nil) {
+        self.outcome = outcome
+        self.status = status
+        self.divesDownloaded = divesDownloaded
+        self.parseFailureCount = parseFailureCount
+        self.fingerprintCommit = fingerprintCommit
+    }
 }
 
 /// The newest dive's fingerprint, saved only on `acknowledge()`, so dives the host never stored are offered again.
@@ -302,15 +311,22 @@ public final class FingerprintCommit {
     public let fingerprint: Data
     public let deviceType: String
     public let serial: String
-    private let viewModel: DiveDataViewModel
+    private let save: () -> Void
     private let lock = NSLock()
     private var acknowledged = false
 
-    init(fingerprint: Data, deviceType: String, serial: String, viewModel: DiveDataViewModel) {
+    /// `save` runs once, on the main thread, after the first `acknowledge()`; a host's tests can build results with it.
+    public init(fingerprint: Data, deviceType: String, serial: String, save: @escaping () -> Void) {
         self.fingerprint = fingerprint
         self.deviceType = deviceType
         self.serial = serial
-        self.viewModel = viewModel
+        self.save = save
+    }
+
+    convenience init(fingerprint: Data, deviceType: String, serial: String, viewModel: DiveDataViewModel) {
+        self.init(fingerprint: fingerprint, deviceType: deviceType, serial: serial) {
+            viewModel.saveFingerprint(fingerprint, deviceType: deviceType, serial: serial)
+        }
     }
 
     public var isAcknowledged: Bool {
@@ -318,13 +334,17 @@ public final class FingerprintCommit {
         return acknowledged
     }
 
-    /// Saves the fingerprint (once) through the download's view model; call on the main thread.
+    /// Saves the fingerprint once: right away on the main thread, else on its next turn (the view model publishes the save).
     public func acknowledge() {
         lock.lock()
         let first = !acknowledged
         acknowledged = true
         lock.unlock()
         guard first else { return }
-        viewModel.saveFingerprint(fingerprint, deviceType: deviceType, serial: serial)
+        if Thread.isMainThread {
+            save()
+        } else {
+            DispatchQueue.main.async(execute: save)
+        }
     }
 }
