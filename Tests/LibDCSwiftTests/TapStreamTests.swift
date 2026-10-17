@@ -148,6 +148,9 @@ final class TapStreamTests: XCTestCase {
         return (result, done)
     }
 
+    /// Hosted CI runners can overshoot a 50 ms wait by 100 ms or more, so there the wall clock only shows the wait ends; the slice tests below hold everywhere.
+    private var cancelBound: Double { ProcessInfo.processInfo.environment["CI"] == "true" ? 500 : 100 }
+
     private func cancelLatency(_ t: Tapped, _ done: DispatchSemaphore, finished: () -> DispatchTime) -> Double {
         usleep(200_000)
         let cancelledAt = DispatchTime.now()
@@ -163,7 +166,7 @@ final class TapStreamTests: XCTestCase {
         let latency = cancelLatency(t, done) { result.finished }
         XCTAssertEqual(result.status, DC_STATUS_CANCELLED)
         XCTAssertEqual(result.bytes, [])
-        XCTAssertLessThan(latency, 100)
+        XCTAssertLessThan(latency, cancelBound)
     }
 
     func testCancelKeepsThePartialCountOfADeadlineRead() throws {
@@ -174,7 +177,7 @@ final class TapStreamTests: XCTestCase {
         let latency = cancelLatency(t, done) { result.finished }
         XCTAssertEqual(result.status, DC_STATUS_CANCELLED)
         XCTAssertEqual(result.bytes, [0x01, 0x02])
-        XCTAssertLessThan(latency, 100)
+        XCTAssertLessThan(latency, cancelBound)
     }
 
     func testCancelGivesUpABlockedPollAndSleep() throws {
@@ -188,7 +191,7 @@ final class TapStreamTests: XCTestCase {
             poll.at = DispatchTime.now()
             pollDone.signal()
         }
-        XCTAssertLessThan(cancelLatency(t, pollDone) { poll.at }, 100)
+        XCTAssertLessThan(cancelLatency(t, pollDone) { poll.at }, cancelBound)
         XCTAssertEqual(poll.status, DC_STATUS_CANCELLED)
 
         t.cancelled.value = false
@@ -198,8 +201,77 @@ final class TapStreamTests: XCTestCase {
             sleep.at = DispatchTime.now()
             sleepDone.signal()
         }
-        XCTAssertLessThan(cancelLatency(t, sleepDone) { sleep.at }, 100)
+        XCTAssertLessThan(cancelLatency(t, sleepDone) { sleep.at }, cancelBound)
         XCTAssertEqual(sleep.status, DC_STATUS_CANCELLED)
+    }
+
+    /// Counts the inner waits; the cancel check turns true during the `cancelAfter`th one.
+    private final class CountingWaits: ProbeBackendShim {
+        let cancelled: Flag
+        let cancelAfter: Int
+        private(set) var polls: [Int32] = []
+        private(set) var sleeps: [UInt32] = []
+
+        init(cancelled: Flag, cancelAfter: Int) {
+            self.cancelled = cancelled
+            self.cancelAfter = cancelAfter
+        }
+
+        override func poll(_ timeout: Int32) -> dc_status_t {
+            polls.append(timeout)
+            if polls.count == cancelAfter { cancelled.value = true }
+            return DC_STATUS_TIMEOUT
+        }
+
+        override func sleep(_ milliseconds: UInt32) -> dc_status_t {
+            sleeps.append(milliseconds)
+            if sleeps.count == cancelAfter { cancelled.value = true }
+            return DC_STATUS_SUCCESS
+        }
+    }
+
+    private func countingTap(cancelAfter: Int) throws -> (OpaquePointer, CountingWaits) {
+        let cancelled = Flag()
+        let waits = CountingWaits(cancelled: cancelled, cancelAfter: cancelAfter)
+        let inner = try DCCustomStream.open(backend: waits, transport: DC_TRANSPORT_SERIAL, context: context)
+        let stream = try outer(TapStream(inner: inner, isCancelled: { cancelled.value }))
+        addTeardownBlock { dc_iostream_close(stream) }
+        return (stream, waits)
+    }
+
+    func testEveryInnerWaitIsAtMost50MillisecondsAndTheCancelEndsTheNextOne() throws {
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var actual = 0
+        let slice = TapStream.cancelCheckMilliseconds
+        XCTAssertEqual(slice, 50)
+
+        let (read, readWaits) = try countingTap(cancelAfter: 3)
+        XCTAssertEqual(dc_iostream_set_timeout(read, -1), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_iostream_read(read, &buffer, 4, &actual), DC_STATUS_CANCELLED)
+        XCTAssertEqual(readWaits.polls, [slice, slice, slice], "the cancel is seen as the slice it landed in ends")
+
+        let (deadline, deadlineWaits) = try countingTap(cancelAfter: 2)
+        XCTAssertEqual(dc_iostream_set_timeout(deadline, 10_000), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_iostream_read(deadline, &buffer, 4, &actual), DC_STATUS_CANCELLED)
+        XCTAssertEqual(deadlineWaits.polls, [slice, slice])
+
+        let (short, shortWaits) = try countingTap(cancelAfter: .max)
+        XCTAssertEqual(dc_iostream_set_timeout(short, 30), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_iostream_read(short, &buffer, 4, &actual), DC_STATUS_TIMEOUT)
+        XCTAssertEqual(shortWaits.polls.first, 30, "min(slice, remaining)")
+        XCTAssertTrue(shortWaits.polls.allSatisfy { $0 <= 30 })
+
+        let (poll, pollWaits) = try countingTap(cancelAfter: 3)
+        XCTAssertEqual(dc_iostream_poll(poll, -1), DC_STATUS_CANCELLED)
+        XCTAssertEqual(pollWaits.polls, [slice, slice, slice])
+
+        let (sleep, sleepWaits) = try countingTap(cancelAfter: 3)
+        XCTAssertEqual(dc_iostream_sleep(sleep, 5_000), DC_STATUS_CANCELLED)
+        XCTAssertEqual(sleepWaits.sleeps, [50, 50, 50])
+
+        let (whole, wholeWaits) = try countingTap(cancelAfter: .max)
+        XCTAssertEqual(dc_iostream_sleep(whole, 120), DC_STATUS_SUCCESS)
+        XCTAssertEqual(wholeWaits.sleeps, [50, 50, 20], "the slices add up to the sleep")
     }
 
     func testOnceCancelledWaitsGiveUpAtOnceAndControlCallsStillGoThrough() throws {
