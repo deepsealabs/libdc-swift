@@ -495,6 +495,14 @@ public final class NauticAutoSync {
             } catch {
                 switch Self.classify(error) {
                 case .linkLost:
+                    // A dive that keeps timing out on a link that otherwise works (its
+                    // stream never reaches the end marker) mustn't hold up the newer
+                    // dives: once its retries are used up it's reported as failed, and
+                    // the session after the reconnect moves on without it.
+                    if Self.isTimeout(error), !plan.canRetry(id) {
+                        plan.giveUp(id)
+                        emit(.diveFailed(id: id, reason: Self.describe(error)))
+                    }
                     throw error
                 case .cancelled:
                     return .stopped
