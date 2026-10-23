@@ -78,6 +78,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var truncatedStreams = Int.max
         /// Lose the link after this many chunks of the next /Data stream.
         var dropAfterChunks: Int?
+        /// /Data streams to end without their end markers, as if both were lost.
+        var streamsWithoutEndMarker = 0
+        /// /Data streams in which the second chunk is sent twice.
+        var streamsWithRepeatedChunk = 0
         /// Value resources the watch can be subscribed to.
         var unsyncedCount: UInt16 = 0
         var busy: UInt8 = 0
@@ -330,6 +334,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
                 let bytes = dive.compressed.dropLast(truncate)
+                let repeatChunk = streamsWithRepeatedChunk > 0
+                if repeatChunk { streamsWithRepeatedChunk -= 1 }
                 var i = bytes.startIndex
                 var sent = 0
                 while i < bytes.endIndex {
@@ -341,8 +347,15 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     }
                     let j = min(i + mdsPayloadSize, bytes.endIndex)
                     send(chunkFrame(bytes[i..<j], offset: i - bytes.startIndex))
+                    if repeatChunk && sent == 1 {
+                        send(chunkFrame(bytes[i..<j], offset: i - bytes.startIndex))
+                    }
                     sent += 1
                     i = j
+                }
+                if streamsWithoutEndMarker > 0 {
+                    streamsWithoutEndMarker -= 1
+                    return
                 }
                 // The end marker: a zero length chunk at the total size, sent twice.
                 send(chunkFrame([], offset: bytes.count))
@@ -671,27 +684,62 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
     // MARK: - #58: downloads are checked against the listed size
 
-    func testShortDownloadIsReportedAgainstListedSize() throws {
+    func testShortDownloadFailsAgainstListedSize() throws {
         let dive = FakeDive(id: 1_789_312_841, profileBytes: 4000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
         let device = try open(watch)
 
         let (status, data) = download(device, id: dive.id)
-        XCTAssertEqual(status, DC_STATUS_DATAFORMAT)
-        XCTAssertFalse(data.isEmpty, "the truncated dive stays available to the caller")
+        XCTAssertEqual(status, DC_STATUS_PROTOCOL)
+        XCTAssertTrue(data.isEmpty, "a truncated dive is never handed out")
         XCTAssertEqual(watch.streamsServed, 2, "a mismatch is retried once")
     }
 
-    func testShortDownloadIsStillDeliveredByForeach() throws {
+    func testStreamWithoutEndMarkerIsRetried() throws {
+        let dive = FakeDive(id: 1_789_312_843, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithoutEndMarker = 1
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(watch.streamsServed, 2, "the stream that stopped early is issued again")
+    }
+
+    func testStreamWithoutEndMarkerFailsOnceTheRetriesRunOut() throws {
+        let dive = FakeDive(id: 1_789_312_844, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithoutEndMarker = Int.max
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_TIMEOUT)
+        XCTAssertTrue(data.isEmpty, "a stream without its end marker is never handed out")
+    }
+
+    func testRepeatedChunkFailsTheStreamAndIsRetried() throws {
+        let dive = FakeDive(id: 1_789_312_845, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithRepeatedChunk = 1
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(watch.streamsServed, 2)
+    }
+
+    func testShortDownloadStopsForeach() throws {
         let dive = FakeDive(id: 1_789_312_842, profileBytes: 4000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
         let device = try open(watch)
 
         let (status, dives) = foreach(device)
-        XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dives.count, 1)
+        XCTAssertEqual(status, DC_STATUS_PROTOCOL)
+        XCTAssertEqual(dives.count, 0, "the short dive isn't delivered, so the fingerprint can't move past it")
     }
 
     // MARK: - foreach never moves the fingerprint past a dive it did not deliver
@@ -997,7 +1045,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(Self.completedSyncs(events).first?.downloaded, dives.map(\.id))
     }
 
-    func testAutoSyncReconnectsToRetryAnIncompleteDive() async throws {
+    func testAutoSyncRetriesADiveThatFailsItsSizeCheck() async throws {
         let dive = FakeDive(id: 1_789_100_000, profileBytes: 6000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
@@ -1012,10 +1060,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(delivered.count, 1)
         XCTAssertEqual(delivered.first?.isComplete, true)
         XCTAssertEqual(delivered.first?.data, Data(dive.decompressed + dive.summary))
-        XCTAssertEqual(connector.connects, 2)
+        XCTAssertTrue(Self.logs(log.all).contains { $0.hasPrefix("Dive \(dive.id) failed (PROTOCOL); retrying") })
+        XCTAssertEqual(connector.connects, 1, "retried on the same link")
     }
 
-    func testAutoSyncKeepsAPersistentlyShortDiveOnceRetriesRunOut() async throws {
+    func testAutoSyncGivesUpOnAPersistentlyShortDive() async throws {
         let dive = FakeDive(id: 1_789_200_000, profileBytes: 6000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
@@ -1025,11 +1074,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
         await waitFor(log) { !Self.completedSyncs($0).isEmpty }
         await stopAndWait(sync, log)
 
-        let delivered = Self.dives(log.all)
-        XCTAssertEqual(delivered.count, 1, "delivered once, never duplicated")
-        XCTAssertEqual(delivered.first?.isComplete, false)
-        XCTAssertEqual(delivered.first?.attempts, 2)
-        XCTAssertEqual(connector.connects, 2)
+        XCTAssertTrue(Self.dives(log.all).isEmpty, "a short dive is never delivered")
+        XCTAssertTrue(log.all.contains(.diveFailed(id: dive.id, reason: "PROTOCOL")))
+        XCTAssertEqual(Self.completedSyncs(log.all).first?.failed, [dive.id])
+        XCTAssertEqual(connector.connects, 1)
     }
 
     func testAutoSyncSkipsDivesAlreadySynced() async throws {
@@ -1161,7 +1209,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(watch.subscribed, [:], "stopping unsubscribes")
     }
 
-    func testTriggerSlotsLeftByADroppedLinkAreReleasedOnReconnect() async throws {
+    // Whether the watch really keeps a dropped link's bindings is unconfirmed
+    // (libdc-swift#95). If it does, the reconnect's GET gets the other slot,
+    // which works just as well; the driver never releases a slot it didn't
+    // bind, since another app on the link may hold it.
+    func testTriggerSubscriptionUsesTheSlotTheGetReturnsAfterADroppedLink() async throws {
         let first = FakeDive(id: 1_789_720_000, profileBytes: 600, summaryBytes: 100)
         let second = FakeDive(id: 1_789_730_000, profileBytes: 600, summaryBytes: 100)
         let watch = FakeWatch(dives: [first])
@@ -1175,8 +1227,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         await waitFor(log) { events in Self.logs(events).filter { $0.hasPrefix("Listening for sync triggers") }.count >= 3 }
         await waitFor(log) { Self.completedSyncs($0).count == 2 }
         await waitFor(log) { $0.last == .state(.watching) }
-        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 1, "the dropped link's slot was released")
-        XCTAssertEqual(watch.heldValueSlots("/Sync/BusyState"), 1)
+        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 2, "the dropped link's slot and ours")
+        XCTAssertEqual(watch.heldValueSlots("/Sync/BusyState"), 2)
 
         watch.mutate {
             $0.dives.append(second)
@@ -1189,7 +1241,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(Self.dives(log.all).map(\.id), [first.id, second.id])
         XCTAssertEqual(connector.connects, 2)
         XCTAssertFalse(Self.logs(log.all).contains { $0.hasPrefix("No sync trigger") })
-        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 0, "unsubscribing releases the slot")
+        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 1, "unsubscribing releases our slot only")
     }
 
     // MARK: - #29/#45: a quick reconnect while the watch still flushes the old stream
