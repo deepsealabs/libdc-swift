@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY` and `SAMPLE_EVENT_GASCHANGE2` map to their `DiveEvent` cases
 
 ### Fixed
+- Aqualung i470TC is in `supportedModels`, so it can be picked for a sync
+- Oceanic/Aqualung/Sherwood BLE names resolve against libdivecomputer's descriptor table instead of `supportedModels`. An i470TC ("GC004024") used to resolve to the Oceanic Pro Plus X, and BLE models missing from the catalog didn't resolve at all
 - `openBLEDevice` closes a device that's already open and waits for its link to drop before opening another, unless an auto download session holds the link. Opening a second watch on top of the first used to run the handshake on the first watch's link, so the open succeeded and the next request timed out (-7) until the old link dropped about 80 s later. `connect(toDevice:)` also clears the previous link's ready flag and characteristics before connecting (#75)
 - DC Tester: the Explorer opens only after the new watch's open succeeds (it used to open straight away on the previous watch's device), names the selected watch on its connect line and on every command and result, and logs connect failures (#75)
 - Suunto Nautic/Ocean: a second dive downloaded on the same link (by id, or the 2nd+ dive of a `dc_device_foreach`) can no longer stream the first dive's profile. The `/Data` stream is subscribed on the handle its GET returned, not a fixed one, and per-id handles are released after use (#29)
