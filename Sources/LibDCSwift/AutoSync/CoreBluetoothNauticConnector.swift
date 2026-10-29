@@ -96,19 +96,25 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
         }
         let name = self.name
         return DCDeviceNauticLink(device: device) { closing in
-            let closed: CBPeripheral? = DispatchQueue.main.sync {
-                // The manager holds one open device; never close another session's.
-                guard manager.openedDeviceDataPtr?.pointee.device == closing else {
-                    logWarning("[NauticAutoSync] \(name)'s link was already replaced; not closing the open device")
-                    return nil
-                }
-                let peripheral = manager.peripheral
-                manager.close(clearDevicePtr: true)
-                return peripheral
-            }
-            // close() cancels the link 0.5 s later; a session opened before then loses its link to that cancel.
-            if let closed { CoreBluetoothManager.waitForDisconnect(closed, timeout: 3) }
+            Self.closeSession(of: closing, name: name, on: manager)
         }
+    }
+
+    /// Returns once the device's close has run and the watch has disconnected. Call off main.
+    static func closeSession(of device: OpaquePointer, name: String, on manager: CoreBluetoothManager) {
+        let closed: CBPeripheral? = DispatchQueue.main.sync {
+            // The manager holds one open device; never close another session's.
+            guard manager.openedDeviceDataPtr?.pointee.device == device else {
+                logWarning("[NauticAutoSync] \(name)'s link was already replaced; not closing the open device")
+                return nil
+            }
+            let peripheral = manager.peripheral
+            manager.close(clearDevicePtr: true)
+            return peripheral
+        }
+        // The device's close and then the link's cancel run after close() returns; a session opened sooner loses its link.
+        manager.waitForPendingTeardown()
+        if let closed { CoreBluetoothManager.waitForDisconnect(closed, timeout: 3) }
     }
 
     /// iOS never times out a pending connect; cancelling it makes the open's wait for the link fail.
