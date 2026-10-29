@@ -135,6 +135,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         private(set) var streamStops = 0
         private(set) var streamsServed = 0
         private(set) var releases = 0
+        /// FETCHes on a per-id or value slot after its release; each is answered 404.
+        private(set) var fetchesOnReleasedHandles = 0
         /// Paths of the /Data streams served, in order.
         private(set) var streamedPaths: [String] = []
 
@@ -420,6 +422,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
             case 0x0D: // fetch on a handle
                 let h = Array(f[6...8])
                 guard let path = handles[h] else { return }
+                // A slot handle is unknown to the watch once released; only F0 handles stay valid.
+                if h[0] != 0xF0 && !heldSlots.contains(h) {
+                    fetchesOnReleasedHandles += 1
+                    send(dataFrame(msgid: msgid, handle: h, status: 404, body: []))
+                    return
+                }
                 let sublen = Int(f[2]) | Int(f[3]) << 8
                 let param: (type: UInt8, value: UInt32)? = sublen >= 13
                     ? (f[13], UInt32(f[15]) | UInt32(f[16]) << 8 | UInt32(f[17]) << 16 | UInt32(f[18]) << 24)
@@ -849,6 +857,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let first = watch.mdsPayloadSize, page = watch.summaryPageSize
         XCTAssertEqual(watch.dataPageOffsets, stride(from: first, to: dive.compressed.count, by: page).map(UInt32.init))
         XCTAssertEqual(watch.dataPagesWhileSubscribed, 0, "the pages are read after the UNSUBSCRIBE")
+        XCTAssertEqual(watch.getPaths.filter { $0 == "/Logbook/byId/\(dive.id)/Data" }.count, 1,
+                       "the pages are read on the stream's own handle, not a second GET")
+        XCTAssertEqual(watch.fetchesOnReleasedHandles, 0, "and before its RELEASE")
         XCTAssertEqual(watch.heldIdHandles, [])
     }
 
