@@ -397,18 +397,29 @@ import LibDCBridge
             return 0
         }
         
+        let manager = CoreBluetoothManager.sharedManager
+        // Some drivers stream a whole dive before the callback runs, so a close must wait for this too.
+        manager.beginRetrieval(deviceDataPtr)
         let retrievalQueue = DispatchQueue(label: "com.libdcswift.deviceinfo", qos: .userInitiated)
         retrievalQueue.async {
             // Call dc_device_foreach with our minimal callback
             // This will trigger DC_EVENT_DEVINFO but stop before downloading any dives
             let status = dc_device_foreach(dcDevice, minimalCallback, nil)
-            
+
             DispatchQueue.main.async {
-                if status == DC_STATUS_SUCCESS || status == DC_STATUS_PROTOCOL {
+                // Read before endRetrieval, which runs a held-back close that frees deviceDataPtr.
+                let closedMidFetch = manager.isCloseDeferred(deviceDataPtr)
+                let haveDevinfo = deviceDataPtr.pointee.have_devinfo != 0
+                let serial = String(format: "%08x", deviceDataPtr.pointee.devinfo.serial)
+                let model = deviceDataPtr.pointee.devinfo.model
+                manager.endRetrieval(deviceDataPtr)
+
+                if closedMidFetch {
+                    logWarning("Device info fetch stopped because the device is being closed")
+                    completion(false)
+                } else if status == DC_STATUS_SUCCESS || status == DC_STATUS_PROTOCOL {
                     // DC_STATUS_PROTOCOL is expected when we return 0 from callback
-                    if deviceDataPtr.pointee.have_devinfo != 0 {
-                        let serial = String(format: "%08x", deviceDataPtr.pointee.devinfo.serial)
-                        let model = deviceDataPtr.pointee.devinfo.model
+                    if haveDevinfo {
                         logInfo("✅ Device info fetched - Serial: \(serial), Model: \(model)")
                         completion(true)
                     } else {
