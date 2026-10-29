@@ -37,10 +37,13 @@ public class DiveDataViewModel: ObservableObject {
         public let status: String
         /// Dives delivered before the failure.
         public let divesDownloaded: Int
+        /// Dives downloaded but rejected by the parser; the next sync downloads them again.
+        public let divesRejected: Int
 
-        public init(status: String, divesDownloaded: Int) {
+        public init(status: String, divesDownloaded: Int, divesRejected: Int = 0) {
             self.status = status
             self.divesDownloaded = divesDownloaded
+            self.divesRejected = divesRejected
         }
     }
     

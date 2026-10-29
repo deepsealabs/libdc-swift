@@ -23,7 +23,7 @@ public class DiveLogRetriever {
         var deviceSerial: String?
         var deviceTypeFromLibDC: String?  // Exact device type string from libdivecomputer
         var hasNewDives: Bool = false
-        weak var bluetoothManager: CoreBluetoothManager?
+        weak var bluetoothManager: RetrievalFlagHolder?
         var devicePtr: UnsafeMutablePointer<device_data_t>?
         var hasDeviceInfo: Bool = false
         var storedFingerprint: Data?
@@ -37,6 +37,10 @@ public class DiveLogRetriever {
         /// fingerprint (so a clean retry re-downloads) and to signal the
         /// empty-read outcome instead of a false "no new dives".
         var emptyReadCount: Int = 0
+        /// Dives the parser rejected. They were downloaded but not delivered, so the fingerprint must not move past them.
+        var rejectedCount: Int = 0
+        /// The first rejection's status, reported when the download itself went through.
+        var rejectionStatus: dc_status_t = DC_STATUS_DATAFORMAT
         /// When false, a "download only new" toggle-off — skip loading/comparing
         /// against the stored fingerprint entirely so a full history re-download
         /// isn't cut short by the fingerprint match early-return below.
@@ -47,7 +51,7 @@ public class DiveLogRetriever {
         var detectedFamily: dc_family_t = DC_FAMILY_NULL
         var detectedModel: UInt32 = 0
 
-        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, bluetoothManager: CoreBluetoothManager, useFingerprint: Bool = true) {
+        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, bluetoothManager: RetrievalFlagHolder?, useFingerprint: Bool = true) {
             self.viewModel = viewModel
             self.deviceName = deviceName
             self.deviceUUID = deviceUUID
@@ -74,6 +78,8 @@ public class DiveLogRetriever {
         /// the device and a later sync must fetch them.
         var interrupted: Bool
         var emptyReadOnly: Bool
+        /// The download went through, but the parser rejected dives, so it failed.
+        var parseRejected: Bool
     }
 
     /// Fingerprint rule: the stored fingerprint only advances when the whole
@@ -83,7 +89,8 @@ public class DiveLogRetriever {
     /// error the old fingerprint is kept and the next sync re-walks from it
     /// (re-delivering the dives this session already got; hosts dedupe them).
     static func outcome(status: dc_status_t, family: dc_family_t, fingerprintMatched: Bool,
-                        hasNewDives: Bool, hadStoredFingerprint: Bool, emptyReadCount: Int) -> DownloadOutcome {
+                        hasNewDives: Bool, hadStoredFingerprint: Bool, emptyReadCount: Int,
+                        rejectedCount: Int = 0) -> DownloadOutcome {
         var succeeded: Bool
         var saveFingerprint = false
 
@@ -104,14 +111,40 @@ public class DiveLogRetriever {
 
         // An empty read never advances the fingerprint, so a clean retry
         // re-downloads; all-empty is a soft failure (e.g. "close the Suunto app").
-        let emptyReadOnly = emptyReadCount > 0 && !hasNewDives
+        let emptyReadOnly = emptyReadCount > 0 && !hasNewDives && rejectedCount == 0
         if emptyReadCount > 0 {
             saveFingerprint = false
             if emptyReadOnly { succeeded = false }
         }
 
+        // A rejected dive is one the download failed to deliver: the fingerprint stays before it.
+        let parseRejected = rejectedCount > 0 && succeeded
+        if rejectedCount > 0 {
+            saveFingerprint = false
+            succeeded = false
+        }
+
         return DownloadOutcome(succeeded: succeeded, saveFingerprint: saveFingerprint,
-                               interrupted: !succeeded && hasNewDives, emptyReadOnly: emptyReadOnly)
+                               interrupted: !succeeded && hasNewDives, emptyReadOnly: emptyReadOnly,
+                               parseRejected: parseRejected)
+    }
+
+    static func outcome(status: dc_status_t, family: dc_family_t, context: CallbackContext) -> DownloadOutcome {
+        outcome(status: status, family: family, fingerprintMatched: context.fingerprintMatched,
+                hasNewDives: context.hasNewDives, hadStoredFingerprint: context.storedFingerprint != nil,
+                emptyReadCount: context.emptyReadCount, rejectedCount: context.rejectedCount)
+    }
+
+    /// The status a parse failure carries; DATAFORMAT when it carries none.
+    static func parseFailureStatus(_ error: Error) -> dc_status_t {
+        guard let error = error as? GenericParser.ParserError else { return DC_STATUS_DATAFORMAT }
+        switch error {
+        case .parserCreationFailed(let status), .datetimeRetrievalFailed(let status),
+             .fieldRetrievalFailed(let status), .sampleProcessingFailed(let status):
+            return status == DC_STATUS_SUCCESS ? DC_STATUS_DATAFORMAT : status
+        case .invalidParameters:
+            return DC_STATUS_DATAFORMAT
+        }
     }
 
     /// CANCELLED whatever the driver said, so a cut-short download never advances the fingerprint past dives left on the device.
@@ -140,7 +173,7 @@ public class DiveLogRetriever {
         }
     }
 
-    private static let diveCallbackClosure: @convention(c) (
+    static let diveCallbackClosure: @convention(c) (
         UnsafePointer<UInt8>?,
         UInt32,
         UnsafePointer<UInt8>?,
@@ -297,8 +330,11 @@ public class DiveLogRetriever {
             context.logCount += 1
             return 1
         } catch {
+            // Go on to the older dives; the outcome keeps the fingerprint so the next sync downloads this one again.
             logError("❌ Failed to parse dive #\(context.logCount): \(error)")
-            return 1 
+            if context.rejectedCount == 0 { context.rejectionStatus = parseFailureStatus(error) }
+            context.rejectedCount += 1
+            return 1
         }
     }
     
@@ -496,11 +532,8 @@ public class DiveLogRetriever {
                 DispatchQueue.main.async {
                     // Before completion, so the host never sees a device a held-back close is about to free.
                     bluetoothManager.endRetrieval(devicePtr)
-                    let outcome = DiveLogRetriever.outcome(status: enumStatus, family: family,
-                                                           fingerprintMatched: context.fingerprintMatched,
-                                                           hasNewDives: context.hasNewDives,
-                                                           hadStoredFingerprint: context.storedFingerprint != nil,
-                                                           emptyReadCount: context.emptyReadCount)
+                    let outcome = DiveLogRetriever.outcome(status: enumStatus, family: family, context: context)
+                    let failureStatus = outcome.parseRejected ? context.rejectionStatus : enumStatus
                     let downloadSucceeded = outcome.succeeded
                     let shouldSaveFingerprint = outcome.saveFingerprint
                     let emptyReadOnly = outcome.emptyReadOnly
@@ -509,10 +542,11 @@ public class DiveLogRetriever {
                     // Record a stable status key for analytics before routing.
                     viewModel.lastDownloadStatus = emptyReadOnly
                         ? "emptyRead"
-                        : (downloadSucceeded ? "success" : statusName(enumStatus))
+                        : (downloadSucceeded ? "success" : statusName(failureStatus))
                     viewModel.lastDownloadInterruption = outcome.interrupted
-                        ? DiveDataViewModel.DownloadInterruption(status: statusName(enumStatus),
-                                                                 divesDownloaded: context.logCount - 1 - context.emptyReadCount)
+                        ? DiveDataViewModel.DownloadInterruption(status: statusName(failureStatus),
+                                                                 divesDownloaded: context.logCount - 1 - context.emptyReadCount,
+                                                                 divesRejected: context.rejectedCount)
                         : nil
 
                     // Handle the outcome
@@ -523,6 +557,9 @@ public class DiveLogRetriever {
                         } else if emptyReadOnly {
                             logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
                             viewModel.updateProgress(.emptyRead)
+                        } else if outcome.parseRejected {
+                            logWarning("⚠️ \(context.rejectedCount) dive(s) failed to parse: DC_STATUS_\(statusName(failureStatus)); fingerprint kept")
+                            viewModel.setDetailedError("\(context.rejectedCount) dive(s) couldn't be read. They'll be downloaded again on the next sync.", status: failureStatus)
                         } else if outcome.interrupted {
                             logWarning("⚠️ Download interrupted after \(context.logCount - 1) dive(s): DC_STATUS_\(statusName(enumStatus)); fingerprint kept")
                             viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: enumStatus)
