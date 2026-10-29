@@ -83,6 +83,7 @@ import LibDCBridge
         ComputerModel(name: "Aqualung i550C", family: .oceanicAtom2, modelID: 0x4652),
         ComputerModel(name: "Aqualung i300C", family: .oceanicAtom2, modelID: 0x4648),
         ComputerModel(name: "Aqualung i200C", family: .oceanicAtom2, modelID: 0x4649),
+        ComputerModel(name: "Aqualung i470TC", family: .oceanicAtom2, modelID: 0x4743),
         ComputerModel(name: "Sherwood Wisdom 3", family: .oceanicAtom2, modelID: 0x4458),
         ComputerModel(name: "Sherwood Sage", family: .oceanicAtom2, modelID: 0x4647),
         
@@ -516,10 +517,25 @@ import LibDCBridge
             guard (0x30...0x39).contains(scalars[i].value) else { return nil }
         }
 
-        let modelID = UInt32((hi << 8) | lo)
-        return supportedModels.first(where: {
-            ($0.family == .oceanicAtom2 || $0.family == .pelagicI330R) && $0.modelID == modelID
-        }).map { (family: $0.family, model: $0.modelID) }
+        return pelagicBLEDescriptor(model: UInt32((hi << 8) | lo))
+    }
+
+    // Matches libdivecomputer's table, not supportedModels, so BLE models missing from the catalog still resolve.
+    private static func pelagicBLEDescriptor(model: UInt32) -> (family: DeviceFamily, model: UInt32)? {
+        var iterator: OpaquePointer?
+        guard dc_descriptor_iterator_new(&iterator, nil) == DC_STATUS_SUCCESS, let iterator else { return nil }
+        defer { dc_iterator_free(iterator) }
+
+        var descriptor: OpaquePointer?
+        while dc_iterator_next(iterator, &descriptor) == DC_STATUS_SUCCESS, let desc = descriptor {
+            defer { dc_descriptor_free(desc) }
+            guard dc_descriptor_get_model(desc) == model,
+                  dc_descriptor_get_transports(desc) & DC_TRANSPORT_BLE.rawValue != 0,
+                  let family = DeviceFamily(dcFamily: dc_descriptor_get_type(desc)),
+                  family == .oceanicAtom2 || family == .pelagicI330R else { continue }
+            return (family, model)
+        }
+        return nil
     }
     
     public static func getDeviceDisplayName(from name: String) -> String {
