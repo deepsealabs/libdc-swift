@@ -37,8 +37,12 @@ public class DiveLogRetriever {
         /// fingerprint (so a clean retry re-downloads) and to signal the
         /// empty-read outcome instead of a false "no new dives".
         var emptyReadCount: Int = 0
-        /// Dives the parser rejected. They were downloaded but not delivered, so the fingerprint must not move past them.
-        var rejectedCount: Int = 0
+        /// Fingerprints of the dives the parser rejected, newest first. They were downloaded but not delivered, so the
+        /// fingerprint must not move past them, unless an earlier download rejected them too (see `settle`).
+        var rejectedFingerprints: [Data] = []
+        var rejectedCount: Int { rejectedFingerprints.count }
+        /// Fingerprints of the dives delivered, so an earlier rejection of one is forgotten.
+        var deliveredFingerprints: [Data] = []
         /// The first rejection's status, reported when the download itself went through.
         var rejectionStatus: dc_status_t = DC_STATUS_DATAFORMAT
         /// When false, a "download only new" toggle-off — skip loading/comparing
@@ -90,14 +94,15 @@ public class DiveLogRetriever {
     /// (re-delivering the dives this session already got; hosts dedupe them).
     static func outcome(status: dc_status_t, family: dc_family_t, fingerprintMatched: Bool,
                         hasNewDives: Bool, hadStoredFingerprint: Bool, emptyReadCount: Int,
-                        rejectedCount: Int = 0) -> DownloadOutcome {
+                        rejectedCount: Int = 0, unreadableCount: Int = 0) -> DownloadOutcome {
         var succeeded: Bool
         var saveFingerprint = false
 
         switch status {
         case DC_STATUS_SUCCESS:
             succeeded = true
-            saveFingerprint = hasNewDives
+            // A dive given up as unreadable no longer holds the fingerprint, even when no other dive came.
+            saveFingerprint = hasNewDives || unreadableCount > 0
         case DC_STATUS_PROTOCOL where fingerprintMatched:
             succeeded = true
         case DC_STATUS_PROTOCOL where !hasNewDives && hadStoredFingerprint && family != DC_FAMILY_SUUNTO_NAUTIC:
@@ -117,7 +122,7 @@ public class DiveLogRetriever {
             if emptyReadOnly { succeeded = false }
         }
 
-        // A rejected dive is one the download failed to deliver: the fingerprint stays before it.
+        // A dive rejected for the first time is one the download failed to deliver: the fingerprint stays before it.
         let parseRejected = rejectedCount > 0 && succeeded
         if rejectedCount > 0 {
             saveFingerprint = false
@@ -129,10 +134,62 @@ public class DiveLogRetriever {
                                parseRejected: parseRejected)
     }
 
-    static func outcome(status: dc_status_t, family: dc_family_t, context: CallbackContext) -> DownloadOutcome {
-        outcome(status: status, family: family, fingerprintMatched: context.fingerprintMatched,
-                hasNewDives: context.hasNewDives, hadStoredFingerprint: context.storedFingerprint != nil,
-                emptyReadCount: context.emptyReadCount, rejectedCount: context.rejectedCount)
+    static func outcome(status: dc_status_t, family: dc_family_t, context: CallbackContext,
+                        previouslyRejected: Set<Data> = []) -> DownloadOutcome {
+        let rejections = splitRejections(context.rejectedFingerprints, previouslyRejected: previouslyRejected)
+        return outcome(status: status, family: family, fingerprintMatched: context.fingerprintMatched,
+                       hasNewDives: context.hasNewDives, hadStoredFingerprint: context.storedFingerprint != nil,
+                       emptyReadCount: context.emptyReadCount, rejectedCount: rejections.retry.count,
+                       unreadableCount: rejections.unreadable.count)
+    }
+
+    /// A first rejection holds the fingerprint, so the next download tries the dive once more. The parser gives the
+    /// same bytes the same answer, so a dive an earlier download rejected too is unreadable: holding it would re-walk
+    /// every dive since the stored fingerprint on every sync and fail each one. A dive with no fingerprint can't be
+    /// recognised again, so it always holds.
+    static func splitRejections(_ rejected: [Data], previouslyRejected: Set<Data>) -> (retry: [Data], unreadable: [Data]) {
+        var retry: [Data] = [], unreadable: [Data] = []
+        for fingerprint in rejected {
+            if !fingerprint.isEmpty && previouslyRejected.contains(fingerprint) {
+                unreadable.append(fingerprint)
+            } else {
+                retry.append(fingerprint)
+            }
+        }
+        return (retry, unreadable)
+    }
+
+    /// Unreadable dives stay remembered, so a download that ignores the fingerprint doesn't hold on them again.
+    static func rememberedRejections(previous: Set<Data>, rejected: [Data], delivered: [Data]) -> Set<Data> {
+        previous.union(rejected.filter { !$0.isEmpty }).subtracting(delivered)
+    }
+
+    /// The key the device's fingerprint is stored under: the stored device's model name, else libdivecomputer's.
+    static func fingerprintDeviceType(_ context: CallbackContext) -> String {
+        if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID),
+           let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
+            return modelInfo.name
+        }
+        return context.deviceTypeFromLibDC ?? context.deviceName
+    }
+
+    /// Judges a finished download against the dives earlier downloads rejected and remembers this one's rejections.
+    /// Returns the dives given up as unreadable. Main thread.
+    static func settle(status: dc_status_t, family: dc_family_t,
+                       context: CallbackContext) -> (outcome: DownloadOutcome, unreadable: [Data]) {
+        guard let serial = context.deviceSerial else {
+            return (outcome(status: status, family: family, context: context), [])
+        }
+        let deviceType = fingerprintDeviceType(context)
+        let storage = DeviceFingerprintStorage.shared
+        let previous = storage.rejectedDives(forDeviceType: deviceType, serial: serial)
+        let remembered = rememberedRejections(previous: previous, rejected: context.rejectedFingerprints,
+                                              delivered: context.deliveredFingerprints)
+        if remembered != previous {
+            storage.setRejectedDives(remembered, forDeviceType: deviceType, serial: serial)
+        }
+        let unreadable = splitRejections(context.rejectedFingerprints, previouslyRejected: previous).unreadable
+        return (outcome(status: status, family: family, context: context, previouslyRejected: previous), unreadable)
     }
 
     /// The status a parse failure carries; DATAFORMAT when it carries none.
@@ -244,7 +301,8 @@ public class DiveLogRetriever {
 
         // Capture the FIRST dive's fingerprint (most recent dive on the device)
         // This is what we'll compare against on the next download
-        if context.logCount == 1 {
+        // Not keyed on logCount: a rejected newest dive leaves it at 1.
+        if context.lastFingerprint == nil {
             context.lastFingerprint = fingerprintData
         }
         
@@ -327,13 +385,14 @@ public class DiveLogRetriever {
             }
 
             context.hasNewDives = true
+            context.deliveredFingerprints.append(fingerprintData)
             context.logCount += 1
             return 1
         } catch {
-            // Go on to the older dives; the outcome keeps the fingerprint so the next sync downloads this one again.
+            // Go on to the older dives; settle decides whether this one holds the fingerprint.
             logError("❌ Failed to parse dive #\(context.logCount): \(error)")
-            if context.rejectedCount == 0 { context.rejectionStatus = parseFailureStatus(error) }
-            context.rejectedCount += 1
+            if context.rejectedFingerprints.isEmpty { context.rejectionStatus = parseFailureStatus(error) }
+            context.rejectedFingerprints.append(fingerprintData)
             return 1
         }
     }
@@ -532,7 +591,7 @@ public class DiveLogRetriever {
                 DispatchQueue.main.async {
                     // Before completion, so the host never sees a device a held-back close is about to free.
                     bluetoothManager.endRetrieval(devicePtr)
-                    let outcome = DiveLogRetriever.outcome(status: enumStatus, family: family, context: context)
+                    let (outcome, unreadable) = DiveLogRetriever.settle(status: enumStatus, family: family, context: context)
                     let failureStatus = outcome.parseRejected ? context.rejectionStatus : enumStatus
                     let downloadSucceeded = outcome.succeeded
                     let shouldSaveFingerprint = outcome.saveFingerprint
@@ -548,6 +607,7 @@ public class DiveLogRetriever {
                                                                  divesDownloaded: context.logCount - 1 - context.emptyReadCount,
                                                                  divesRejected: context.rejectedCount)
                         : nil
+                    viewModel.lastUnreadableDives = downloadSucceeded ? unreadable : []
 
                     // Handle the outcome
                     if !downloadSucceeded {
@@ -559,7 +619,7 @@ public class DiveLogRetriever {
                             viewModel.updateProgress(.emptyRead)
                         } else if outcome.parseRejected {
                             logWarning("⚠️ \(context.rejectedCount) dive(s) failed to parse: DC_STATUS_\(statusName(failureStatus)); fingerprint kept")
-                            viewModel.setDetailedError("\(context.rejectedCount) dive(s) couldn't be read. They'll be downloaded again on the next sync.", status: failureStatus)
+                            viewModel.setDetailedError("\(context.rejectedCount) dive(s) couldn't be read. Sync again to try once more; a dive that still can't be read is then skipped.", status: failureStatus)
                         } else if outcome.interrupted {
                             logWarning("⚠️ Download interrupted after \(context.logCount - 1) dive(s): DC_STATUS_\(statusName(enumStatus)); fingerprint kept")
                             viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: enumStatus)
@@ -569,16 +629,12 @@ public class DiveLogRetriever {
                         completion(false)
                     } else {
                         // Download completed successfully
+                        if !unreadable.isEmpty {
+                            logWarning("⚠️ \(unreadable.count) dive(s) failed to parse again; skipped as unreadable, the fingerprint moves past them")
+                        }
                         if shouldSaveFingerprint, let lastFP = context.lastFingerprint, let serial = context.deviceSerial {
                             // Use stored device configuration (user-selected) for consistent fingerprint storage
-                            let deviceType: String
-                            if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID),
-                               let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
-                                deviceType = modelInfo.name
-                            } else {
-                                // Fall back to libdivecomputer name or device name
-                                deviceType = context.deviceTypeFromLibDC ?? context.deviceName
-                            }
+                            let deviceType = fingerprintDeviceType(context)
                             logInfo("✅ Download completed - \(context.logCount - 1) dive(s) downloaded")
                             viewModel.saveFingerprint(lastFP, deviceType: deviceType, serial: serial)
                             viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)

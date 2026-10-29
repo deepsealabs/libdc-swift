@@ -6,7 +6,8 @@ import Clibdivecomputer
 /// newest-first and `dc_device_foreach` still succeeds, so storing a newer
 /// dive's fingerprint would make every later sync stop before the rejected
 /// dive. It must keep the stored fingerprint and fail the download, while the
-/// other dives are still delivered.
+/// other dives are still delivered. The same dive rejected on a later sync is
+/// unreadable, and then no longer holds the fingerprint.
 final class RejectedDiveTests: XCTestCase {
 
     private final class Holder: RetrievalFlagHolder {
@@ -171,6 +172,184 @@ final class RejectedDiveTests: XCTestCase {
         XCTAssertFalse(o.succeeded)
         XCTAssertFalse(o.emptyReadOnly, "not every dive came back empty")
         XCTAssertTrue(o.parseRejected)
+    }
+
+    // MARK: - A dive rejected again is unreadable
+
+    private let serial = "test-\(UUID().uuidString)"
+    /// The key `settle` stores rejections under here: no stored device, so the context's device name.
+    private let deviceType = "Suunto Ocean 260410000713"
+
+    override func tearDown() {
+        DeviceFingerprintStorage.shared.setRejectedDives([], forDeviceType: deviceType, serial: serial)
+        super.tearDown()
+    }
+
+    private struct Sync {
+        let context: DiveLogRetriever.CallbackContext
+        let outcome: DiveLogRetriever.DownloadOutcome
+        let unreadable: [Data]
+        /// The dives the walk downloaded, before it stopped at the stored fingerprint.
+        let downloaded: [UInt32]
+    }
+
+    /// One sync of a watch holding `dives`, newest first: walks them until the callback stops at the stored
+    /// fingerprint, as the drivers do, settles, and stores the fingerprint when the outcome says to.
+    private func sync(_ dives: [(data: Data, id: UInt32)], stored: inout Data?, serial: String? = nil) -> Sync {
+        let ctx = DiveLogRetriever.CallbackContext(
+            viewModel: DiveDataViewModel(), deviceName: deviceType, deviceUUID: UUID().uuidString,
+            storedFingerprint: stored, bluetoothManager: holder)
+        ctx.deviceSerial = serial ?? self.serial
+        var downloaded: [UInt32] = []
+        for dive in dives {
+            guard deliver(dive.data, id: dive.id, to: ctx) == 1 else { break }
+            downloaded.append(dive.id)
+        }
+        let (outcome, unreadable) = DiveLogRetriever.settle(status: DC_STATUS_SUCCESS, family: DC_FAMILY_SUUNTO_NAUTIC,
+                                                            context: ctx)
+        if outcome.saveFingerprint { stored = ctx.lastFingerprint }
+        return Sync(context: ctx, outcome: outcome, unreadable: unreadable, downloaded: downloaded)
+    }
+
+    func testDiveRejectedOnTwoSyncsIsSkippedAndTheFingerprintMovesPastIt() throws {
+        let dive = try fixture()
+        let watch = [(dive, ids[0]), (badMagic(dive), ids[1]), (dive, ids[2])]
+        let synced = fingerprint(1_787_000_000)
+        var stored: Data? = synced
+
+        let first = sync(watch, stored: &stored)
+        XCTAssertTrue(first.outcome.parseRejected)
+        XCTAssertFalse(first.outcome.succeeded)
+        XCTAssertEqual(first.unreadable, [])
+        XCTAssertEqual(stored, synced, "a first rejection holds the fingerprint, so the next sync tries the dive again")
+
+        let second = sync(watch, stored: &stored)
+        XCTAssertEqual(second.downloaded, ids, "the next sync re-walks from the stored fingerprint")
+        XCTAssertTrue(second.outcome.succeeded, "the same dive rejected again is unreadable, not missing")
+        XCTAssertFalse(second.outcome.parseRejected)
+        XCTAssertFalse(second.outcome.interrupted)
+        XCTAssertEqual(second.unreadable, [fingerprint(ids[1])])
+        XCTAssertEqual(stored, fingerprint(ids[0]), "the fingerprint moves to the newest dive")
+
+        let third = sync(watch, stored: &stored)
+        XCTAssertEqual(third.downloaded, [], "the sync after stops at the newest dive and doesn't ask for the unreadable one")
+        XCTAssertTrue(third.context.fingerprintMatched)
+        XCTAssertTrue(third.outcome.succeeded)
+        XCTAssertEqual(third.unreadable, [])
+    }
+
+    func testUnreadableNewestDiveIsTheFingerprintStored() throws {
+        let dive = try fixture()
+        let watch = [(badMagic(dive), ids[0]), (dive, ids[1]), (dive, ids[2])]
+        var stored: Data? = fingerprint(ids[2])
+
+        XCTAssertTrue(sync(watch, stored: &stored).outcome.parseRejected)
+        let second = sync(watch, stored: &stored)
+        XCTAssertTrue(second.outcome.saveFingerprint)
+        XCTAssertEqual(stored, fingerprint(ids[0]), "the newest dive's, though it's the one rejected, not the newest parsed")
+
+        XCTAssertEqual(sync(watch, stored: &stored).downloaded, [])
+    }
+
+    func testOnlyAnUnreadableDiveStillMovesTheFingerprint() {
+        let o = DiveLogRetriever.outcome(status: DC_STATUS_SUCCESS, family: DC_FAMILY_SUUNTO_NAUTIC,
+                                         fingerprintMatched: true, hasNewDives: false,
+                                         hadStoredFingerprint: true, emptyReadCount: 0, unreadableCount: 1)
+        XCTAssertTrue(o.succeeded)
+        XCTAssertTrue(o.saveFingerprint, "else every sync downloads the unreadable dive again until a newer one comes")
+        XCTAssertFalse(o.parseRejected)
+    }
+
+    func testRejectedDiveThatParsesOnTheNextSyncIsDeliveredAndForgotten() throws {
+        let dive = try fixture()
+        var stored: Data? = fingerprint(1_787_000_000)
+
+        _ = sync([(dive, ids[0]), (badMagic(dive), ids[1])], stored: &stored)
+        XCTAssertEqual(DeviceFingerprintStorage.shared.rejectedDives(forDeviceType: deviceType, serial: serial),
+                       [fingerprint(ids[1])])
+
+        let second = sync([(dive, ids[0]), (dive, ids[1])], stored: &stored)
+        drainMain()
+        XCTAssertEqual(second.context.viewModel.dives.count, 2)
+        XCTAssertEqual(second.unreadable, [])
+        XCTAssertEqual(stored, fingerprint(ids[0]))
+        XCTAssertTrue(DeviceFingerprintStorage.shared.rejectedDives(forDeviceType: deviceType, serial: serial).isEmpty)
+    }
+
+    func testFirstRejectionAlongsideAnUnreadableDiveStillHolds() throws {
+        let dive = try fixture()
+        let synced = fingerprint(1_787_000_000)
+        var stored: Data? = synced
+        _ = sync([(dive, ids[0]), (badMagic(dive), ids[1])], stored: &stored)
+
+        let newer: UInt32 = 1_788_000_000
+        let second = sync([(badMagic(dive), newer), (dive, ids[0]), (badMagic(dive), ids[1])], stored: &stored)
+        XCTAssertTrue(second.outcome.parseRejected, "the newer dive is rejected for the first time")
+        XCTAssertFalse(second.outcome.saveFingerprint)
+        XCTAssertEqual(second.unreadable, [fingerprint(ids[1])])
+        XCTAssertEqual(stored, synced)
+
+        let third = sync([(badMagic(dive), newer), (dive, ids[0]), (badMagic(dive), ids[1])], stored: &stored)
+        XCTAssertTrue(third.outcome.succeeded)
+        XCTAssertEqual(third.unreadable, [fingerprint(newer), fingerprint(ids[1])])
+        XCTAssertEqual(stored, fingerprint(newer))
+    }
+
+    func testUnreadableDiveDoesNotHoldADownloadThatIgnoresTheFingerprint() throws {
+        let dive = try fixture()
+        var stored: Data? = fingerprint(1_787_000_000)
+        let watch = [(dive, ids[0]), (badMagic(dive), ids[1])]
+        _ = sync(watch, stored: &stored)
+        _ = sync(watch, stored: &stored)
+
+        var none: Data?
+        let all = sync(watch, stored: &none)
+        XCTAssertTrue(all.outcome.succeeded, "a dive given up stays known as unreadable")
+        XCTAssertEqual(all.unreadable, [fingerprint(ids[1])])
+    }
+
+    func testWithoutASerialEveryRejectionHolds() throws {
+        let dive = try fixture()
+        let synced = fingerprint(1_787_000_000)
+        var stored: Data? = synced
+        let watch = [(dive, ids[0]), (badMagic(dive), ids[1])]
+        for _ in 0..<2 {
+            let ctx = DiveLogRetriever.CallbackContext(
+                viewModel: DiveDataViewModel(), deviceName: deviceType, deviceUUID: UUID().uuidString,
+                storedFingerprint: stored, bluetoothManager: holder)
+            for (data, id) in watch { deliver(data, id: id, to: ctx) }
+            let (o, unreadable) = DiveLogRetriever.settle(status: DC_STATUS_SUCCESS, family: DC_FAMILY_SUUNTO_NAUTIC, context: ctx)
+            XCTAssertTrue(o.parseRejected, "with no key the dive can't be recognised again")
+            XCTAssertEqual(unreadable, [])
+            if o.saveFingerprint { stored = ctx.lastFingerprint }
+        }
+        XCTAssertEqual(stored, synced)
+    }
+
+    func testRejectionWithoutAFingerprintAlwaysHolds() {
+        let split = DiveLogRetriever.splitRejections([Data(), fingerprint(ids[1])], previouslyRejected: [Data(), fingerprint(ids[1])])
+        XCTAssertEqual(split.retry, [Data()])
+        XCTAssertEqual(split.unreadable, [fingerprint(ids[1])])
+        XCTAssertEqual(DiveLogRetriever.rememberedRejections(previous: [], rejected: [Data()], delivered: []), [])
+    }
+
+    func testForgettingTheDeviceForgetsItsRejections() {
+        let storage = DeviceFingerprintStorage.shared
+        let type = "Test Device \(UUID().uuidString)"
+        let other = "test-other-\(UUID().uuidString)"
+        defer {
+            storage.setRejectedDives([], forDeviceType: type, serial: serial)
+            storage.setRejectedDives([], forDeviceType: type, serial: other)
+        }
+        storage.setRejectedDives([fingerprint(ids[1])], forDeviceType: type, serial: serial)
+        storage.setRejectedDives([fingerprint(ids[2])], forDeviceType: type, serial: other)
+
+        storage.clearFingerprint(forDeviceType: type, serial: serial)
+        XCTAssertTrue(storage.rejectedDives(forDeviceType: type, serial: serial).isEmpty)
+        XCTAssertEqual(storage.rejectedDives(forDeviceType: type, serial: other), [fingerprint(ids[2])])
+
+        storage.clearFingerprintsForDeviceType(type.uppercased())
+        XCTAssertTrue(storage.rejectedDives(forDeviceType: type, serial: other).isEmpty)
     }
 
     func testParseFailureStatusIsTheParsersOrDataformat() {
