@@ -246,9 +246,17 @@ import LibDCBridge
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)? = nil
     ) -> Bool {
+        warnIfOnMainThread("openBLEDevice")
         connectionLock.lock()
         defer { connectionLock.unlock() }
         return openBLEDeviceLocked(name: name, deviceAddress: deviceAddress, forcedModel: forcedModel)
+    }
+
+    /// Waits out an earlier close still running the old device's quit command on the link, then
+    /// closes whatever is still open. A new link must not start while the old one is in use.
+    static func prepareLink(forOpening name: String, on manager: CoreBluetoothManager) {
+        manager.waitForPendingTeardown()
+        closeOpenDeviceFirst(opening: name, on: manager)
     }
 
     /// The manager holds one open device on one link. Opening another on top
@@ -256,13 +264,13 @@ import LibDCBridge
     /// talk to the old watch (libdc-swift#75). Close it and wait for the
     /// disconnect first, the same handoff auto download makes. A device an
     /// auto download session holds the lease for is that session's to close.
-    private static func closeOpenDeviceFirst(opening name: String) {
+    private static func closeOpenDeviceFirst(opening name: String, on manager: CoreBluetoothManager) {
         guard !Thread.isMainThread else {
             logWarning("openBLEDevice called on main; not closing the open device first")
             return
         }
         guard !NauticLinkLease.shared.isHeld else { return }
-        if let closed = CoreBluetoothManager.sharedManager.closeAndWaitForDisconnect() {
+        if let closed = manager.closeAndWaitForDisconnect() {
             logInfo("Closed \(closed) before opening \(name)")
         }
     }
@@ -274,7 +282,7 @@ import LibDCBridge
     ) -> Bool {
         logDebug("LibDCSwift build \(libDCSwiftBuildTag) -- attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
-        closeOpenDeviceFirst(opening: name)
+        prepareLink(forOpening: name, on: .sharedManager)
 
         // Set connecting flag to prevent auto-reconnect during connection attempt
         DispatchQueue.main.async {

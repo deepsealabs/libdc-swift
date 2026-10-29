@@ -23,6 +23,8 @@
 @optional
 // YES while a close waits for a running download; link I/O then gives up with DC_STATUS_CANCELLED.
 - (BOOL)isIOCancelled;
+// Logs (and in debug builds asserts) when a blocking link call runs on the main thread.
+- (void)warnIfOnMainThread:(NSString *)caller NS_SWIFT_NAME(warnIfOnMainThread(_:));
 @end
 
 #else
