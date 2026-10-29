@@ -193,6 +193,9 @@ dc_status_t ble_ioctl(ble_object_t *io, unsigned int request, void *data, size_t
 dc_status_t ble_sleep(ble_object_t *io, unsigned int milliseconds) {
     Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
     id<CoreBluetoothManagerProtocol> manager = [CoreBluetoothManagerClass shared];
+    if ([manager respondsToSelector:@selector(warnIfOnMainThread:)]) {
+        [manager warnIfOnMainThread:@"ble_sleep"];
+    }
 
     // Short steps, so a close mid-download doesn't wait out a driver's retry back-off.
     NSDate *end = [NSDate dateWithTimeIntervalSinceNow:milliseconds / 1000.0];

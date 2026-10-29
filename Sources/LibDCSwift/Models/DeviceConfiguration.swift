@@ -246,6 +246,7 @@ import LibDCBridge
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)? = nil
     ) -> Bool {
+        warnIfOnMainThread("openBLEDevice")
         connectionLock.lock()
         defer { connectionLock.unlock() }
         return openBLEDeviceLocked(name: name, deviceAddress: deviceAddress, forcedModel: forcedModel)
