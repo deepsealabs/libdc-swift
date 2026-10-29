@@ -20,6 +20,9 @@
 - (void)setReadTimeout:(int)milliseconds;
 - (void)close;
 - (NSString *)getDeviceName;
+@optional
+// YES while a close waits for a running download; link I/O then gives up with DC_STATUS_CANCELLED.
+- (BOOL)isIOCancelled;
 @end
 
 #else
