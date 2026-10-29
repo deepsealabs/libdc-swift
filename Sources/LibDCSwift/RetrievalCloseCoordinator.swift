@@ -51,4 +51,18 @@ final class RetrievalCloseCoordinator {
         lock.lock(); defer { lock.unlock() }
         return deferredCloses[device] != nil
     }
+
+    /// Begins on the caller's turn; on main afterwards, runs a held-back close, then `completion` (closed: one was waiting).
+    func hold<T>(_ device: UnsafeMutableRawPointer, on queue: DispatchQueue,
+                 _ work: @escaping () -> T, completion: @escaping (_ result: T, _ closed: Bool) -> Void) {
+        begin(device)
+        queue.async {
+            let result = work()
+            DispatchQueue.main.async {
+                let closed = self.isCloseDeferred(device)
+                self.end(device)?()
+                completion(result, closed)
+            }
+        }
+    }
 }
