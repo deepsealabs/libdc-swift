@@ -78,6 +78,7 @@ let package = Package(
                 "LibDCSwift.swift",
                 "Logger.swift",
                 "BLEManager.swift",
+                "BLELinkState.swift",
                 "Models/DeviceConfiguration.swift",
                 "Models/DiveData.swift",
                 "Models/StoredDevice.swift",

@@ -8,6 +8,18 @@ static bool ble_io_cancelled(id<CoreBluetoothManagerProtocol> manager) {
     return [manager respondsToSelector:@selector(isIOCancelled)] && [manager isIOCancelled];
 }
 
+static bool ble_link_lost(id<CoreBluetoothManagerProtocol> manager) {
+    return [manager respondsToSelector:@selector(isLinkLost)] && [manager isLinkLost];
+}
+
+dc_status_t ble_link_status(bool cancelled, bool lost) {
+    if (cancelled) {
+        return DC_STATUS_CANCELLED;
+    }
+    // The link dropped: say so at once rather than write into it or wait out a read timeout.
+    return lost ? DC_STATUS_NODEVICE : DC_STATUS_SUCCESS;
+}
+
 dc_status_t ble_read_status(bool cancelled, size_t length, bool ready) {
     if (cancelled) {
         return DC_STATUS_CANCELLED;
@@ -217,9 +229,21 @@ dc_status_t ble_read(ble_object_t *io, void *buffer, size_t requested, size_t *a
     Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
     id<CoreBluetoothManagerProtocol> manager = [CoreBluetoothManagerClass shared];
 
+    dc_status_t link = ble_link_status(ble_io_cancelled(manager), ble_link_lost(manager));
+    if (link != DC_STATUS_SUCCESS) {
+        *actual = 0;
+        return link;
+    }
+
     // Return one BLE packet at a time to preserve packet boundaries for SLIP framing
     NSData *partialData = [manager readDataPartial:(int)requested];
     size_t length = partialData ? partialData.length : 0;
+
+    // The link dropped during the wait.
+    if (length == 0 && ble_link_lost(manager)) {
+        *actual = 0;
+        return ble_link_status(ble_io_cancelled(manager), true);
+    }
 
     // No notification arrived within the read window. Under background BLE
     // conditions iOS lengthens the connection interval, so this is routinely
@@ -241,10 +265,20 @@ dc_status_t ble_read(ble_object_t *io, void *buffer, size_t requested, size_t *a
 dc_status_t ble_write(ble_object_t *io, const void *data, size_t size, size_t *actual) {
     Class CoreBluetoothManagerClass = NSClassFromString(@"CoreBluetoothManager");
     id<CoreBluetoothManagerProtocol> manager = [CoreBluetoothManagerClass shared];
+
+    dc_status_t link = ble_link_status(ble_io_cancelled(manager), ble_link_lost(manager));
+    if (link != DC_STATUS_SUCCESS) {
+        *actual = 0;
+        return link;
+    }
+
     NSData *nsData = [NSData dataWithBytes:data length:size];
 
     NSInteger result = [manager writeData:nsData];
     dc_status_t rc = ble_write_status(ble_io_cancelled(manager), (long)result);
+    if (rc == DC_STATUS_IO && ble_link_lost(manager)) {
+        rc = DC_STATUS_NODEVICE;
+    }
     *actual = rc == DC_STATUS_SUCCESS ? size : 0;
     return rc;
 }

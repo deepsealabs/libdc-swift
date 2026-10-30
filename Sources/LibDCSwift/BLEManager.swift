@@ -66,6 +66,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     @Published public var isBluetoothReady = false // Indicates if Bluetooth is ready for use
     @Published public var isConnecting = false // Indicates if a connection attempt is in progress (prevents auto-reconnect)
     @Published private var deviceDataPtrChanged = false
+    /// The open device's link dropped. The device can't be used again: close it and connect
+    /// again. Cleared when the next connect starts.
+    @Published public private(set) var hasLostLink = false
 
     // MARK: - Private Properties
     @objc private var timeout: Int = -1 // default to no timeout
@@ -92,6 +95,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     private var lastWriteError: Error? // Result of the most recent with-response write
     private var _deviceDataPtr: UnsafeMutablePointer<device_data_t>?
     let retrievalClose = RetrievalCloseCoordinator()
+    let linkState = BLELinkState()
     private var connectionCompletion: ((Bool) -> Void)?
     private var totalBytesReceived: Int = 0
     private var lastDataReceived: Date?
@@ -280,9 +284,15 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// an unrecoverable I/O error.
     /// A cancelled write (`isIOCancelled()`) returns 2; `ble_write` reports `DC_STATUS_CANCELLED`.
     @objc public func write(_ data: Data!) -> Int {
-        if isIOCancelled() { return 2 }
+        if isIOCancelled() || isLinkLost() { return 2 }
         guard let peripheral = self.peripheral,
               let characteristic = self.writeCharacteristic else { return 2 }
+        // Never write into a link that's gone: on a watch iOS has reconnected by itself, the
+        // write goes out on a link we haven't said Hello on or enabled notifications for.
+        guard peripheral.state == .connected else {
+            logWarning("Write on a link that isn't connected (state \(peripheral.state.rawValue)); not sending")
+            return 2
+        }
         // Choose the write type from the characteristic's properties rather than always using
         // .withoutResponse. A characteristic that only supports Write (with response) silently
         // drops .withoutResponse writes on CoreBluetooth. Prefer .withoutResponse when available
@@ -382,7 +392,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
         while Date().timeIntervalSince(startTime) < timeout {
             // close() wakes this wait when it cancels a download; don't hand it another packet.
-            if isIOCancelled() { return nil }
+            // A drop wakes it too: nothing more arrives on a dead link.
+            if isIOCancelled() || isLinkLost() { return nil }
             var outData: Data?
 
             queue.sync {
@@ -418,6 +429,35 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return nil
     }
     
+    /// True from a drop of the current link until the next connect; link I/O then answers `DC_STATUS_NODEVICE`.
+    @objc public func isLinkLost() -> Bool {
+        linkState.isLost
+    }
+
+    /// Main. The link the open device uses dropped: forget its characteristics and queued
+    /// packets, and wake a read or write waiting on it so it answers `DC_STATUS_NODEVICE` now.
+    private func markLinkLost(_ peripheral: CBPeripheral) {
+        guard linkState.drop(peripheralState: peripheral.state) else {
+            logInfo("Disconnect from \(peripheral.name ?? "device") belongs to an earlier link (now \(peripheral.state.rawValue)); keeping the current one")
+            return
+        }
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        queue.sync {
+            receivedPackets.removeAll()
+            characteristicsByUUID.removeAll()
+            ioctlReadValue = nil
+            ioctlReadCharUUID = nil
+        }
+        dataAvailableSemaphore.signal()
+        writeReadySemaphore.signal()
+        writeConfirmSemaphore.signal()
+        if openedDeviceDataPtr != nil {
+            logWarning("The link to \(peripheral.name ?? "device") dropped with a device open; it fails fast until the next connect")
+            hasLostLink = true
+        }
+    }
+
     // MARK: - Downloads in flight
 
     /// True while a close waits for a download to stop; link I/O then answers `DC_STATUS_CANCELLED`.
@@ -531,7 +571,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             if let devicePtr = self.openedDeviceDataPtr {
                 if devicePtr.pointee.device != nil {
                     dc_device_close(devicePtr.pointee.device)
-                    needsShutdownSettleDelay = true
+                    needsShutdownSettleDelay = peripheral.map { linkState.needsShutdownSettle(peripheralState: $0.state) } ?? false
                 }
                 devicePtr.deallocate()
                 self.openedDeviceDataPtr = nil
@@ -552,7 +592,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
                 // it times out on its own. close() isn't guaranteed to run off
                 // the main thread (a caller may invoke it directly from a
                 // SwiftUI action), so this can't be a blocking sleep here.
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
+                // A connect within the delay reuses this same CBPeripheral when
+                // iOS holds the watch's link; the cancel must not end that one.
+                let generation = linkState.generation
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    guard self.linkState.shouldCancel(scheduledIn: generation) else {
+                        logInfo("A connect started since the close; not cancelling \(peripheral.name ?? "the peripheral")")
+                        return
+                    }
                     self.centralManager.cancelPeripheralConnection(peripheral)
                     // didDisconnectPeripheral publishes isPeripheralReady/connectedDevice
                     // once CoreBluetooth actually confirms the teardown.
@@ -665,9 +712,21 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             logError("connect(toDevice:) failed -- \"\(address ?? "nil")\" is not a valid UUID string")
             return false
         }
-        guard let peripheral = centralManager.retrievePeripherals(withIdentifiers: [uuid]).first else {
-            logError("connect(toDevice:) failed -- retrievePeripherals(withIdentifiers:) found no known peripheral for \(uuid)")
+        // After a drop iOS usually reconnects a bonded watch by itself within seconds, and the
+        // watch stops advertising. Take that connection when there is one, matched by identifier
+        // or, if iOS rotated it, by the stored name.
+        let knownServiceUUIDs = knownSerialServices.map { CBUUID(string: $0.uuid) }
+        let systemConnected = centralManager.retrieveConnectedPeripherals(withServices: knownServiceUUIDs)
+        let storedName = DeviceStorage.shared.getStoredDevice(uuid: uuid.uuidString)?.name
+        let resolved = systemConnected.first { $0.identifier == uuid }
+            ?? centralManager.retrievePeripherals(withIdentifiers: [uuid]).first
+            ?? systemConnected.first { storedName != nil && $0.name == storedName }
+        guard let peripheral = resolved else {
+            logError("connect(toDevice:) failed -- no connected or known peripheral for \(uuid)")
             return false
+        }
+        if systemConnected.contains(where: { $0.identifier == peripheral.identifier }) {
+            logInfo("[BLE CONNECT] \(peripheral.name ?? uuid.uuidString) is already connected to iOS; taking that link")
         }
 
         // Wait out a transitional state before issuing a new connect:
@@ -696,11 +755,16 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // connecting. Synchronously, so the open's wait can't see the old
         // values; on main, where the published properties and the delegate
         // callbacks (queue: nil) live. openBLEDevice runs off main.
+        // A new generation: a cancel still scheduled for the closed link no longer applies,
+        // and a lost link's fail-fast ends. Packets queued on the old link are not this one's.
         let startLink = {
+            self.linkState.start()
+            self.hasLostLink = false
             self.peripheral = peripheral
             self.isPeripheralReady = false
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
+            self.queue.sync { self.receivedPackets.removeAll() }
         }
         if Thread.isMainThread {
             startLink()
@@ -850,6 +914,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             if let current = self.connectedDevice, current.identifier != peripheral.identifier { return }
             self.isPeripheralReady = false
             self.connectedDevice = nil
+            if self.peripheral?.identifier == peripheral.identifier {
+                self.markLinkLost(peripheral)
+            }
 
             // No auto-reconnect: a mid-session disconnect just surfaces as a
             // failure (via DiveLogRetriever's IO/protocol error path, or the
