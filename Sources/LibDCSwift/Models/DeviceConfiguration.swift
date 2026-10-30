@@ -554,6 +554,9 @@ import LibDCBridge
             let rc = dc_context_new(&context)
             if rc != DC_STATUS_SUCCESS {
                 logError("Failed to create dive computer context")
+            } else {
+                // Parser errors (an unreadable dive) reach the console and the host log sink too.
+                attach_libdc_log(context)
             }
         }
     }

@@ -334,6 +334,7 @@ struct DeviceExplorerView: View {
         busy = true
         note("Download dives (\(ignoreFingerprint ? "all" : "new only"))")
         statusMessage = "Downloading dives…"
+        let divesBefore = viewModel.dives.count
         DiveLogRetriever.retrieveDiveLogs(
             from: devicePtr,
             device: peripheral,
@@ -345,12 +346,21 @@ struct DeviceExplorerView: View {
                 busy = false
                 if !success {
                     let hint = handshakeMissing && viewModel.lastDownloadStatus == "TIMEOUT" ? "\n\(Self.sleepingHint)" : ""
-                    statusMessage = "Download failed: \(viewModel.status)\(hint)"
+                    // `status` is empty on most failures; the reason lives in `progress`.
+                    let reason: String
+                    if case .failed(let message) = viewModel.progress {
+                        reason = message
+                    } else {
+                        reason = viewModel.status.isEmpty ? viewModel.progress.description : viewModel.status
+                    }
+                    statusMessage = "Download failed: \(reason) [DC_STATUS_\(viewModel.lastDownloadStatus)]\(hint)"
                 } else if viewModel.progress == .noNewDives {
                     statusMessage = "No new dives since the last download. Turn on Download all to fetch every dive again."
                 } else {
-                    statusMessage = "Downloaded \(viewModel.dives.count) dive(s)."
+                    // This run's dives, not the session's.
+                    statusMessage = "Downloaded \(max(0, viewModel.dives.count - divesBefore)) dive(s)."
                 }
+                note(statusMessage ?? "")
             }
         }
     }

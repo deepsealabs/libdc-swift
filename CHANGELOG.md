@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
+- `set_libdc_log_sink`/`attach_libdc_log`: libdivecomputer's ERROR/WARN/INFO lines reach a host log, not only the console, so a bare `DC_STATUS_DATAFORMAT` comes with its reason (e.g. "Invalid logbook end pointer"); the parser context logs too
+- DC Tester: Share log carries libdivecomputer's ERROR/WARN/INFO lines (e.g. the Nautic's "reading the rest in pages"); a failed download names its reason and `DC_STATUS_…` instead of an empty "Download failed: ", and "Downloaded N dive(s)" counts this run, not the session
 - `RawDiveEvent` on `DiveProfilePoint.rawEvents`: every `DC_SAMPLE_EVENT` with its payload (`rawType`/`type`, `value`, `flags`, `phase` begin/end, `timeOffset`), including types `DiveEvent` has no case for
 - `DecoKind` on `DiveProfilePoint.decoKind`: NDL, safety stop, deco stop or deep stop, from `DC_SAMPLE_DECO`
 - `NauticAutoSync`: hands-off Suunto Nautic/Ocean download. Waits for the watch, downloads only dives whose logbook id isn't synced yet, listens for the watch's `/Logbook/UnsynchronisedLogs` and `/Sync/BusyState` pushes while connected, and reconnects under a `ReconnectPolicy` that mirrors the Suunto app (4 s retry, 20/96 attempt caps, 120 min cool-down, loop detection), resuming with the dives still missing (#45)

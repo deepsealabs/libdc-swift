@@ -334,6 +334,8 @@ static void close_device_data(device_data_t *data) {
 // elsewhere in this file. Without this, a protocol-level validation failure
 // in e.g. shearwater_common.c only ever surfaces as a bare DC_STATUS_PROTOCOL,
 // with no indication of which specific check failed or why.
+static libdc_log_sink_t g_libdc_log_sink = NULL;
+
 static void dc_log_callback(dc_context_t *context, dc_loglevel_t loglevel, const char *file, unsigned int line, const char *function, const char *message, void *userdata) {
     const char *level = "?";
     switch (loglevel) {
@@ -344,6 +346,25 @@ static void dc_log_callback(dc_context_t *context, dc_loglevel_t loglevel, const
         default: break;
     }
     printf("[C][libdc:%s] %s:%d %s(): %s\n", level, file, line, function, message);
+
+    // DEBUG is the protocol hexdumps: console only, they would flood a host log.
+    libdc_log_sink_t sink = g_libdc_log_sink;
+    if (sink && loglevel != DC_LOGLEVEL_DEBUG) {
+        const char *base = file ? strrchr(file, '/') : NULL;
+        char text[1024];
+        snprintf(text, sizeof(text), "%s:%u %s(): %s",
+                 base ? base + 1 : (file ? file : "?"), line, function ? function : "?", message ? message : "");
+        sink(level, text);
+    }
+}
+
+void set_libdc_log_sink(libdc_log_sink_t sink) {
+    g_libdc_log_sink = sink;
+}
+
+void attach_libdc_log(dc_context_t *context) {
+    if (context)
+        dc_context_set_logfunc(context, dc_log_callback, NULL);
 }
 
 dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_t family, unsigned int model) {
