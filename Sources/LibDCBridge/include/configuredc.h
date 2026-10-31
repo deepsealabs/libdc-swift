@@ -194,6 +194,27 @@ device_data_t* get_device_data_pointer(void);
  */
 void set_ble_debug_logging(int enabled);
 
+/**
+ * Receives libdivecomputer's ERROR/WARN/INFO lines (DEBUG hexdumps stay on the
+ * console) so a host app can show them in its own log, e.g. the
+ * "Invalid logbook end pointer" behind a bare DC_STATUS_DATAFORMAT.
+ * Called on whatever thread libdivecomputer is running on.
+ * @param level: "ERROR", "WARN" or "INFO"
+ * @param message: "file.c:line function(): message"
+ */
+typedef void (*libdc_log_sink_t)(const char *level, const char *message);
+
+/**
+ * Sets (or clears, with NULL) the host log sink. Off by default.
+ */
+void set_libdc_log_sink(libdc_log_sink_t sink);
+
+/**
+ * Routes a context's libdivecomputer logging through the bridge (console plus
+ * the host sink). open_ble_device does this for its own context.
+ */
+void attach_libdc_log(dc_context_t *context);
+
 #ifdef __cplusplus
 }
 #endif
