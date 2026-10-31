@@ -439,6 +439,17 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         retrievalClose.isCloseDeferred(UnsafeMutableRawPointer(devicePtr))
     }
 
+    /// Runs `work` on `queue` holding the device the way a `DiveLogRetriever` download does: a close meanwhile
+    /// cancels its BLE I/O and waits for it instead of freeing the device under it. For calls on the device outside
+    /// the retriever, such as `SuuntoNauticExplorer`'s. Call on main. `completion` runs on main once the device is
+    /// released; `closed` is true when a close was waiting for it, so the device is gone or about to be.
+    public func withDeviceHeld<T>(_ devicePtr: UnsafeMutablePointer<device_data_t>,
+                                  on queue: DispatchQueue = .global(qos: .userInitiated),
+                                  _ work: @escaping () -> T,
+                                  completion: @escaping (_ result: T, _ closed: Bool) -> Void) {
+        retrievalClose.hold(UnsafeMutableRawPointer(devicePtr), on: queue, work, completion: completion)
+    }
+
     private func cancelRetrieval(on devicePtr: UnsafeMutablePointer<device_data_t>) {
         // Drivers polling the cancel check stop too; the signals wake a read or write blocked on them.
         if let device = devicePtr.pointee.device {
@@ -469,7 +480,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
     // MARK: - Device Management
 
-    /// A device `DiveLogRetriever` is still downloading from is closed once the download has stopped.
+    /// A device `DiveLogRetriever` is still downloading from, or `withDeviceHeld` work is using, is closed once that has stopped.
     @objc public func close(clearDevicePtr: Bool = false) {
         if clearDevicePtr, let devicePtr = openedDeviceDataPtr {
             let decision = retrievalClose.requestClose(UnsafeMutableRawPointer(devicePtr)) { [weak self] in

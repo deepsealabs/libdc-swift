@@ -78,6 +78,21 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var truncatedStreams = Int.max
         /// Lose the link after this many chunks of the next /Data stream.
         var dropAfterChunks: Int?
+        /// /Data streams to end without their end markers, as if both were lost.
+        var streamsWithoutEndMarker = 0
+        /// /Data streams in which the second chunk is sent twice.
+        var streamsWithRepeatedChunk = 0
+        /// /Data streams in which the second chunk never arrives. A FETCH on the /Data handle
+        /// serves the resource in pages from any offset, as in the Ocean capture of #29.
+        var streamsWithLostChunk = 0
+        /// Dives /Logbook/Entries leaves out; their per-id resources are still served.
+        var unlistedIDs: Set<UInt32> = []
+        /// Dives whose /Data stream never ends with its end marker.
+        var divesWithoutEndMarker: Set<UInt32> = []
+        /// /Data streams during which a value the Suunto app subscribed to is pushed.
+        var streamsWithForeignNotification = 0
+        /// Paths the watch doesn't know: their GET answers FF FF FF with 404.
+        var unknownPaths: Set<String> = []
         /// Reads, writes and sleeps answer CANCELLED, as the BLE iostream does once the device is closed mid-download.
         var ioCancelled = false
         /// Set `ioCancelled` once this many bytes of the next /Data stream have been read.
@@ -113,10 +128,15 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         private(set) var getPaths: [String] = []
         private(set) var summaryOffsets: [UInt32] = []
+        /// Offsets of the /Data pages fetched, and how many were fetched before the stream's UNSUBSCRIBE.
+        private(set) var dataPageOffsets: [UInt32] = []
+        private(set) var dataPagesWhileSubscribed = 0
         private(set) var entriesStartAfter: [UInt32?] = []
         private(set) var streamStops = 0
         private(set) var streamsServed = 0
         private(set) var releases = 0
+        /// FETCHes on a per-id or value slot after its release; each is answered 404.
+        private(set) var fetchesOnReleasedHandles = 0
         /// Paths of the /Data streams served, in order.
         private(set) var streamedPaths: [String] = []
 
@@ -317,6 +337,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     unansweredValueGets -= 1
                     return
                 }
+                if unknownPaths.contains(path) {
+                    send(Self.packet(0x02, msgid, [0xFF, 0xFF, 0xFF, 0x01, 0x80, 0x00] + Self.u16(404)))
+                    return
+                }
                 guard let h = resolve(path) else { return }
                 handles[h] = path
                 if path.hasSuffix("/Summary") && leftoverChunksBeforeSummaryAck > 0 {
@@ -355,6 +379,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
                 let bytes = dive.compressed.dropLast(truncate)
+                let repeatChunk = streamsWithRepeatedChunk > 0
+                if repeatChunk { streamsWithRepeatedChunk -= 1 }
+                let foreignNotification = streamsWithForeignNotification > 0
+                if foreignNotification { streamsWithForeignNotification -= 1 }
+                let lostChunk = streamsWithLostChunk > 0
+                if lostChunk { streamsWithLostChunk -= 1 }
                 var i = bytes.startIndex
                 var sent = 0
                 while i < bytes.endIndex {
@@ -365,9 +395,23 @@ final class SuuntoNauticTransportTests: XCTestCase {
                         return
                     }
                     let j = min(i + mdsPayloadSize, bytes.endIndex)
-                    send(chunkFrame(bytes[i..<j], offset: i - bytes.startIndex))
+                    if !(lostChunk && sent == 1) {
+                        send(chunkFrame(bytes[i..<j], offset: i - bytes.startIndex))
+                    }
+                    if repeatChunk && sent == 1 {
+                        send(chunkFrame(bytes[i..<j], offset: i - bytes.startIndex))
+                    }
+                    if foreignNotification && sent == 2 {
+                        // /Sync/BusyState = 1, pushed on the Suunto app's own handle.
+                        send(Self.packet(0x01, [0x00, 0x00], [0xF0, 0xBF, 0x06, 0x01, 0x80, 0x00, 0x03, 0x00, 0x01, 0x00]))
+                    }
                     sent += 1
                     i = j
+                }
+                if divesWithoutEndMarker.contains(dive.id) { return }
+                if streamsWithoutEndMarker > 0 {
+                    streamsWithoutEndMarker -= 1
+                    return
                 }
                 // The end marker: a zero length chunk at the total size, sent twice.
                 send(chunkFrame([], offset: bytes.count))
@@ -378,6 +422,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
             case 0x0D: // fetch on a handle
                 let h = Array(f[6...8])
                 guard let path = handles[h] else { return }
+                // A slot handle is unknown to the watch once released; only F0 handles stay valid.
+                if h[0] != 0xF0 && !heldSlots.contains(h) {
+                    fetchesOnReleasedHandles += 1
+                    send(dataFrame(msgid: msgid, handle: h, status: 404, body: []))
+                    return
+                }
                 let sublen = Int(f[2]) | Int(f[3]) << 8
                 let param: (type: UInt8, value: UInt32)? = sublen >= 13
                     ? (f[13], UInt32(f[15]) | UInt32(f[16]) << 8 | UInt32(f[17]) << 16 | UInt32(f[18]) << 24)
@@ -387,6 +437,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 } else if let content = pagedContent(for: path) {
                     let offset = Int(param?.value ?? 0)
                     if path.hasSuffix("/Summary") { summaryOffsets.append(UInt32(offset)) }
+                    if path.hasSuffix("/Data") {
+                        dataPageOffsets.append(UInt32(offset))
+                        if streamStops < streamsServed { dataPagesWhileSubscribed += 1 }
+                    }
                     let end = min(offset + summaryPageSize, content.count)
                     let data = Array(content[min(offset, end)..<end])
                     let len = Self.u16(data.count)
@@ -404,6 +458,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         private func pagedContent(for path: String) -> [UInt8]? {
             if path.hasSuffix("/Summary") { return dive(for: path)?.summary }
+            if path.hasSuffix("/Data") { return dive(for: path)?.compressed }
             if path.hasSuffix("/Descriptors"), !descriptors.isEmpty { return descriptors }
             return nil
         }
@@ -444,12 +499,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         private func serveEntries(msgid: [UInt8], handle: [UInt8], param: (type: UInt8, value: UInt32)?) {
             entriesStartAfter.append(param?.value)
-            let all = sortedDives
+            let all = sortedDives.filter { !unlistedIDs.contains($0.id) }
             let start = param.map { p in all.firstIndex { $0.id > p.value } ?? all.count } ?? 0
             let page = Array(all[start..<min(start + entriesPerPage, all.count)])
             let more = start + page.count < all.count
-            var body: [UInt8] = [0x01, 0x24] + Self.u32(2_100_000_000 - 1) + Self.u32(UInt32(page.count))
-                + Self.u32(12) + Self.u32(16)
+            // An empty page has a 14-byte header (these bytes are from a Nautic S with no dives).
+            var body: [UInt8] = page.isEmpty
+                ? [0x01, 0x24, 0x0A, 0x24, 0x00, 0x00, 0x00, 0x00, 0x08, 0x3C, 0x08, 0x00, 0x00, 0x00]
+                : [0x01, 0x24] + Self.u32(2_100_000_000 - 1) + Self.u32(UInt32(page.count)) + Self.u32(12) + Self.u32(16)
             for d in page {
                 body += Self.u32(d.id) + Self.u32(d.id + 1800) + Self.u32(1) + Self.u32(0)
                     + Self.u32(d.listedSize) + Self.u32(0)
@@ -672,15 +729,23 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
     }
 
-    func testRefusedStreamIsRetried() throws {
+    func testRefusedStreamFailsTheDive() throws {
         let dive = FakeDive(id: 1_789_487_763, profileBytes: 4000)
         let watch = FakeWatch(dives: [dive])
         watch.refuseStreams = 1
         let device = try open(watch)
 
         let (status, dives) = foreach(device)
-        XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(status, DC_STATUS_PROTOCOL, "the driver doesn't issue a refused stream again")
+        XCTAssertTrue(dives.isEmpty)
+        XCTAssertEqual(watch.streamsServed, 0)
+        XCTAssertTrue(watch.summaryOffsets.isEmpty)
+        XCTAssertEqual(watch.heldIdHandles, [], "the refused stream's handle is released")
+
+        // The retry is the application's, and works on the same link.
+        let (retryStatus, retried) = foreach(device)
+        XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
+        XCTAssertEqual(retried.first?.data, dive.decompressed + dive.summary)
         XCTAssertEqual(watch.streamsServed, 1)
     }
 
@@ -712,27 +777,134 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
     // MARK: - #58: downloads are checked against the listed size
 
-    func testShortDownloadIsReportedAgainstListedSize() throws {
+    func testShortDownloadFailsAgainstListedSize() throws {
         let dive = FakeDive(id: 1_789_312_841, profileBytes: 4000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
         let device = try open(watch)
 
         let (status, data) = download(device, id: dive.id)
-        XCTAssertEqual(status, DC_STATUS_DATAFORMAT)
-        XCTAssertFalse(data.isEmpty, "the truncated dive stays available to the caller")
-        XCTAssertEqual(watch.streamsServed, 2, "a mismatch is retried once")
+        XCTAssertEqual(status, DC_STATUS_PROTOCOL)
+        XCTAssertTrue(data.isEmpty, "a truncated dive is never handed out")
+        XCTAssertEqual(watch.streamsServed, 1, "a mismatch isn't downloaded again")
+        XCTAssertEqual(watch.summaryOffsets.filter { $0 == 0 }.count, 1)
     }
 
-    func testShortDownloadIsStillDeliveredByForeach() throws {
+    func testStreamWithoutEndMarkerFailsTheDive() throws {
+        let dive = FakeDive(id: 1_789_312_843, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithoutEndMarker = 1
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_TIMEOUT)
+        XCTAssertTrue(data.isEmpty, "a stream without its end marker is never handed out")
+        XCTAssertEqual(watch.streamsServed, 1, "the stream that stopped early isn't issued again")
+
+        // The application's retry on the same link gets the whole dive.
+        let (retryStatus, retried) = download(device, id: dive.id)
+        XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
+        XCTAssertEqual(retried, dive.decompressed + dive.summary)
+        XCTAssertEqual(watch.streamsServed, 2)
+    }
+
+    func testStreamThatNeverEndsIsIssuedOnceAndUnsubscribed() throws {
+        let dive = FakeDive(id: 1_789_312_844, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithoutEndMarker = Int.max
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_TIMEOUT)
+        XCTAssertTrue(data.isEmpty, "a stream without its end marker is never handed out")
+        XCTAssertEqual(watch.streamsServed, 1, "one stream, not retried by the driver")
+        XCTAssertEqual(watch.streamStops, 1, "and it was unsubscribed")
+        XCTAssertTrue(watch.summaryOffsets.isEmpty)
+        XCTAssertEqual(watch.heldIdHandles, [], "and released")
+    }
+
+    func testRepeatedChunkFailsTheDive() throws {
+        let dive = FakeDive(id: 1_789_312_845, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithRepeatedChunk = 1
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_PROTOCOL)
+        XCTAssertTrue(data.isEmpty)
+        XCTAssertEqual(watch.streamsServed, 1)
+        XCTAssertEqual(watch.streamStops, 1, "the failed stream is still unsubscribed")
+        XCTAssertTrue(watch.summaryOffsets.isEmpty, "the stream check caught it, not the size check")
+        XCTAssertTrue(watch.dataPageOffsets.isEmpty, "a chunk at an earlier offset isn't read again in pages")
+
+        let (retryStatus, retried) = download(device, id: dive.id)
+        XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
+        XCTAssertEqual(retried, dive.decompressed + dive.summary)
+        XCTAssertEqual(watch.streamsServed, 2)
+    }
+
+    func testLostChunkIsReadInPagesFromTheFirstMissingByte() throws {
+        let dive = FakeDive(id: 1_789_312_847, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithLostChunk = 1
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.decompressed + dive.summary, "the same dive as an uninterrupted stream")
+        XCTAssertEqual(watch.streamsServed, 1, "recovered on the same stream, not by downloading again")
+        XCTAssertEqual(watch.streamStops, 1)
+        let first = watch.mdsPayloadSize, page = watch.summaryPageSize
+        XCTAssertEqual(watch.dataPageOffsets, stride(from: first, to: dive.compressed.count, by: page).map(UInt32.init))
+        XCTAssertEqual(watch.dataPagesWhileSubscribed, 0, "the pages are read after the UNSUBSCRIBE")
+        XCTAssertEqual(watch.getPaths.filter { $0 == "/Logbook/byId/\(dive.id)/Data" }.count, 1,
+                       "the pages are read on the stream's own handle, not a second GET")
+        XCTAssertEqual(watch.fetchesOnReleasedHandles, 0, "and before its RELEASE")
+        XCTAssertEqual(watch.heldIdHandles, [])
+    }
+
+    func testForeignNotificationDuringAStreamIsSkipped() throws {
+        let dive = FakeDive(id: 1_789_312_846, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        watch.streamsWithForeignNotification = 1
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(watch.streamsServed, 1, "skipped, not recovered by a retry")
+    }
+
+    func testEmptyLogbookListsNoDives() throws {
+        let watch = FakeWatch(dives: [])
+        let device = try open(watch)
+
+        XCTAssertEqual(list(device), [])
+        let (status, dives) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertTrue(dives.isEmpty)
+    }
+
+    func testSubscribingToAnUnknownPathIsUnsupported() throws {
+        let watch = FakeWatch(dives: [])
+        watch.unknownPaths = ["/Sync/BusyState"]
+        let device = try open(watch)
+
+        let buffer = dc_buffer_new(0)
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        XCTAssertEqual(suunto_nautic_device_subscribe(device, "/Sync/BusyState", &handle, buffer), DC_STATUS_UNSUPPORTED)
+    }
+
+    func testShortDownloadStopsForeach() throws {
         let dive = FakeDive(id: 1_789_312_842, profileBytes: 4000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
         let device = try open(watch)
 
         let (status, dives) = foreach(device)
-        XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dives.count, 1)
+        XCTAssertEqual(status, DC_STATUS_PROTOCOL)
+        XCTAssertEqual(dives.count, 0, "the short dive isn't delivered, so the fingerprint can't move past it")
     }
 
     // MARK: - foreach never moves the fingerprint past a dive it did not deliver
@@ -863,6 +1035,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status, delivered) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS, "an entry with nothing to download is not a gap")
         XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, older.id])
+        XCTAssertFalse(watch.streamedPaths.contains("/Logbook/byId/\(empty.id)/Data"), "skipped without a download")
     }
 
     func testCompleteDownloadById() throws {
@@ -874,6 +1047,23 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(data, dive.decompressed + dive.summary)
         XCTAssertEqual(watch.streamsServed, 1)
+    }
+
+    // Fork only: upstream checks the listed size unconditionally, which an unlisted dive (listed 0) would fail.
+    func testByIdDownloadOfAnUnlistedDiveSkipsTheSizeCheck() throws {
+        let listed = FakeDive(id: 1_789_312_848, profileBytes: 3000)
+        let unlisted = FakeDive(id: 1_789_312_849, profileBytes: 4000)
+        let watch = FakeWatch(dives: [listed, unlisted])
+        watch.unlistedIDs = [unlisted.id]
+        let device = try open(watch)
+        XCTAssertEqual(list(device), [listed.id])
+        let listings = watch.entriesStartAfter.count
+
+        let (status, data) = download(device, id: unlisted.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, unlisted.decompressed + unlisted.summary)
+        XCTAssertEqual(watch.entriesStartAfter.count, listings + 1, "the listing was read for the dive's size")
+        XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(unlisted.id)/Data"])
     }
 
     // MARK: - #29: a by-id download streams the dive it asked for
@@ -1093,11 +1283,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(Self.completedSyncs(events).first?.downloaded, dives.map(\.id))
     }
 
-    func testAutoSyncReconnectsToRetryAnIncompleteDive() async throws {
+    func testAutoSyncRetriesADiveThatFailsItsSizeCheck() async throws {
         let dive = FakeDive(id: 1_789_100_000, profileBytes: 6000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
-        watch.truncatedStreams = 2 // the driver's own retry also comes back short
+        watch.truncatedStreams = 2 // Auto download's first retry also comes back short
         let (sync, connector, _, log) = makeAutoSync(watch)
 
         sync.start()
@@ -1108,10 +1298,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(delivered.count, 1)
         XCTAssertEqual(delivered.first?.isComplete, true)
         XCTAssertEqual(delivered.first?.data, Data(dive.decompressed + dive.summary))
-        XCTAssertEqual(connector.connects, 2)
+        XCTAssertTrue(Self.logs(log.all).contains { $0.hasPrefix("Dive \(dive.id) failed (PROTOCOL); retrying") })
+        XCTAssertEqual(connector.connects, 1, "retried on the same link")
     }
 
-    func testAutoSyncKeepsAPersistentlyShortDiveOnceRetriesRunOut() async throws {
+    func testAutoSyncGivesUpOnAPersistentlyShortDive() async throws {
         let dive = FakeDive(id: 1_789_200_000, profileBytes: 6000)
         let watch = FakeWatch(dives: [dive])
         watch.truncateStreamBy = 300
@@ -1121,11 +1312,27 @@ final class SuuntoNauticTransportTests: XCTestCase {
         await waitFor(log) { !Self.completedSyncs($0).isEmpty }
         await stopAndWait(sync, log)
 
-        let delivered = Self.dives(log.all)
-        XCTAssertEqual(delivered.count, 1, "delivered once, never duplicated")
-        XCTAssertEqual(delivered.first?.isComplete, false)
-        XCTAssertEqual(delivered.first?.attempts, 2)
-        XCTAssertEqual(connector.connects, 2)
+        XCTAssertTrue(Self.dives(log.all).isEmpty, "a short dive is never delivered")
+        XCTAssertTrue(log.all.contains(.diveFailed(id: dive.id, reason: "PROTOCOL")))
+        XCTAssertEqual(Self.completedSyncs(log.all).first?.failed, [dive.id])
+        XCTAssertEqual(connector.connects, 1)
+    }
+
+    func testAutoSyncGivesUpOnADiveWhoseStreamNeverEndsAndGetsTheNewerOnes() async throws {
+        let stuck = FakeDive(id: 1_789_250_000, profileBytes: 6000)
+        let newer = FakeDive(id: 1_789_260_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [stuck, newer])
+        watch.divesWithoutEndMarker = [stuck.id]
+        let (sync, connector, _, log) = makeAutoSync(watch) { $0.retriesPerDive = 1 }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        XCTAssertEqual(Self.dives(log.all).map(\.id), [newer.id])
+        XCTAssertTrue(log.all.contains(.diveFailed(id: stuck.id, reason: "TIMEOUT")))
+        XCTAssertEqual(Self.completedSyncs(log.all).first?.failed, [stuck.id])
+        XCTAssertEqual(connector.connects, 3, "two attempts on the stuck dive, then a session without it")
     }
 
     func testAutoSyncSkipsDivesAlreadySynced() async throws {
@@ -1257,7 +1464,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(watch.subscribed, [:], "stopping unsubscribes")
     }
 
-    func testTriggerSlotsLeftByADroppedLinkAreReleasedOnReconnect() async throws {
+    // Whether the watch really keeps a dropped link's bindings is unconfirmed
+    // (libdc-swift#95). If it does, the reconnect's GET gets the other slot,
+    // which works just as well; the driver never releases a slot it didn't
+    // bind, since another app on the link may hold it.
+    func testTriggerSubscriptionUsesTheSlotTheGetReturnsAfterADroppedLink() async throws {
         let first = FakeDive(id: 1_789_720_000, profileBytes: 600, summaryBytes: 100)
         let second = FakeDive(id: 1_789_730_000, profileBytes: 600, summaryBytes: 100)
         let watch = FakeWatch(dives: [first])
@@ -1271,8 +1482,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         await waitFor(log) { events in Self.logs(events).filter { $0.hasPrefix("Listening for sync triggers") }.count >= 3 }
         await waitFor(log) { Self.completedSyncs($0).count == 2 }
         await waitFor(log) { $0.last == .state(.watching) }
-        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 1, "the dropped link's slot was released")
-        XCTAssertEqual(watch.heldValueSlots("/Sync/BusyState"), 1)
+        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 2, "the dropped link's slot and ours")
+        XCTAssertEqual(watch.heldValueSlots("/Sync/BusyState"), 2)
 
         watch.mutate {
             $0.dives.append(second)
@@ -1285,7 +1496,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(Self.dives(log.all).map(\.id), [first.id, second.id])
         XCTAssertEqual(connector.connects, 2)
         XCTAssertFalse(Self.logs(log.all).contains { $0.hasPrefix("No sync trigger") })
-        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 0, "unsubscribing releases the slot")
+        XCTAssertEqual(watch.heldValueSlots("/Logbook/UnsynchronisedLogs"), 1, "unsubscribing releases our slot only")
     }
 
     // MARK: - #29/#45: a quick reconnect while the watch still flushes the old stream

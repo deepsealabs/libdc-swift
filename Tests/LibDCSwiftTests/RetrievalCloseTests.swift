@@ -124,6 +124,72 @@ final class RetrievalCloseTests: XCTestCase {
         XCTAssertEqual(closes.value, 1)
     }
 
+    // MARK: - Work held on the device (withDeviceHeld)
+
+    func testCloseDuringHeldWorkWaitsAndRunsBeforeTheCompletion() {
+        let coordinator = RetrievalCloseCoordinator()
+        let release = DispatchSemaphore(value: 0)
+        var order: [String] = []
+        let done = expectation(description: "completion")
+
+        coordinator.hold(device, on: .global(), { () -> Int in
+            release.wait()
+            return 7
+        }, completion: { result, closed in
+            order.append("completion")
+            XCTAssertEqual(result, 7)
+            XCTAssertTrue(closed, "a close was waiting")
+            done.fulfill()
+        })
+
+        XCTAssertEqual(coordinator.requestClose(device) { order.append("close") }, .deferred,
+                       "held from the call, before the work has started")
+        XCTAssertTrue(coordinator.isCancelRequested, "the work's I/O is told to stop")
+        release.signal()
+        wait(for: [done], timeout: 5)
+
+        XCTAssertEqual(order, ["close", "completion"], "the close runs once the work is done, before the completion")
+        XCTAssertFalse(coordinator.isCancelRequested)
+        XCTAssertEqual(coordinator.requestClose(device) {}, .closeNow, "the hold has ended")
+    }
+
+    func testHeldWorkWithoutACloseReleasesTheDevice() {
+        let coordinator = RetrievalCloseCoordinator()
+        let done = expectation(description: "completion")
+
+        coordinator.hold(device, on: .global(), { "ok" }, completion: { result, closed in
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertEqual(result, "ok")
+            XCTAssertFalse(closed)
+            done.fulfill()
+        })
+        wait(for: [done], timeout: 5)
+
+        XCTAssertNil(coordinator.end(device), "nothing is left held")
+        XCTAssertEqual(coordinator.requestClose(device) {}, .closeNow)
+    }
+
+    func testCloseWaitsForTheLastOfARetrievalAndHeldWork() {
+        let coordinator = RetrievalCloseCoordinator()
+        let release = DispatchSemaphore(value: 0)
+        let closes = Counter()
+        let done = expectation(description: "completion")
+        coordinator.begin(device)
+        coordinator.hold(device, on: .global(), { release.wait() }, completion: { _, closed in
+            XCTAssertTrue(closed, "the close waits on, for the retrieval")
+            XCTAssertEqual(closes.value, 0)
+            done.fulfill()
+        })
+
+        XCTAssertEqual(coordinator.requestClose(device) { closes.value += 1 }, .deferred)
+        release.signal()
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(closes.value, 0)
+
+        coordinator.end(device)?()
+        XCTAssertEqual(closes.value, 1)
+    }
+
     // MARK: - The BLE iostream answers CANCELLED
 
     func testCancelledReadAnswersCancelled() {

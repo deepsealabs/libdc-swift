@@ -175,7 +175,9 @@ struct DeviceExplorerView: View {
     private var autoDownloadPanel: some View {
         if let device = AutoDownloadController.storedDevice(named: deviceName) {
             Section {
+                // Its handoff closes the device and starts a session on a timer, without waiting for a held-back close.
                 AutoDownloadToggle(device: device, controller: autoDownload)
+                    .disabled(busy)
             } header: {
                 Text("Auto download")
             } footer: {
@@ -365,22 +367,28 @@ struct DeviceExplorerView: View {
 
     // MARK: - Suunto Nautic RPC primitives (transport is Suunto-specific)
 
+    /// Runs `work` off main with the device held, so a close meanwhile waits for it instead of freeing the device
+    /// under it. `work` returns the update to apply on main.
+    private func runHeld(_ what: String, _ work: @escaping () -> () -> Void) {
+        bluetoothManager.withDeviceHeld(devicePtr, work) { apply, closed in
+            apply()
+            if closed { note("\(what) stopped: the device was closed") }
+            busy = false
+        }
+    }
+
     private func listDives() {
         busy = true; statusMessage = nil
         note("List dives")
-        DispatchQueue.global(qos: .userInitiated).async {
+        runHeld("List dives") {
             do {
                 let ids = try SuuntoNauticExplorer.listDives(device: devicePtr)
-                DispatchQueue.main.async {
+                return {
                     diveIDs = ids
                     statusMessage = "Found \(ids.count) dive(s)."
-                    busy = false
                 }
             } catch {
-                DispatchQueue.main.async {
-                    statusMessage = failureMessage("Listing dives failed: \(error)", error)
-                    busy = false
-                }
+                return { statusMessage = failureMessage("Listing dives failed: \(error)", error) }
             }
         }
     }
@@ -404,49 +412,42 @@ struct DeviceExplorerView: View {
     private func captureRaw(path: String) {
         busy = true; statusMessage = nil
         note("Capture raw \(path)")
-        DispatchQueue.global(qos: .userInitiated).async {
+        runHeld("Capture raw \(path)") {
             do {
                 // Paged resources: fetch every page so no transfer is left half-done.
                 let resource = pagedResource(path)
                 let data = try resource != nil
                     ? SuuntoNauticExplorer.fetchPaged(device: devicePtr, path: path)
                     : SuuntoNauticExplorer.fetchRaw(device: devicePtr, path: path)
-                DispatchQueue.main.async {
+                return {
                     lastResponse = data
                     lastLabel = "RAW \(path)"
                     statusMessage = resource.map { "Captured all \(data.count) /\($0) data bytes for \(path). Tap Export Raw Capture below and send us the file." }
                         ?? "Captured \(data.count) raw bytes for \(path). Tap Export Raw Capture below and send us the file."
-                    busy = false
                 }
             } catch {
-                DispatchQueue.main.async {
-                    statusMessage = failureMessage("Raw capture for \(path) failed: \(error)", error)
-                    busy = false
-                }
+                return { statusMessage = failureMessage("Raw capture for \(path) failed: \(error)", error) }
             }
         }
     }
 
     private func sendRequest(path: String) {
         let needsFetch = path == "/Logbook/Entries" || path == "/Logbook/UnsynchronisedLogs"
+        let label = "\(needsFetch ? "FETCH" : "GET") \(path)"
         busy = true; statusMessage = nil
-        note("\(needsFetch ? "FETCH" : "GET") \(path)")
-        DispatchQueue.global(qos: .userInitiated).async {
+        note(label)
+        runHeld(label) {
             do {
                 let data = needsFetch
                     ? try SuuntoNauticExplorer.fetch(device: devicePtr, path: path)
                     : try SuuntoNauticExplorer.request(device: devicePtr, path: path)
-                DispatchQueue.main.async {
+                return {
                     lastResponse = data
-                    lastLabel = "\(needsFetch ? "FETCH" : "GET") \(path)"
+                    lastLabel = label
                     statusMessage = "Received \(data.count) bytes for \(path)."
-                    busy = false
                 }
             } catch {
-                DispatchQueue.main.async {
-                    statusMessage = failureMessage("Request for \(path) failed: \(error)", error)
-                    busy = false
-                }
+                return { statusMessage = failureMessage("Request for \(path) failed: \(error)", error) }
             }
         }
     }
@@ -455,12 +456,13 @@ struct DeviceExplorerView: View {
         busy = true; statusMessage = nil; decodedProfile = nil
         note("Download dive \(id)")
         let listed = diveIDs
-        DispatchQueue.global(qos: .userInitiated).async {
+        // The follow-up listing and /Summary fetch use the device too, so they stay inside the hold.
+        runHeld("Download dive \(id)") {
             do {
                 let data = try SuuntoNauticExplorer.download(device: devicePtr, logbookID: id)
                 let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
                 let owner = foreignOwner(of: data, requested: id, listed: listed)
-                DispatchQueue.main.async {
+                return {
                     lastResponse = data
                     lastLabel = downloadLabel(id: id, owner: owner, incomplete: false)
                     decodedProfile = profile
@@ -471,26 +473,21 @@ struct DeviceExplorerView: View {
                             ? "Decoded logbook entry \(id) (\(data.count) bytes)."
                             : "Downloaded \(data.count) bytes for \(id), but decoding failed — still worth exporting."
                     }
-                    busy = false
                 }
             } catch SuuntoNauticExplorer.ExplorerError.incompleteDownload(let data) {
                 let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
                 let owner = foreignOwner(of: data, requested: id, listed: listed)
-                DispatchQueue.main.async {
+                return {
                     lastResponse = data
                     lastLabel = downloadLabel(id: id, owner: owner, incomplete: true)
                     decodedProfile = profile
                     let what = owner.map { "the \(data.count) bytes received are \($0), not the dive requested" }
                         ?? "\(data.count) bytes don't add up to the size the watch lists, so the end of the dive is probably missing"
                     statusMessage = "Incomplete download of \(id): \(what). Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
-                    busy = false
                 }
             } catch {
-                let msg = failureMessage(describeDownloadFailure(id: id, error: error), error)
-                DispatchQueue.main.async {
-                    statusMessage = msg
-                    busy = false
-                }
+                let description = describeDownloadFailure(id: id, error: error)
+                return { statusMessage = failureMessage(description, error) }
             }
         }
     }

@@ -19,6 +19,9 @@ import LibDCBridge
 /// (same `/Logbook/Entries` endpoint, without downloading every dive), a
 /// richly-typed `decode` (battery in volts, IMU axes, etc. rather than raw
 /// vendor bytes) for the tester UI, and raw-capture export.
+///
+/// The `device:` calls block on the link and nothing stops a close from freeing
+/// the device under them: run them inside `CoreBluetoothManager.withDeviceHeld`.
 public enum SuuntoNauticExplorer {
 
     public enum ExplorerError: Error {

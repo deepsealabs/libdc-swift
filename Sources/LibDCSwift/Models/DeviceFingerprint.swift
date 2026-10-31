@@ -23,6 +23,7 @@ public struct DeviceFingerprint: Codable, Identifiable {
 public class DeviceFingerprintStorage {
     public static let shared = DeviceFingerprintStorage()
     private let fingerprintKey = "DeviceFingerprints"
+    private let rejectedDivesKey = "RejectedDiveFingerprints"
     
     private init() {}
     
@@ -112,6 +113,7 @@ public class DeviceFingerprintStorage {
             $0.serial == serial
         }
         saveFingerprints(fingerprints)
+        setRejectedDives([], forDeviceType: deviceType, serial: serial)
         logInfo("🗑️ Cleared fingerprint for \(normalizedType) (\(serial))")
     }
 
@@ -125,12 +127,47 @@ public class DeviceFingerprintStorage {
         }
         let removed = countBefore - fingerprints.count
         saveFingerprints(fingerprints)
+        saveRejectedDives(loadRejectedDives().filter { !$0.key.hasPrefix(rejectionKeyPrefix(deviceType)) })
         logInfo("🗑️ Cleared \(removed) fingerprint(s) for device type: \(normalizedType)")
     }
 
     /// Clears all stored fingerprints
     public func clearAllFingerprints() {
         UserDefaults.standard.removeObject(forKey: fingerprintKey)
+        UserDefaults.standard.removeObject(forKey: rejectedDivesKey)
         logInfo("🗑️ Cleared all fingerprints")
+    }
+
+    // MARK: - Dives the parser rejected
+
+    private func rejectionKeyPrefix(_ deviceType: String) -> String {
+        normalizeDeviceType(deviceType) + "|"
+    }
+
+    private func loadRejectedDives() -> [String: [Data]] {
+        guard let data = UserDefaults.standard.data(forKey: rejectedDivesKey),
+              let all = try? JSONDecoder().decode([String: [Data]].self, from: data) else {
+            return [:]
+        }
+        return all
+    }
+
+    private func saveRejectedDives(_ all: [String: [Data]]) {
+        if all.isEmpty {
+            UserDefaults.standard.removeObject(forKey: rejectedDivesKey)
+        } else if let data = try? JSONEncoder().encode(all) {
+            UserDefaults.standard.set(data, forKey: rejectedDivesKey)
+        }
+    }
+
+    /// Fingerprints of the device's dives the parser rejected on an earlier download and hasn't parsed since.
+    func rejectedDives(forDeviceType deviceType: String, serial: String) -> Set<Data> {
+        Set(loadRejectedDives()[rejectionKeyPrefix(deviceType) + serial] ?? [])
+    }
+
+    func setRejectedDives(_ fingerprints: Set<Data>, forDeviceType deviceType: String, serial: String) {
+        var all = loadRejectedDives()
+        all[rejectionKeyPrefix(deviceType) + serial] = fingerprints.isEmpty ? nil : Array(fingerprints)
+        saveRejectedDives(all)
     }
 } 
