@@ -65,6 +65,16 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     @Published public var isDisconnecting = false // Indicates if currently disconnecting from device
     @Published public var isBluetoothReady = false // Indicates if Bluetooth is ready for use
     @Published public var isConnecting = false // Indicates if a connection attempt is in progress (prevents auto-reconnect)
+    /// Why the current connect failed or its link dropped, from CoreBluetooth's error. Nil until then, and
+    /// when CoreBluetooth reports no error (a device that never answers just runs out the connect wait).
+    /// Set on main when CoreBluetooth reports it, which for a failed connect is during the open's connect
+    /// wait: once `openBLEDevice` returns false, read it on main. Cleared when `connect(toDevice:)` starts.
+    @Published public private(set) var lastConnectionFailure: BLEConnectionFailure?
+    private var connectAttempt = BLEConnectAttempt() {
+        didSet {
+            if lastConnectionFailure != connectAttempt.failure { lastConnectionFailure = connectAttempt.failure }
+        }
+    }
     @Published private var deviceDataPtrChanged = false
 
     // MARK: - Private Properties
@@ -644,6 +654,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
     
     @objc public func connect(toDevice address: String!) -> Bool {
+        // Before the guards: an attempt that fails without connecting isn't explained by the last one.
+        syncOnMain { self.connectAttempt.start() }
         // Must not touch CoreBluetooth before .poweredOn (see startScanning);
         // this call is blocking, so it fails rather than defers.
         guard isBluetoothReady else {
@@ -691,16 +703,20 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
         }
-        if Thread.isMainThread {
-            startLink()
-        } else {
-            DispatchQueue.main.sync(execute: startLink)
-        }
+        syncOnMain(startLink)
         peripheral.delegate = self
         centralManager.connect(peripheral, options: nil)
         return true  // Return immediately, connection status will be handled by delegate
     }
     
+    private func syncOnMain(_ work: () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.sync(execute: work)
+        }
+    }
+
     public func connectToStoredDevice(_ uuid: String) -> Bool {
         guard let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: uuid) else {
             return false
@@ -826,12 +842,17 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         logError("Failed to connect to \(peripheral.name ?? "Unknown Device"): \(error?.localizedDescription ?? "No error description")")
+        if let error {
+            connectAttempt.fail(error, from: peripheral.identifier, current: self.peripheral?.identifier)
+        }
     }
 
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         logInfo("Disconnected from \(peripheral.name ?? "unknown device")")
         if let error = error {
             logError("Disconnect error: \(error.localizedDescription)")
+            // Our own cancel reports no error, so this is a drop.
+            connectAttempt.fail(error, from: peripheral.identifier, current: self.peripheral?.identifier)
         }
         
         DispatchQueue.main.async {
