@@ -91,6 +91,7 @@ let package = Package(
                 "Logger.swift",
                 "BLEManager.swift",
                 "BLELinkState.swift",
+                "BLEConnectionFailure.swift",
                 "Models/DeviceConfiguration.swift",
                 "Models/DiveData.swift",
                 "Models/StoredDevice.swift",

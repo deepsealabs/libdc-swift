@@ -4,6 +4,10 @@ All notable changes to LibDCSwift will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+### Added
+- `CoreBluetoothManager.lastConnectionFailure` (`BLEConnectionFailure`): why the last connect failed or its link dropped, from CoreBluetooth's error code, so an app can explain an open that fails with `DC_STATUS_IO`. `.pairingRemoved` is "Peer removed pairing information": the dive computer dropped this device's pairing, and it won't connect again until the user forgets it in Bluetooth settings. Other CoreBluetooth errors come as `.bluetooth(CBError.Code)`. Set on main when CoreBluetooth reports it, which for a failed connect is during the open's connect wait, so read it on main once `openBLEDevice` returns false; a drop counts only when it is the current link's, the same check `isLinkLost` makes. Cleared when `connect(toDevice:)` starts the next attempt
+
 ## [1.22.0] - 2026-11-17
 ### Added
 - macOS: serial cable downloads. `IOKitCableDiscovery` lists USB-serial ports from the IORegistry (`IOSerialBSDClient`, with the VID, PID, serial number and product name read from the USB device's own entry, so an adapter with no serial never takes its hub's) and follows hot-plug through an `IONotificationPort`, without opening any port. Built-in ports and the Bluetooth listening port are left out; paired classic-Bluetooth ports are listed as `.classicBTSerial` (Beta; see the classic-Bluetooth entry). A known cable with no port is listed as `driverMissing`, once a cable that arrived after `start()` has gone `driverGrace` (3 s) without one, and `CableEndpoint.driverMissingMessage` says which driver to install and where; `driverMissingStoreMessage` says what to do with no download link or install step, for an App Store build. `CableDiscovering.updates()` streams `[CableEndpoint]` (`ready`, `driverMissing`, or `busy` while a session in this process has the port), and `StaticCableDiscovery` serves endpoints you set. Both map a `RegistrySnapshot`, so the mapping runs on fixtures
