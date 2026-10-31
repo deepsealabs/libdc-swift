@@ -18,7 +18,9 @@ public protocol NauticAutoSyncDelegate: AnyObject {
 ///   refresh covers firmware without those resources;
 /// - when the link drops or a dive comes back incomplete, reconnects under
 ///   `ReconnectPolicy` and resumes with the dives still missing, retrying a
-///   dive up to `retriesPerDive` times before moving on.
+///   dive up to `retriesPerDive` times before moving on. A dive the link
+///   dropped in carries on from the bytes already received when the link's
+///   device has a `SuuntoNauticResume` buffer.
 ///
 /// Never writes to the watch: dives stay unsynchronised for the Suunto app.
 public final class NauticAutoSync {
@@ -488,6 +490,9 @@ public final class NauticAutoSync {
             let id = pending[index]
             set(.downloading(index: index + 1, total: pending.count, id: id))
             let attempt = plan.recordAttempt(id)
+            if let bytes = try? await onLinkQueue({ link.resumableBytes(of: id) }) {
+                emit(.log("Dive \(id): carrying on from byte \(bytes) of an earlier attempt"))
+            }
             do {
                 let data = try await onLinkQueue { try link.download(id) }
                 deliver(id, data: data, complete: true, attempts: attempt, &plan)
