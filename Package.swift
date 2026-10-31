@@ -89,6 +89,7 @@ let package = Package(
                 "DiveLogRetriever.swift",
                 "RetrievalCloseCoordinator.swift",
                 "SuuntoNauticExplorer.swift",
+                "SuuntoNauticResume.swift",
                 "AutoSync/AutoSyncPolicy.swift",
                 "AutoSync/NauticSyncLink.swift",
                 "AutoSync/NauticAutoSync.swift",
