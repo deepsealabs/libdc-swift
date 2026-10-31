@@ -474,6 +474,9 @@ struct DeviceExplorerView: View {
         let listed = diveIDs
         // The follow-up listing and /Summary fetch use the device too, so they stay inside the hold.
         runHeld("Download dive \(id)") {
+            if let bytes = resumableBytes(of: id) {
+                DispatchQueue.main.async { note("Carrying on from byte \(bytes) of an earlier attempt, in pages") }
+            }
             do {
                 let data = try SuuntoNauticExplorer.download(device: devicePtr, logbookID: id)
                 let profile = try? SuuntoNauticExplorer.decode(sbemData: data, logbookID: UInt32(id))
@@ -483,7 +486,7 @@ struct DeviceExplorerView: View {
                     lastLabel = downloadLabel(id: id, owner: owner, incomplete: false)
                     decodedProfile = profile
                     if let owner {
-                        statusMessage = "Requested dive \(id), but the \(data.count) bytes received are \(owner). Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
+                        statusMessage = "Requested dive \(id), but the \(data.count) bytes received are \(owner). \(Self.reconnectHint) and retry."
                     } else {
                         statusMessage = profile != nil
                             ? "Decoded logbook entry \(id) (\(data.count) bytes)."
@@ -499,7 +502,7 @@ struct DeviceExplorerView: View {
                     decodedProfile = profile
                     let what = owner.map { "the \(data.count) bytes received are \($0), not the dive requested" }
                         ?? "\(data.count) bytes don't add up to the size the watch lists, so the end of the dive is probably missing"
-                    statusMessage = "Incomplete download of \(id): \(what). Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
+                    statusMessage = "Incomplete download of \(id): \(what). \(Self.reconnectHint) and retry."
                 }
             } catch {
                 let description = describeDownloadFailure(id: id, error: error)
@@ -526,6 +529,16 @@ struct DeviceExplorerView: View {
         return "from a dive starting \(start.formatted(date: .abbreviated, time: .shortened))"
     }
 
+    /// Connect takes over a link iOS restored, so neither Bluetooth off/on nor a force-quit is needed.
+    private static let reconnectHint = "Reconnect (back to the device list, then Connect)"
+
+    /// The /Data bytes of dive `id` that a download on this device carries on from.
+    /// Only while the device is held and no download runs.
+    private func resumableBytes(of id: String) -> Int? {
+        guard let device = devicePtr.pointee.device, let numericID = UInt32(id) else { return nil }
+        return SuuntoNauticResume.resumableBytes(of: numericID, on: device)
+    }
+
     /// A failed download usually means stale session state (a transfer left
     /// half-finished), which a reconnect clears. Only call the dive gone when
     /// /Logbook/Entries no longer lists it.
@@ -534,7 +547,10 @@ struct DeviceExplorerView: View {
         if case SuuntoNauticExplorer.ExplorerError.requestFailed(let st) = error {
             statusText = "status \(st.rawValue)"
         }
-        let lead = "Download of \(id) failed (\(statusText)). Reconnect (force-quit DC Tester, Bluetooth off/on) and retry."
+        let next = resumableBytes(of: id).map {
+            "The \($0) bytes received are kept: \(Self.reconnectHint.lowercased()) and download it again to carry on from there."
+        } ?? "\(Self.reconnectHint) and retry."
+        let lead = "Download of \(id) failed (\(statusText)). \(next)"
         guard let listed = try? SuuntoNauticExplorer.listDives(device: devicePtr) else {
             return lead
         }
