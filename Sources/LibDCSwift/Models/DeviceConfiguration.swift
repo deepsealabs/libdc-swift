@@ -324,6 +324,11 @@ import LibDCBridge
             logDebug("Successfully opened device")
             logDebug("Device data pointer allocated at: \(String(describing: data))")
 
+            // Suunto Nautic/Ocean: a dive whose download a dropped link cut short carries on from there.
+            if let device = data.pointee.device {
+                SuuntoNauticResume.shared.attach(device, watch: name.isEmpty ? deviceAddress : name)
+            }
+
             // Store the configuration for future connections
             if let forced = forcedModel {
                 DeviceStorage.shared.storeDevice(

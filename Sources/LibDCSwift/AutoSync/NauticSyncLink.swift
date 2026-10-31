@@ -14,11 +14,15 @@ public protocol NauticSyncLink: AnyObject {
     /// While `isCancelled` returns true, calls give up with `DC_STATUS_CANCELLED`,
     /// a download between stream frames. Nil removes the check.
     func setCancellation(_ isCancelled: (() -> Bool)?)
+    /// The `/Data` bytes of dive `id` that an earlier connection received and `download`
+    /// carries on from (`SuuntoNauticResume`); nil when it starts from the beginning.
+    func resumableBytes(of id: UInt32) -> Int?
     func close()
 }
 
 public extension NauticSyncLink {
     func setCancellation(_ isCancelled: (() -> Bool)?) {}
+    func resumableBytes(of id: UInt32) -> Int? { nil }
 }
 
 /// Finds and opens the watch.
@@ -82,6 +86,10 @@ public final class DCDeviceNauticLink: NauticSyncLink {
 
     public func waitForNotification(timeoutMs: UInt32) throws -> SuuntoNauticExplorer.Notification? {
         try SuuntoNauticExplorer.waitForNotification(dcDevice: dcDevice(), timeoutMs: timeoutMs)
+    }
+
+    public func resumableBytes(of id: UInt32) -> Int? {
+        device.flatMap { SuuntoNauticResume.resumableBytes(of: id, on: $0) }
     }
 
     public func setCancellation(_ isCancelled: (() -> Bool)?) {
