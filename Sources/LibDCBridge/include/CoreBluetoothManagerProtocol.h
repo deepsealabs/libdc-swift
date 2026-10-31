@@ -23,6 +23,8 @@
 @optional
 // YES while a close waits for a running download; link I/O then gives up with DC_STATUS_CANCELLED.
 - (BOOL)isIOCancelled;
+// YES from a drop of the current link until the next connect; link I/O then answers DC_STATUS_NODEVICE.
+- (BOOL)isLinkLost;
 @end
 
 #else

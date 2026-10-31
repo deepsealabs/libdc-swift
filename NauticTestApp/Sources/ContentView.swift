@@ -80,6 +80,12 @@ struct ContentView: View {
                     showAutoDownload = true
                 }
             }
+            .onChange(of: bluetoothManager.hasLostLink) { lost in
+                // The device screen closes the device and pops back here; say why and what to do.
+                if lost && !autoDownload.isActive {
+                    connectError = "Link to \(explorerDeviceName ?? "the dive computer") lost. Tap Connect to reconnect."
+                }
+            }
         }
     }
 

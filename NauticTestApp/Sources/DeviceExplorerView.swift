@@ -112,6 +112,13 @@ struct DeviceExplorerView: View {
         .onChange(of: statusMessage) { message in
             if let message { note(message) }
         }
+        .onChange(of: bluetoothManager.hasLostLink) { lost in
+            // A dropped link can't be used again: close the device rather than send on it.
+            // Closing pops back to the device list, where Connect starts a fresh link.
+            guard lost else { return }
+            statusMessage = "Link lost. Tap Connect to reconnect."
+            bluetoothManager.close(clearDevicePtr: true)
+        }
         .sheet(isPresented: Binding(
             get: { shareItems != nil },
             set: { if !$0 { shareItems = nil } }
@@ -360,7 +367,6 @@ struct DeviceExplorerView: View {
                     // This run's dives, not the session's.
                     statusMessage = "Downloaded \(max(0, viewModel.dives.count - divesBefore)) dive(s)."
                 }
-                note(statusMessage ?? "")
             }
         }
     }

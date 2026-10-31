@@ -60,6 +60,8 @@ dc_status_t ble_close(ble_object_t *io);
 dc_status_t ble_read_status(bool cancelled, size_t length, bool ready);
 // The status ble_write reports for a writeData: result (0 sent, 1 timed out, else failed).
 dc_status_t ble_write_status(bool cancelled, long result);
+// Whether link I/O may go ahead: DC_STATUS_SUCCESS, or CANCELLED (a close waits) / NODEVICE (the link dropped).
+dc_status_t ble_link_status(bool cancelled, bool lost);
 
 // BLE setup functions
 void initializeBLEManager(void);
