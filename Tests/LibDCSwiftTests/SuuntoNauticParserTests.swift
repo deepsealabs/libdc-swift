@@ -93,6 +93,7 @@ final class SuuntoNauticParserTests: XCTestCase {
         var time: TimeInterval = 0
         var events: [EventRecord] = []
         var deco: [DecoRecord] = []
+        var setpoints: [(time: TimeInterval, value: Double)] = []
     }
 
     /// The native Suunto event `value` (subgroup << 8 | type) and per-sample deco
@@ -123,6 +124,8 @@ final class SuuntoNauticParserTests: XCTestCase {
             case DC_SAMPLE_DECO:
                 c.deco.append(DecoRecord(isDecoStop: value.deco.type == DC_DECO_DECOSTOP.rawValue,
                                          ceiling: value.deco.depth, tts: TimeInterval(value.deco.tts), time: c.time))
+            case DC_SAMPLE_SETPOINT:
+                c.setpoints.append((c.time, value.setpoint))
             default:
                 break
             }
@@ -610,6 +613,11 @@ final class SuuntoNauticParserTests: XCTestCase {
         XCTAssertEqual(tanks[0].volume, 12.0, accuracy: 0.05)
         XCTAssertEqual(tanks[1].gasMix, 1)
         XCTAssertEqual(tanks[1].volume, 5.7, accuracy: 0.05)
+
+        // Open-circuit gases (State 0) keep no role.
+        XCTAssertEqual(dive.diveMode, .openCircuit)
+        XCTAssertTrue(gases.allSatisfy { $0.usage == DC_USAGE_NONE })
+        XCTAssertTrue(tanks.allSatisfy { $0.usage == DiveData.Tank.Usage.none })
     }
 
     /// Regression corpus: real tester dive captures live in a git-ignored
@@ -849,5 +857,177 @@ final class SuuntoNauticParserTests: XCTestCase {
             0x08, 0x00, 0x00, 0x00, 0x37, 0x3b, 0x46, 0x0e,
         ]
         XCTAssertEqual(extractIDs(Data(entries)), [])
+    }
+
+    // MARK: - #94: CCR dives
+
+    /// The /Summary of trustthegoose's Nautic CCR bucket dive 1792334897 (#94,
+    /// firmware 2.55.46), as the driver appends it: the issue's attachment
+    /// without its 11-byte page header. Diluent 15/46 (State 1) in an AL50,
+    /// oxygen (State 2), setpoints 0.5/1.6 bar stored as 50000/160000 Pa,
+    /// automatic, switch depths 3/18 m, GF 34/82. The tester set the DiveFooter's
+    /// GPS fields to their nil values; nothing else is changed.
+    private func loadCCRSummary() throws -> [UInt8] {
+        let url = try XCTUnwrap(Bundle.module.url(
+            forResource: "suunto_nautic_ccr_1792334897_summary", withExtension: "sbem"),
+            "fixture missing from test bundle")
+        return try [UInt8](Data(contentsOf: url))
+    }
+
+    private static func f32(_ value: Float) -> [UInt8] {
+        withUnsafeBytes(of: value.bitPattern.littleEndian, Array.init)
+    }
+
+    /// A /Data stream from records at absolute times (ms); each record's
+    /// leading 2-byte delta is filled in from the previous record's time.
+    private static func profile(_ records: [(ms: Int, id: UInt8, body: [UInt8])]) -> [UInt8] {
+        let ordered = records.enumerated()
+            .sorted { ($0.element.ms, $0.offset) < ($1.element.ms, $1.offset) }
+            .map(\.element)
+        var out = Array("SBEM0103".utf8)
+        var last = 0
+        for record in ordered {
+            let payload = withUnsafeBytes(of: UInt16(record.ms - last).littleEndian, Array.init) + record.body
+            out += [record.id, UInt8(payload.count)] + payload
+            last = record.ms
+        }
+        return out
+    }
+
+    /// No raw CCR /Data has been shared yet, so this one follows trustthegoose's
+    /// decode of 1792349453 (#94): Diving from the start on the diluent (gas 0),
+    /// the switch to 1.6 High at 152.7 s and back to 0.5 Low at 206.0 s (the
+    /// cloud's times), the Notify the watch shows for the first, and a depth and
+    /// tank sample every 10 s. Three malformed SetpointSwitch records (short, a
+    /// PO2 no watch logs, an unknown mode) must be ignored.
+    private static func ccrProfile() -> [UInt8] {
+        var status = [UInt8](repeating: 0, count: 139)  // the 141 B extended status, less the delta
+        status.replaceSubrange(0..<4, with: f32(0.3))
+        for (slot, pascal) in [(0, UInt32(20_000_000)), (1, UInt32(19_000_000))] {
+            let base = 40 + slot * 18
+            status[base] = UInt8(slot)
+            status.replaceSubrange(base + 2..<base + 6, with: withUnsafeBytes(of: pascal.littleEndian, Array.init))
+        }
+        typealias Record = (ms: Int, id: UInt8, body: [UInt8])
+        let samples: [Record] = stride(from: 10_000, through: 240_000, by: 10_000).map { (ms: $0, id: 0x16, body: status) }
+        let events: [Record] = [
+            (ms: 0, id: 0x1C, body: [1]),
+            (ms: 30, id: 0x1F, body: [0, 0]),
+            (ms: 151_700, id: 0x1A, body: [21, 1]),
+            (ms: 152_700, id: 0x20, body: f32(1.6) + [2]),
+            (ms: 155_000, id: 0x20, body: [0x00, 0x00, 0x80]),
+            (ms: 161_700, id: 0x1A, body: [21, 0]),
+            (ms: 175_000, id: 0x20, body: f32(9.5) + [2]),
+            (ms: 180_500, id: 0x20, body: f32(1.3) + [7]),
+            (ms: 206_000, id: 0x20, body: f32(0.5) + [1]),
+            (ms: 240_500, id: 0x1C, body: [0]),
+        ]
+        return profile(events + samples)
+    }
+
+    func testCCRDiveModeAndGasRoles() throws {
+        let dive = try parse(Data(Self.ccrProfile() + loadCCRSummary()), logbookID: 1792334897)
+        XCTAssertEqual(dive.diveMode, .closedCircuit)
+
+        let gases = try XCTUnwrap(dive.gasMixes)
+        XCTAssertEqual(gases.count, 2)
+        XCTAssertEqual(gases[0].oxygen, 0.15, accuracy: 0.001)
+        XCTAssertEqual(gases[0].helium, 0.46, accuracy: 0.001)
+        XCTAssertEqual(gases[0].usage, DC_USAGE_DILUENT)
+        XCTAssertEqual(gases[1].oxygen, 1.0, accuracy: 0.001)
+        XCTAssertEqual(gases[1].usage, DC_USAGE_OXYGEN)
+
+        let tanks = try XCTUnwrap(dive.tanks)
+        XCTAssertEqual(tanks.count, 2)
+        XCTAssertEqual(tanks[0].gasMix, 0)
+        XCTAssertEqual(tanks[0].usage, .diluent)
+        XCTAssertEqual(tanks[0].volume, 7.0, accuracy: 0.05)
+        XCTAssertEqual(tanks[1].gasMix, 1)
+        XCTAssertEqual(tanks[1].usage, .oxygen)
+        XCTAssertEqual(tanks[1].volume, 3.0, accuracy: 0.05)
+
+        // The rest of the real /Summary decodes as set on the watch.
+        XCTAssertEqual(dive.decoModel?.gfLow, 34)
+        XCTAssertEqual(dive.decoModel?.gfHigh, 82)
+    }
+
+    func testCCRSetpointsStartLowAndFollowTheSwitches() throws {
+        let data = try Data(Self.ccrProfile() + loadCCRSummary())
+        let raw = try rawSamples(data)
+        let expected: [(time: TimeInterval, value: Double)] = [(0, 0.5), (152.7, 1.6), (206.0, 0.5)]
+        XCTAssertEqual(raw.setpoints.count, expected.count, "got \(raw.setpoints)")
+        for (got, want) in zip(raw.setpoints, expected) {
+            XCTAssertEqual(got.time, want.time, accuracy: 0.001)
+            XCTAssertEqual(got.value, want.value, accuracy: 0.0001)
+        }
+        // The Notify for the on-screen message stays a plain event.
+        XCTAssertTrue(raw.events.contains { $0.value == UInt32(0x1A << 8 | 21) && $0.isBegin })
+
+        // Every profile point carries the setpoint in force, from the first.
+        let dive = try parse(data, logbookID: 1792334897)
+        XCTAssertFalse(dive.profile.isEmpty)
+        for point in dive.profile {
+            let want = point.time >= 205.9995 ? 0.5 : point.time >= 152.6995 ? 1.6 : 0.5
+            XCTAssertEqual(try XCTUnwrap(point.setpoint, "at \(point.time) s"), want, accuracy: 0.0001, "at \(point.time) s")
+        }
+    }
+
+    func testOpenCircuitDivesReportNoCCR() throws {
+        let fixture = try loadFixture()
+        for data in [fixture, fixture + Data(Self.summary(divetime: 1921.5, maxDepth: 33.12))] {
+            XCTAssertTrue(try rawSamples(data).setpoints.isEmpty)
+            let dive = try parse(data, logbookID: 1787752091)
+            XCTAssertEqual(dive.diveMode, .openCircuit)
+            XCTAssertTrue(dive.profile.allSatisfy { $0.setpoint == nil })
+        }
+    }
+
+    func testSetpointSwitchesOnlyOnACCRDive() throws {
+        // The same dive with both gases set to open circuit: the SetpointSwitch
+        // id isn't trusted and the header's setpoints aren't read.
+        var summary = try loadCCRSummary()
+        summary[0xC7] = 0
+        summary[0xC7 + 45] = 0
+        let data = Data(Self.ccrProfile() + summary)
+        XCTAssertTrue(try rawSamples(data).setpoints.isEmpty)
+        let dive = try parse(data, logbookID: 1792334897)
+        XCTAssertEqual(dive.diveMode, .openCircuit)
+        XCTAssertTrue(try XCTUnwrap(dive.gasMixes).allSatisfy { $0.usage == DC_USAGE_NONE })
+    }
+
+    func testDiveHeaderWithoutASetpointBlock() throws {
+        // A DiveHeader of the Ocean's length (410 B) ends at the gas array, so
+        // CCR gases give no initial setpoint; the switches still decode.
+        var header = [UInt8](repeating: 0, count: 410)
+        header[185] = 1; header[186] = 15; header[188] = 46  // gas 0 (SBEM 0xC7): diluent 15/46
+        header[230] = 2; header[231] = 100                    // gas 1: oxygen
+        let summary = Array("SBEM0103".utf8) + [0x21, 0xFF]
+            + withUnsafeBytes(of: UInt32(header.count).littleEndian, Array.init) + header
+        let data = Data(Self.ccrProfile() + summary)
+        let raw = try rawSamples(data)
+        XCTAssertEqual(raw.setpoints.map { ($0.value * 100).rounded() / 100 }, [1.6, 0.5])
+        XCTAssertEqual(raw.setpoints.first?.time ?? 0, 152.7, accuracy: 0.001)
+        XCTAssertEqual(try parse(data, logbookID: 1792334897).diveMode, .closedCircuit)
+    }
+
+    func testApneaSportIdWinsOverCCRGases() throws {
+        let profile = Self.ccrProfile()
+        let freedive: [UInt8] = [0x08, 6, 0x00, 0x00, 61, 0x36, 0x31, 0x00]
+        let data = try Data(Array(profile.prefix(8)) + freedive + Array(profile.dropFirst(8)) + loadCCRSummary())
+        XCTAssertEqual(try parse(data, logbookID: 1792334897).diveMode, .freedive)
+    }
+
+    func testExplorerDecodeCarriesCCRRolesAndSetpoints() throws {
+        let ccr = try SuuntoNauticExplorer.decode(sbemData: Data(Self.ccrProfile() + loadCCRSummary()),
+                                                  logbookID: 1792334897)
+        XCTAssertEqual(ccr.diveMode, .closedCircuit)
+        XCTAssertEqual(ccr.gases.map(\.o2Percent), [15, 100])
+        XCTAssertEqual(ccr.gases.map(\.usage), [DC_USAGE_DILUENT, DC_USAGE_OXYGEN])
+        XCTAssertEqual(ccr.setpointProfile.map { ($0.setpoint * 100).rounded() / 100 }, [0.5, 1.6, 0.5])
+        XCTAssertEqual(ccr.setpointProfile.map { ($0.time * 10).rounded() / 10 }, [0, 152.7, 206])
+
+        let oc = try SuuntoNauticExplorer.decode(sbemData: loadFixture(), logbookID: 1787752091)
+        XCTAssertEqual(oc.diveMode, .openCircuit)
+        XCTAssertTrue(oc.setpointProfile.isEmpty)
     }
 }
