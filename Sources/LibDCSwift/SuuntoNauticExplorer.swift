@@ -321,14 +321,18 @@ public enum SuuntoNauticExplorer {
 
     /// A decoded dive profile. Populated from the standard dc_parser_t
     /// fields/samples: depth, temperature, tank pressure, and (from the
-    /// appended /Summary section) gradient factors and gas mix. See
+    /// appended /Summary section) gradient factors, gas mix and, on a CCR
+    /// dive, the diluent and oxygen roles and the setpoints. See
     /// suunto_nautic.h for what's still missing (dive events, datetime).
     public struct DecodedProfile {
         public struct DepthSample { public let time: TimeInterval; public let depth: Double }
         public struct TemperatureSample { public let time: TimeInterval; public let temperature: Double }
         public struct TankSample { public let time: TimeInterval; public let tank: Int; public let pressure: Double }
         public struct Tank { public let index: Int; public let beginPressure: Double; public let endPressure: Double }
-        public struct Gas { public let o2Percent: Int; public let hePercent: Int }
+        /// `usage` is `DC_USAGE_DILUENT` or `DC_USAGE_OXYGEN` for a CCR gas, else `DC_USAGE_NONE`.
+        public struct Gas { public let o2Percent: Int; public let hePercent: Int; public let usage: dc_usage_t }
+        /// A CCR setpoint in bar: the one the dive starts on, then each switch.
+        public struct SetpointSample { public let time: TimeInterval; public let setpoint: Double }
         /// A dive event (alarm, warning, gas switch, ...). `type` is the
         /// libdivecomputer `parser_sample_event_t` value; `isBegin` marks a
         /// begin (true) vs end (false) edge.
@@ -453,6 +457,8 @@ public enum SuuntoNauticExplorer {
         public var gradientFactorLow: Int?
         public var gradientFactorHigh: Int?
         public var gases: [Gas]
+        public var diveMode: DiveData.DiveMode
+        public var setpointProfile: [SetpointSample]
         public var depthProfile: [DepthSample]
         public var temperatureProfile: [TemperatureSample]
         public var tankProfile: [TankSample]
@@ -533,10 +539,15 @@ public enum SuuntoNauticExplorer {
                 var mix = dc_gasmix_t()
                 if dc_parser_get_field(parser, DC_FIELD_GASMIX, i, &mix) == DC_STATUS_SUCCESS {
                     gases.append(.init(o2Percent: Int((mix.oxygen * 100).rounded()),
-                                       hePercent: Int((mix.helium * 100).rounded())))
+                                       hePercent: Int((mix.helium * 100).rounded()),
+                                       usage: mix.usage))
                 }
             }
         }
+
+        var mode = DC_DIVEMODE_OC
+        let modeStatus = dc_parser_get_field(parser, DC_FIELD_DIVEMODE, 0, &mode)
+        let diveMode = GenericParser.convertDiveMode(modeStatus == DC_STATUS_SUCCESS ? mode.rawValue : nil)
 
         let collector = SampleCollector()
         let collectorPtr = Unmanaged.passRetained(collector).toOpaque()
@@ -552,6 +563,8 @@ public enum SuuntoNauticExplorer {
                 collector.depth.append(.init(time: collector.currentTime, depth: value.depth))
             case DC_SAMPLE_TEMPERATURE:
                 collector.temperature.append(.init(time: collector.currentTime, temperature: value.temperature))
+            case DC_SAMPLE_SETPOINT:
+                collector.setpoints.append(.init(time: collector.currentTime, setpoint: value.setpoint))
             case DC_SAMPLE_PRESSURE:
                 collector.tank.append(.init(time: collector.currentTime, tank: Int(value.pressure.tank), pressure: value.pressure.value))
             case DC_SAMPLE_EVENT:
@@ -608,6 +621,8 @@ public enum SuuntoNauticExplorer {
             gradientFactorLow: gfLow,
             gradientFactorHigh: gfHigh,
             gases: gases,
+            diveMode: diveMode,
+            setpointProfile: collector.setpoints,
             depthProfile: collector.depth,
             temperatureProfile: collector.temperature,
             tankProfile: collector.tank,
@@ -634,6 +649,7 @@ private final class SampleCollector {
     var currentTime: TimeInterval = 0
     var depth: [SuuntoNauticExplorer.DecodedProfile.DepthSample] = []
     var temperature: [SuuntoNauticExplorer.DecodedProfile.TemperatureSample] = []
+    var setpoints: [SuuntoNauticExplorer.DecodedProfile.SetpointSample] = []
     var tank: [SuuntoNauticExplorer.DecodedProfile.TankSample] = []
     var events: [SuuntoNauticExplorer.DecodedProfile.Event] = []
     var battery: [SuuntoNauticExplorer.DecodedProfile.BatterySample] = []
