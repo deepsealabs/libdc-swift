@@ -427,6 +427,10 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
             break;
         }
         data->device = NULL;
+        // The link dropped (or a close is waiting): every retry would fail at once on it, 3 s apart.
+        if (rc == DC_STATUS_NODEVICE || rc == DC_STATUS_CANCELLED) {
+            break;
+        }
     }
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to open device after %d attempts, rc=%d\n", MAX_PROTOCOL_RETRIES, rc);
