@@ -300,11 +300,27 @@ struct DeviceExplorerView: View {
             LabeledContent("Dive time", value: formatDuration(profile.divetime))
             LabeledContent("Max depth", value: String(format: "%.1f m", profile.maxDepth))
             LabeledContent("Avg depth", value: String(format: "%.1f m", profile.avgDepth))
+            LabeledContent("Dive mode", value: profile.diveMode.description)
             if let low = profile.gradientFactorLow, let high = profile.gradientFactorHigh {
                 LabeledContent("Gradient factors", value: "\(low)/\(high)")
             }
+            ForEach(Array(profile.gases.enumerated()), id: \.offset) { idx, gas in
+                LabeledContent("Gas \(idx + 1)", value: gasLabel(o2: gas.o2Percent, he: gas.hePercent, usage: gas.usage))
+            }
             ForEach(profile.tanks, id: \.index) { tank in
                 LabeledContent("Tank \(tank.index)", value: String(format: "%.0f → %.0f bar", tank.beginPressure, tank.endPressure))
+            }
+        }
+
+        if !profile.setpointProfile.isEmpty {
+            Section("Setpoints") {
+                ForEach(Array(profile.setpointProfile.enumerated()), id: \.offset) { _, sample in
+                    HStack {
+                        Text(String(format: "%.2f bar", sample.setpoint))
+                        Spacer()
+                        Text(formatDuration(sample.time)).font(.caption).foregroundColor(.secondary)
+                    }
+                }
             }
         }
 
@@ -607,6 +623,16 @@ struct DeviceExplorerView: View {
     }
 }
 
+/// "O₂ 15% / He 46% (diluent)": the mix, and its role on a CCR dive.
+private func gasLabel(o2: Int, he: Int, usage: dc_usage_t) -> String {
+    let mix = he > 0 ? "O₂ \(o2)% / He \(he)%" : "O₂ \(o2)%"
+    switch usage {
+    case DC_USAGE_DILUENT: return mix + " (diluent)"
+    case DC_USAGE_OXYGEN: return mix + " (oxygen)"
+    default: return mix
+    }
+}
+
 /// Generic decoded-dive detail, driven entirely by the standard `DiveData`
 /// the generic parser produces, so it renders for any device family.
 private struct DiveDetailView: View {
@@ -619,6 +645,9 @@ private struct DiveDetailView: View {
                 LabeledContent("Dive time", value: formatDuration(dive.divetime))
                 LabeledContent("Max depth", value: String(format: "%.1f m", dive.maxDepth))
                 LabeledContent("Avg depth", value: String(format: "%.1f m", dive.avgDepth))
+                if let mode = dive.diveMode {
+                    LabeledContent("Dive mode", value: mode.description)
+                }
                 if let tmin = dive.minTemperature, let tmax = dive.maxTemperature {
                     LabeledContent("Temperature", value: String(format: "%.1f–%.1f °C", tmin, tmax))
                 }
@@ -639,7 +668,20 @@ private struct DiveDetailView: View {
                 Section("Gas Mixes") {
                     ForEach(Array(gases.enumerated()), id: \.offset) { idx, gas in
                         let o2 = Int((gas.oxygen * 100).rounded()), he = Int((gas.helium * 100).rounded())
-                        LabeledContent("Gas \(idx + 1)", value: he > 0 ? "O₂ \(o2)% / He \(he)%" : "O₂ \(o2)%")
+                        LabeledContent("Gas \(idx + 1)", value: gasLabel(o2: o2, he: he, usage: gas.usage))
+                    }
+                }
+            }
+
+            let setpoints = setpointChanges
+            if !setpoints.isEmpty {
+                Section("Setpoints") {
+                    ForEach(Array(setpoints.enumerated()), id: \.offset) { _, change in
+                        HStack {
+                            Text(String(format: "%.2f bar", change.setpoint))
+                            Spacer()
+                            Text(formatDuration(change.time)).font(.caption).foregroundColor(.secondary)
+                        }
                     }
                 }
             }
@@ -684,6 +726,16 @@ private struct DiveDetailView: View {
         dive.profile.flatMap { point in
             point.events.map { (point.time, String(describing: $0)) }
         }
+    }
+
+    /// The setpoint carries over from point to point, so list only where it changes.
+    private var setpointChanges: [(time: TimeInterval, setpoint: Double)] {
+        var changes: [(time: TimeInterval, setpoint: Double)] = []
+        for point in dive.profile {
+            guard let setpoint = point.setpoint, setpoint != changes.last?.setpoint else { continue }
+            changes.append((point.time, setpoint))
+        }
+        return changes
     }
 
     private var vendorKindCounts: [(kind: UInt8, count: Int)] {

@@ -416,20 +416,7 @@ public class GenericParser {
             wrapper.setDecoModel(decoModel)
         }
         
-        // Get dive mode
-        let diveMode: DiveData.DiveMode
-        if let modeValue: UInt32 = getField(parser, type: DC_FIELD_DIVEMODE) {
-            diveMode = switch modeValue {
-            case DC_DIVEMODE_FREEDIVE.rawValue: .freedive
-            case DC_DIVEMODE_GAUGE.rawValue: .gauge
-            case DC_DIVEMODE_OC.rawValue: .openCircuit
-            case DC_DIVEMODE_CCR.rawValue: .closedCircuit
-            case DC_DIVEMODE_SCR.rawValue: .semiClosedCircuit
-            default: .openCircuit
-            }
-        } else {
-            diveMode = .openCircuit  // Default to OC if not specified
-        }
+        let diveMode = convertDiveMode(getField(parser, type: DC_FIELD_DIVEMODE))
 
         // Get environmental data fields
         if let salinity: dc_salinity_t = getField(parser, type: DC_FIELD_SALINITY) {
@@ -615,6 +602,17 @@ public class GenericParser {
         )
     }
     
+    /// Open circuit when the parser reports no dive mode or one this library doesn't know.
+    static func convertDiveMode(_ raw: UInt32?) -> DiveData.DiveMode {
+        switch raw ?? DC_DIVEMODE_OC.rawValue {
+        case DC_DIVEMODE_FREEDIVE.rawValue: .freedive
+        case DC_DIVEMODE_GAUGE.rawValue: .gauge
+        case DC_DIVEMODE_CCR.rawValue: .closedCircuit
+        case DC_DIVEMODE_SCR.rawValue: .semiClosedCircuit
+        default: .openCircuit
+        }
+    }
+
     private static func convertUsage(_ usage: dc_usage_t) -> DiveData.Tank.Usage {
         switch usage {
         case DC_USAGE_NONE:
