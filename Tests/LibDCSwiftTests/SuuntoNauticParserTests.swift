@@ -183,10 +183,19 @@ final class SuuntoNauticParserTests: XCTestCase {
 
     func testStartDateDerivedFromStream() throws {
         // No logbook ID passed: the parser must still recover the dive start
-        // from the GPS UTC anchor in the stream. 1787752091 = 2026-08-26T13:48:11Z
+        // from the stream. 1787752091 = 2026-08-26T13:48:11Z
         // (== 15:48:11+02:00 in the app export).
         let dive = try parse(loadFixture())
         XCTAssertEqual(dive.datetime.timeIntervalSince1970, 1787752091, accuracy: 1.0)
+    }
+
+    func testStartIsTheSameInstantWhateverOffsetTheParserStates() {
+        // 13:48:11 in UTC, unzoned, and as the wall clock at +2:00 and -4:00.
+        for (hour, offset) in [(13, 0), (13, Int32.min), (15, 7200), (9, -14400)] as [(Int32, Int32)] {
+            let datetime = dc_datetime_t(
+                year: 2026, month: 8, day: 26, hour: hour, minute: 48, second: 11, timezone: offset)
+            XCTAssertEqual(GenericParser.instant(of: datetime)?.timeIntervalSince1970, 1787752091)
+        }
     }
 
     func testOwningLogbookIDNamesTheDiveTheBytesBelongTo() throws {
@@ -293,7 +302,7 @@ final class SuuntoNauticParserTests: XCTestCase {
         // Standard fields flow through.
         XCTAssertEqual(dive.maxDepth, 33.11, accuracy: 0.05)
         XCTAssertFalse(dive.profile.isEmpty)
-        // Datetime must be the correct absolute UTC instant, not the GPS UTC
+        // Datetime must be the correct absolute instant, not the parser's
         // components reinterpreted in the test machine's local calendar.
         XCTAssertEqual(dive.datetime.timeIntervalSince1970, 1787752091, accuracy: 1.0)
         // The vendor channel carried the non-standard series generically.

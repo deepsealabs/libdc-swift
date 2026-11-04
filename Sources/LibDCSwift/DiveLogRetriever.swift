@@ -343,8 +343,8 @@ public class DiveLogRetriever {
             return 0
         }
 
-        // Suunto Nautic dives without a surface GPS fix carry no datetime in
-        // the parsed stream, but the fingerprint IS the dive's start time (a
+        // A Suunto Nautic dive the parser finds no start in carries no datetime
+        // in the parsed stream, but the fingerprint IS the dive's start time (a
         // little-endian UNIX timestamp). Supply it as a fallback so the dive
         // parses instead of throwing on the missing datetime.
         var fallbackDate: Date? = nil

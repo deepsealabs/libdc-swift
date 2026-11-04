@@ -9,7 +9,7 @@ import LibDCBridge
 /// `DiveLogRetriever`/`GenericParser` pipeline: `dc_device_foreach()`
 /// enumerates real dives, and `GenericParser` parses each one, taking a
 /// fallback datetime from the dive fingerprint (the logbook id is the
-/// dive's UNIX start time) for dives with no surface GPS fix, and carrying
+/// dive's UNIX start time) for dives the parser finds no start in, and carrying
 /// the non-standard series (battery, IMU, GPS accuracy, gradient factors)
 /// through the generic `DC_SAMPLE_VENDOR` channel into
 /// `DiveData.vendorSamples`.
@@ -162,8 +162,8 @@ public enum SuuntoNauticExplorer {
     }
 
     /// The listed dive a download's bytes belong to, matched on the profile's
-    /// GPS-anchored start time (a logbook id is the dive's UNIX start). Nil when
-    /// the profile has no GPS fix or no listed id is within `tolerance`.
+    /// start time (a logbook id is the dive's UNIX start). Nil when the profile
+    /// gives no start or no listed id is within `tolerance`.
     public static func owningLogbookID(of sbemData: Data, among listed: [UInt32], tolerance: TimeInterval = 120) -> UInt32? {
         guard let start = (try? decode(sbemData: sbemData))?.startDate?.timeIntervalSince1970 else { return nil }
         return listed
@@ -438,11 +438,9 @@ public enum SuuntoNauticExplorer {
             }
         }
 
-        /// Dive start time. Derived by the parser from the first GPS fix's
-        /// absolute UTC (dc_parser_get_datetime); for a dive with no surface GPS
-        /// fix the parser can't recover it, and `decode` falls back to the
-        /// logbook ID, which is that same UNIX timestamp. nil only when neither
-        /// is available.
+        /// Dive start time, the instant dc_parser_get_datetime names; where the
+        /// parser finds no start, `decode` falls back to the logbook ID, which is
+        /// that same UNIX timestamp. nil only when neither is available.
         public var startDate: Date?
         public var divetime: TimeInterval
         public var maxDepth: Double
@@ -490,16 +488,13 @@ public enum SuuntoNauticExplorer {
         dc_parser_get_field(parser, DC_FIELD_MAXDEPTH, 0, &maxDepth)
         dc_parser_get_field(parser, DC_FIELD_AVGDEPTH, 0, &avgDepth)
 
-        // Dive start: prefer the parser's stream-derived datetime (from the GPS
-        // UTC anchor); fall back to the logbook ID when the stream has no fix.
+        // Dive start: prefer the parser's stream-derived datetime; fall back to
+        // the logbook ID when the parser finds no start.
         var startDate: Date? = logbookID.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         var dt = dc_datetime_t()
-        if dc_parser_get_datetime(parser, &dt) == DC_STATUS_SUCCESS {
-            var comps = DateComponents()
-            comps.year = Int(dt.year); comps.month = Int(dt.month); comps.day = Int(dt.day)
-            comps.hour = Int(dt.hour); comps.minute = Int(dt.minute); comps.second = Int(dt.second)
-            comps.timeZone = TimeZone(identifier: "UTC")
-            if let d = Calendar(identifier: .gregorian).date(from: comps) { startDate = d }
+        if dc_parser_get_datetime(parser, &dt) == DC_STATUS_SUCCESS,
+           let d = GenericParser.instant(of: dt) {
+            startDate = d
         }
 
         var tempMin: Double = 0

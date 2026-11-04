@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY` and `SAMPLE_EVENT_GASCHANGE2` map to their `DiveEvent` cases
 
 ### Fixed
+- Suunto Nautic/Ocean: a dive's start comes from `dc_datetime_mktime` rather than reading the parser's fields as UTC, so it stays the same instant when the parser reports the wall clock and offset the dive logged (deepsealabs/libdivecomputer#19)
 - After a link drop the open device no longer talks into the dead link: `CoreBluetoothManager` forgets its characteristics and queued packets, and link I/O answers `DC_STATUS_NODEVICE` at once (`isLinkLost`, `ble_link_status`) until the next connect; `hasLostLink` tells the host to close the device. DC Tester closes it and says "Link lost. Tap Connect to reconnect." (#29)
 - A connect right after closing a watch iOS holds the link to no longer loses its session to the close's delayed cancel (the same `CBPeripheral`): the cancel is skipped once a connect has started, and a link that already dropped is cancelled at once. Connect takes the link iOS re-established by itself (`retrieveConnectedPeripherals`), so the Hello is answered on our own session (#29)
 - `open_ble_device` stops retrying `dc_device_open` once the link has dropped or a close waits (`DC_STATUS_NODEVICE`, `DC_STATUS_CANCELLED`). Each retry failed at once on the dead link, 3 s apart, which made up 12 of the 18 s before "Couldn't connect" in trustthegoose's build 24 run E (#101)
