@@ -290,6 +290,11 @@ public class DiveDataViewModel: ObservableObject {
     
     public func updateProgress(count: Int) {
         DispatchQueue.main.async {
+            // A dive's count takes more main-queue hops than the outcome, so it can land after the download finished.
+            switch self.progress {
+            case .notStarted, .inProgress: break
+            default: return
+            }
             // Don't show dive number during download since dives arrive newest-first
             // and we renumber them after download (oldest = #1)
             self.status = "Downloading dive \(count)..."
