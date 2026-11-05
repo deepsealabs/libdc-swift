@@ -153,6 +153,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         private(set) var fetchesOnReleasedHandles = 0
         /// Paths of the /Data streams served, in order.
         private(set) var streamedPaths: [String] = []
+        /// Called with the running count as each /Data stream starts, on the host's I/O thread.
+        var onStreamStart: ((Int) -> Void)?
 
         private var rx: [UInt8] = []
         private var rxIndex = 0
@@ -395,6 +397,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 streamsServed += 1
                 streamedPaths.append(path)
                 if cancelIOAfterStreamBytes != nil { streamBytesRead = 0 }
+                onStreamStart?(streamsServed)
                 send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00]))
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
