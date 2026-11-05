@@ -290,13 +290,9 @@ final class RetrievalSeamTests: XCTestCase {
         guard case .noNewDives = viewModel.progress else { return XCTFail("expected .noNewDives, got \(viewModel.progress)") }
     }
 
-    /// Characterizes real, slightly surprising behavior: the Nautic driver's
-    /// `dc_device_foreach` loop breaks on a 0 return from the per-dive callback
-    /// (where `isCancelled` is checked) without changing its own status, which
-    /// stays DC_STATUS_SUCCESS from the last dive that DID download. So a
-    /// between-dive cancel is indistinguishable from a short, successful
-    /// download -- the dives already in hand are kept and fingerprinted.
-    func testCancellingBetweenDivesKeepsWhicheverDivesAlreadyDownloaded() throws {
+    /// The Nautic driver reports a callback stop as DC_STATUS_SUCCESS, so the retriever marks the
+    /// stop itself: the download is cancelled, the dives in hand stay, and no fingerprint is saved.
+    func testCancellingBetweenDivesKeepsTheDivesButNotTheFingerprint() throws {
         let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
         let ptr = try devicePtr(for: watch)
         defer { ptr.deallocate() }
@@ -312,12 +308,12 @@ final class RetrievalSeamTests: XCTestCase {
             divesOffered += 1
             return divesOffered > 1
         })
-        XCTAssertTrue(result)
+        XCTAssertFalse(result, "a stopped download is not reported as complete")
         waitUntil { isTerminal(viewModel.progress) }
 
         XCTAssertEqual(viewModel.dives.map(\.datetime), [Date(timeIntervalSince1970: TimeInterval(1_789_757_200))])
-        guard case .completed = viewModel.progress else { return XCTFail("expected .completed, got \(viewModel.progress)") }
-        XCTAssertNotNil(fingerprints.getFingerprint(forDeviceType: "Suunto Ocean 123456", serial: "c3003306"))
+        guard case .cancelled = viewModel.progress else { return XCTFail("expected .cancelled, got \(viewModel.progress)") }
+        XCTAssertNil(fingerprints.getFingerprint(forDeviceType: "Suunto Ocean 123456", serial: "c3003306"))
     }
 
     func testAllEmptyReadsProduceEmptyReadWithNoFingerprintSaved() throws {
