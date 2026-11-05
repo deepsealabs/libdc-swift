@@ -90,7 +90,7 @@ jobs:
           xcrun simctl boot "$UDID"
           echo "udid=$UDID" >> "$GITHUB_OUTPUT"
 
-      - name: swift test (goldens, characterization, iostream open, descriptor lookup, sessions)
+      - name: swift test (goldens, characterization, iostream open, descriptor lookup, sessions, identity)
         run: >
           xcodebuild test -scheme LibDCSwift-Package
           -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}"
@@ -103,6 +103,11 @@ jobs:
           -only-testing:LibDCSwiftTests/DescriptorTransportLookupTests
           -only-testing:LibDCSwiftTests/DiveComputerSessionTests
           -only-testing:LibDCSwiftTests/SessionClockTests
+          -only-testing:LibDCSwiftTests/DeviceCatalogTests
+          -only-testing:LibDCSwiftTests/DiveComputerIdentityTests
+          -only-testing:LibDCSwiftTests/StoredDeviceTransportTests
+          -only-testing:LibDCSwiftTests/FingerprintIdentityTests
+          -only-testing:LibDCSwiftTests/SessionIdentityTests
 
   dc-tester:
     name: DC Tester app (generic iOS)

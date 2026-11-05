@@ -299,6 +299,22 @@ final class DiveComputerSessionTests: XCTestCase {
         XCTAssertEqual(again.outcome, .noNewDives)
     }
 
+    func testADiveTheBLEDownloadRejectedIsSkippedOnASessionsFirstRejection() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB, Self.diveC])
+        let stores = stores()
+        // What the CBPeripheral download's settle leaves after rejecting the dive once.
+        stores.fingerprints.setRejectedDives([Self.le32(Self.diveB.id)], forDeviceType: Self.deviceType, serial: Self.serial)
+
+        let session = try openNautic(watch, stores: stores, lease: DiveComputerSessionLease())
+        let result = try XCTUnwrap(download(session, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints),
+                                            parseHook: Self.failB))
+        XCTAssertEqual(result.outcome, .completed, "the session recognises the BLE download's rejection")
+        XCTAssertEqual(result.unreadableDives, [Self.le32(Self.diveB.id)])
+        XCTAssertEqual(result.fingerprintCommit?.fingerprint, Self.le32(Self.diveC.id))
+        let identity = try XCTUnwrap(result.identity)
+        XCTAssertEqual(stores.fingerprints.rejectedDives(for: identity), [Self.le32(Self.diveB.id)])
+    }
+
     func testTheParseRejectedMessageCountsWhatWasDownloaded() {
         let retry = "Sync again to try once more; a dive that still can't be read is then skipped."
         XCTAssertEqual(DiveLogRetriever.parseRejectedMessage(rejected: 2, downloaded: 0), "2 dives couldn't be read. \(retry)")
@@ -371,7 +387,7 @@ final class DiveComputerSessionTests: XCTestCase {
         return session
     }
 
-    private static func stubDive() -> DiveData {
+    static func stubDive() -> DiveData {
         DiveData(number: 1, datetime: Date(timeIntervalSince1970: 1_700_000_000), maxDepth: 6, avgDepth: 3, divetime: 900,
                  temperature: 20, profile: [], tankPressure: [], gasMix: nil, gasMixCount: nil, gasMixes: nil,
                  salinity: nil, atmospheric: nil, surfaceTemperature: nil, minTemperature: nil, maxTemperature: nil,
@@ -664,6 +680,30 @@ final class DiveComputerSessionTests: XCTestCase {
         XCTAssertFalse(lease.isHeld)
         XCTAssertNotNil(owner.devicePtr.pointee.device, "the owner still holds an open device")
         XCTAssertNil(owner.devicePtr.pointee.fingerprint_context, "the adopted session's lookup is withdrawn")
+    }
+
+    func testAnAdoptedBLESessionKeysItsCommitByIdentity() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
+        let stores = stores()
+        let owner = try openNautic(watch, stores: stores, lease: DiveComputerSessionLease())
+        let adopted = try DiveComputerSession.adopt(devicePtr: owner.devicePtr, displayName: owner.displayName,
+                                                    storageKey: owner.storageKey, locator: .ble(uuid: owner.storageKey),
+                                                    deviceStorage: stores.devices, lease: DiveComputerSessionLease())
+        addTeardownBlock { adopted.close() }
+        XCTAssertEqual(adopted.locator, .ble(uuid: "FAKE-UUID"))
+
+        let result = try XCTUnwrap(download(adopted, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)))
+        let identity = try XCTUnwrap(result.identity)
+        XCTAssertEqual(identity.family, .suuntoNautic)
+        XCTAssertEqual(identity.serial, Self.serial)
+        XCTAssertEqual(identity.transport, .ble)
+        XCTAssertEqual(identity.deviceKey, "sn:" + Self.serial)
+        let commit = try XCTUnwrap(result.fingerprintCommit)
+        XCTAssertEqual(commit.identity, identity)
+        commit.acknowledge()
+        XCTAssertEqual(stores.fingerprints.loadFingerprints().map(\.key), [identity.storageKey()])
+        XCTAssertEqual(stores.fingerprints.getFingerprint(forDeviceType: Self.deviceType, serial: Self.serial)?.fingerprint,
+                       Self.le32(Self.diveB.id), "a 1.18 lookup still finds it")
     }
 
     func testClosingADeviceDataClearsItsFingerprintLookup() throws {
