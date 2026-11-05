@@ -67,8 +67,8 @@ public class DiveDataViewModel: ObservableObject {
     private let fingerprintKey = "DeviceFingerprints"
     private static weak var activeInstance: DiveDataViewModel?
     public weak var persistence: DiveDataPersistence?
-    /// Test seam: an isolated store instead of `DeviceFingerprintStorage.shared`.
-    private let fingerprintStore: DeviceFingerprintStorage
+    /// Test seam: an isolated store instead of `DeviceFingerprintStorage.shared`. Session downloads keep their rejected dives here too.
+    let fingerprintStore: DeviceFingerprintStorage
 
     public init(fingerprintStore: DeviceFingerprintStorage = .shared) {
         self.fingerprintStore = fingerprintStore

@@ -83,6 +83,8 @@ public final class DiveComputerSession {
     public let storageKey: String
     public let transport: dc_transport_t
     let deviceStorage: DeviceStorage
+    /// Whoever frees the device waits on this while a download runs: the session itself when it owns the device, else the BLE manager.
+    let closeCoordinator: RetrievalCloseCoordinator
 
     private let ownsDevice: Bool
     private let lease: DiveComputerSessionLease
@@ -95,12 +97,14 @@ public final class DiveComputerSession {
     private var lookupContext: Unmanaged<DiveDataViewModel>?
 
     private init(devicePtr: UnsafeMutablePointer<device_data_t>, displayName: String, storageKey: String,
-                 transport: dc_transport_t, deviceStorage: DeviceStorage, ownsDevice: Bool, lease: DiveComputerSessionLease) {
+                 transport: dc_transport_t, deviceStorage: DeviceStorage, ownsDevice: Bool, lease: DiveComputerSessionLease,
+                 closeCoordinator: RetrievalCloseCoordinator) {
         self.devicePtr = devicePtr
         self.displayName = displayName
         self.storageKey = storageKey
         self.transport = transport
         self.deviceStorage = deviceStorage
+        self.closeCoordinator = closeCoordinator
         self.ownsDevice = ownsDevice
         self.lease = lease
     }
@@ -137,24 +141,43 @@ public final class DiveComputerSession {
             throw DiveComputerSessionError.openFailed(status)
         }
         let session = DiveComputerSession(devicePtr: data, displayName: displayName, storageKey: storageKey,
-                                          transport: transport, deviceStorage: deviceStorage, ownsDevice: true, lease: lease)
+                                          transport: transport, deviceStorage: deviceStorage, ownsDevice: true, lease: lease,
+                                          closeCoordinator: RetrievalCloseCoordinator())
         session.installCancelIfCable()
         return session
     }
 
     /// Wraps a device someone else opened (a BLE `openBLEDevice` connection, say); close the session before they close the device.
+    /// Pass the `bluetoothManager` that opened it so its `close` waits for a session download, as it does for its own.
     public static func adopt(
         devicePtr: UnsafeMutablePointer<device_data_t>,
         displayName: String,
         storageKey: String,
         deviceStorage: DeviceStorage = .shared,
-        lease: DiveComputerSessionLease = .shared
+        lease: DiveComputerSessionLease = .shared,
+        bluetoothManager: CoreBluetoothManager? = nil
+    ) throws -> DiveComputerSession {
+        if bluetoothManager == nil, (devicePtr.pointee.iostream.map { dc_iostream_get_transport($0) } ?? DC_TRANSPORT_BLE) == DC_TRANSPORT_BLE {
+            logWarning("Adopted BLE device without its CoreBluetoothManager: the manager's close won't wait for a session download")
+        }
+        return try adopt(devicePtr: devicePtr, displayName: displayName, storageKey: storageKey, deviceStorage: deviceStorage,
+                  lease: lease, closeCoordinator: bluetoothManager?.retrievalClose ?? RetrievalCloseCoordinator())
+    }
+
+    static func adopt(
+        devicePtr: UnsafeMutablePointer<device_data_t>,
+        displayName: String,
+        storageKey: String,
+        deviceStorage: DeviceStorage = .shared,
+        lease: DiveComputerSessionLease = .shared,
+        closeCoordinator: RetrievalCloseCoordinator
     ) throws -> DiveComputerSession {
         guard devicePtr.pointee.device != nil else { throw DiveComputerSessionError.noDevice }
         guard lease.tryAcquire() else { throw DiveComputerSessionError.busy }
         let transport = devicePtr.pointee.iostream.map { dc_iostream_get_transport($0) } ?? DC_TRANSPORT_BLE
         let session = DiveComputerSession(devicePtr: devicePtr, displayName: displayName, storageKey: storageKey,
-                                          transport: transport, deviceStorage: deviceStorage, ownsDevice: false, lease: lease)
+                                          transport: transport, deviceStorage: deviceStorage, ownsDevice: false, lease: lease,
+                                          closeCoordinator: closeCoordinator)
         session.installCancelIfCable()
         return session
     }
@@ -163,10 +186,12 @@ public final class DiveComputerSession {
     public static func adoptBLE(
         devicePtr: UnsafeMutablePointer<device_data_t>,
         peripheral: CBPeripheral,
-        lease: DiveComputerSessionLease = .shared
+        lease: DiveComputerSessionLease = .shared,
+        bluetoothManager: CoreBluetoothManager = .sharedManager
     ) throws -> DiveComputerSession {
         try adopt(devicePtr: devicePtr, displayName: peripheral.name ?? "Unknown Device",
-                  storageKey: peripheral.identifier.uuidString, lease: lease)
+                  storageKey: peripheral.identifier.uuidString, lease: lease,
+                  closeCoordinator: bluetoothManager.retrievalClose)
     }
 
     public var isCancelled: Bool {
@@ -195,9 +220,14 @@ public final class DiveComputerSession {
         lock.lock()
         guard !closed else { lock.unlock(); return }
         if downloading {
+            let first = !closeRequested
             cancelled = true
             closeRequested = true
             lock.unlock()
+            // Owned devices close through the coordinator, so the download sees the close and ends cancelled.
+            if first && ownsDevice {
+                _ = closeCoordinator.requestClose(UnsafeMutableRawPointer(devicePtr)) { [weak self] in self?.closeAfterDownload() }
+            }
             return
         }
         closed = true
@@ -213,13 +243,32 @@ public final class DiveComputerSession {
         return true
     }
 
+    /// Runs a close the coordinator didn't hold, one that came before the download took the device or after it let go.
     func endDownload() {
         lock.lock()
         downloading = false
         let closeNow = closeRequested && !closed
-        if closeNow { closed = true }
         lock.unlock()
-        if closeNow { teardown() }
+        if closeNow { closeAfterDownload() }
+    }
+
+    private func closeAfterDownload() {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        closed = true
+        lock.unlock()
+        teardown()
+    }
+
+    /// The owner's close held back by a download is about to free an adopted device: let go of it while it is still valid.
+    func ownerWillCloseDevice() {
+        guard !ownsDevice else { return }
+        lock.lock()
+        let wasClosed = closed
+        closed = true
+        lock.unlock()
+        guard !wasClosed else { return }
+        teardown()
     }
 
     /// The C lookup can run after the caller drops its view model (a closed window), so hold it until close.
@@ -273,35 +322,41 @@ public final class DiveComputerSession {
 /// How a `retrieveDiveLogs(session:...)` download ended.
 public struct DiveDownloadResult {
     public enum Outcome: Equatable {
-        /// Every dive arrived and parsed.
+        /// Every dive arrived and parsed, or was skipped as unreadable (see `unreadableDives`).
         case completed
         case noNewDives
+        /// The host cancelled, or closed the device mid-download.
         case cancelled
         /// Only empty records arrived (on Suunto, another app holding the link).
         case emptyRead
-        /// The walk finished, but this many dives couldn't be parsed; the fingerprint stays put so they are offered again.
-        case unreadableDives(Int)
+        /// The walk finished, but the parser rejected this many dives for the first time, the first with `status`.
+        /// The fingerprint stays before them, so the next download tries them once more and skips any rejected again.
+        case parseRejected(count: Int, status: dc_status_t)
         /// Some dives arrived, then the walk failed with this status.
         case interrupted(dc_status_t)
         case failed(dc_status_t)
     }
 
     public let outcome: Outcome
-    /// `dc_device_foreach`'s status.
+    /// `dc_device_foreach`'s status, `DC_STATUS_CANCELLED` after a host stop or a close.
     public let status: dc_status_t
     public let divesDownloaded: Int
+    /// Dives the parser rejected on this download, held or skipped.
     public let parseFailureCount: Int
-    /// Present only when every dive arrived and parsed. Nothing is saved until the host acknowledges it.
+    /// Fingerprints of the dives skipped because an earlier download's parser rejected them too; only on a success.
+    public let unreadableDives: [Data]
+    /// Present only when the walk finished with every dive parsed or skipped as unreadable. Nothing is saved until the host acknowledges it.
     public let fingerprintCommit: FingerprintCommit?
 
     public var succeeded: Bool { outcome == .completed || outcome == .noNewDives }
 
     public init(outcome: Outcome, status: dc_status_t = DC_STATUS_SUCCESS, divesDownloaded: Int = 0,
-                parseFailureCount: Int = 0, fingerprintCommit: FingerprintCommit? = nil) {
+                parseFailureCount: Int = 0, unreadableDives: [Data] = [], fingerprintCommit: FingerprintCommit? = nil) {
         self.outcome = outcome
         self.status = status
         self.divesDownloaded = divesDownloaded
         self.parseFailureCount = parseFailureCount
+        self.unreadableDives = unreadableDives
         self.fingerprintCommit = fingerprintCommit
     }
 }

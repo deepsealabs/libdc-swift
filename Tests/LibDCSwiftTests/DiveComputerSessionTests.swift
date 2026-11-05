@@ -201,7 +201,7 @@ final class DiveComputerSessionTests: XCTestCase {
         return data
     }
 
-    func testAParseFailureWithholdsTheCommitAndReportsTheCount() throws {
+    func testAFirstParseRejectionHoldsTheFingerprintAndReportsTheCount() throws {
         let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
         let stores = stores()
         // A stored model no descriptor knows: every dive downloads, and none can be parsed.
@@ -213,16 +213,18 @@ final class DiveComputerSessionTests: XCTestCase {
         addTeardownBlock { session.close() }
 
         let result = try XCTUnwrap(download(session, viewModel: viewModel))
-        XCTAssertEqual(result.outcome, .unreadableDives(2))
+        guard case .parseRejected(2, let status) = result.outcome else { return XCTFail("\(result.outcome)") }
+        XCTAssertNotEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(result.status, DC_STATUS_SUCCESS)
         XCTAssertEqual(result.parseFailureCount, 2)
         XCTAssertEqual(result.divesDownloaded, 0)
         XCTAssertNil(result.fingerprintCommit)
+        XCTAssertTrue(result.unreadableDives.isEmpty)
         XCTAssertFalse(result.succeeded)
         XCTAssertEqual(watch.streamsServed, 2, "both dives were downloaded")
         XCTAssertTrue(stores.fingerprints.loadFingerprints().isEmpty)
         drainMain { if case .failed = viewModel.progress { return true } else { return false } }
-        XCTAssertEqual(viewModel.lastDownloadStatus, "unreadableDives")
+        XCTAssertEqual(viewModel.lastDownloadStatus, DiveLogRetriever.statusName(status), "the parser's status, as the CBPeripheral download reports it")
         XCTAssertEqual(stores.devices.getStoredDevice(uuid: "FAKE-UUID")?.model, 99, "an unreported hardware model isn't stored")
     }
 
@@ -239,7 +241,7 @@ final class DiveComputerSessionTests: XCTestCase {
         }
 
         let result = try XCTUnwrap(download(session, viewModel: viewModel, parseHook: failB))
-        XCTAssertEqual(result.outcome, .unreadableDives(1))
+        XCTAssertEqual(result.outcome, .parseRejected(count: 1, status: DC_STATUS_DATAFORMAT))
         XCTAssertEqual(result.status, DC_STATUS_SUCCESS)
         XCTAssertEqual(result.parseFailureCount, 1)
         XCTAssertEqual(result.divesDownloaded, 2)
@@ -247,18 +249,64 @@ final class DiveComputerSessionTests: XCTestCase {
         XCTAssertEqual(watch.streamsServed, 3, "the walk went on past the failed dive")
         XCTAssertEqual(parsedIDs, [Self.le32(Self.diveC.id), Self.le32(Self.diveA.id)])
         XCTAssertTrue(stores.fingerprints.loadFingerprints().isEmpty)
-        XCTAssertEqual(viewModel.lastDownloadStatus, "unreadableDives")
+        XCTAssertEqual(viewModel.lastDownloadStatus, "DATAFORMAT")
+        XCTAssertEqual(viewModel.lastDownloadInterruption,
+                       DiveDataViewModel.DownloadInterruption(status: "DATAFORMAT", divesDownloaded: 2, divesRejected: 1))
         drainMain { viewModel.dives.count == 2 }
         XCTAssertEqual(viewModel.dives.count, 2, "the parsed dives still reach the host")
     }
 
-    func testTheUnreadableDivesMessageCountsWhatWasDownloaded() {
-        XCTAssertEqual(DiveLogRetriever.unreadableDivesMessage(unreadable: 2, downloaded: 0), "2 dives couldn't be read.")
-        XCTAssertEqual(DiveLogRetriever.unreadableDivesMessage(unreadable: 1, downloaded: 0), "1 dive couldn't be read.")
-        XCTAssertEqual(DiveLogRetriever.unreadableDivesMessage(unreadable: 1, downloaded: 1),
-                       "1 dive couldn't be read. 1 other dive was downloaded.")
-        XCTAssertEqual(DiveLogRetriever.unreadableDivesMessage(unreadable: 3, downloaded: 4),
-                       "3 dives couldn't be read. 4 other dives were downloaded.")
+    private static let failB: DiveLogRetriever.ParseHook = { fingerprint, parse in
+        guard fingerprint != DiveComputerSessionTests.le32(DiveComputerSessionTests.diveB.id) else {
+            throw GenericParser.ParserError.invalidParameters
+        }
+        return try parse()
+    }
+
+    func testADiveRejectedOnTwoDownloadsIsSkippedAndTheCommitMovesPastIt() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB, Self.diveC])
+        let stores = stores()
+        let lease = DiveComputerSessionLease()
+
+        let first = try openNautic(watch, stores: stores, lease: lease)
+        let held = try XCTUnwrap(download(first, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints),
+                                          parseHook: Self.failB))
+        XCTAssertEqual(held.outcome, .parseRejected(count: 1, status: DC_STATUS_DATAFORMAT), "the first rejection holds")
+        XCTAssertNil(held.fingerprintCommit)
+        XCTAssertEqual(stores.fingerprints.rejectedDives(forDeviceType: Self.deviceType, serial: Self.serial),
+                       [Self.le32(Self.diveB.id)])
+        first.close()
+
+        watch.reconnect()
+        let second = try openNautic(watch, stores: stores, lease: lease)
+        let viewModel = DiveDataViewModel(fingerprintStore: stores.fingerprints)
+        let skipped = try XCTUnwrap(download(second, viewModel: viewModel, parseHook: Self.failB))
+        XCTAssertEqual(skipped.outcome, .completed, "the same bytes rejected again are unreadable")
+        XCTAssertEqual(skipped.parseFailureCount, 1)
+        XCTAssertEqual(skipped.unreadableDives, [Self.le32(Self.diveB.id)])
+        XCTAssertEqual(viewModel.lastUnreadableDives, [Self.le32(Self.diveB.id)])
+        XCTAssertEqual(skipped.divesDownloaded, 2)
+        let commit = try XCTUnwrap(skipped.fingerprintCommit, "the commit moves past the unreadable dive")
+        XCTAssertEqual(commit.fingerprint, Self.le32(Self.diveC.id))
+        XCTAssertTrue(stores.fingerprints.loadFingerprints().isEmpty, "still nothing saved before the acknowledgement")
+        commit.acknowledge()
+        second.close()
+
+        watch.reconnect()
+        let third = try openNautic(watch, stores: stores, lease: lease)
+        let again = try XCTUnwrap(download(third, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints),
+                                           parseHook: Self.failB))
+        XCTAssertEqual(again.outcome, .noNewDives)
+    }
+
+    func testTheParseRejectedMessageCountsWhatWasDownloaded() {
+        let retry = "Sync again to try once more; a dive that still can't be read is then skipped."
+        XCTAssertEqual(DiveLogRetriever.parseRejectedMessage(rejected: 2, downloaded: 0), "2 dives couldn't be read. \(retry)")
+        XCTAssertEqual(DiveLogRetriever.parseRejectedMessage(rejected: 1, downloaded: 0), "1 dive couldn't be read. \(retry)")
+        XCTAssertEqual(DiveLogRetriever.parseRejectedMessage(rejected: 1, downloaded: 1),
+                       "1 dive couldn't be read. \(retry) 1 other dive was downloaded.")
+        XCTAssertEqual(DiveLogRetriever.parseRejectedMessage(rejected: 3, downloaded: 4),
+                       "3 dives couldn't be read. \(retry) 4 other dives were downloaded.")
     }
 
     // MARK: - Families without fingerprints
@@ -373,10 +421,42 @@ final class DiveComputerSessionTests: XCTestCase {
         let session = try openSolution(fake, stores: stores, lease: DiveComputerSessionLease())
 
         let result = try XCTUnwrap(download(session, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)))
-        XCTAssertEqual(result.outcome, .unreadableDives(3), "the walk no longer stops at the first dive")
+        XCTAssertEqual(result.outcome, .parseRejected(count: 3, status: DC_STATUS_UNSUPPORTED), "the walk no longer stops at the first dive")
         XCTAssertEqual(result.status, DC_STATUS_SUCCESS)
         XCTAssertNil(result.fingerprintCommit)
         XCTAssertNil(stores.devices.getStoredDevice(uuid: "serial:solution"), "the unreported model 0 isn't stored")
+        session.close()
+
+        let next = try openSolution(fake, stores: stores, lease: DiveComputerSessionLease())
+        let again = try XCTUnwrap(download(next, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)))
+        XCTAssertEqual(again.outcome, .parseRejected(count: 3, status: DC_STATUS_UNSUPPORTED),
+                       "a dive with no fingerprint can't be recognised again, so it always holds")
+    }
+
+    func testADiveWithNoParserConfigurationHoldsOnEveryDownload() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
+        let stores = stores()
+        let lease = DiveComputerSessionLease()
+        // No descriptor, no stored device and a name nothing resolves: there is nothing to parse with.
+        func adoptMystery() throws -> DiveComputerSession {
+            try DiveComputerSession.adopt(devicePtr: try descriptorlessNautic(watch), displayName: "Mystery Computer",
+                                          storageKey: "MYSTERY", deviceStorage: stores.devices, lease: lease)
+        }
+
+        let first = try adoptMystery()
+        let held = try XCTUnwrap(download(first, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)))
+        XCTAssertEqual(held.outcome, .parseRejected(count: 2, status: DC_STATUS_UNSUPPORTED))
+        XCTAssertNil(held.fingerprintCommit)
+        first.close()
+
+        watch.reconnect()
+        let second = try adoptMystery()
+        let again = try XCTUnwrap(download(second, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)))
+        XCTAssertEqual(again.outcome, .parseRejected(count: 2, status: DC_STATUS_UNSUPPORTED),
+                       "a configuration fault is never a second strike")
+        XCTAssertTrue(again.unreadableDives.isEmpty)
+        XCTAssertNil(again.fingerprintCommit, "the commit never moves past dives nothing could parse")
+        second.close()
     }
 
     // MARK: - Cancel
@@ -391,12 +471,14 @@ final class DiveComputerSessionTests: XCTestCase {
 
         let result = try XCTUnwrap(download(session, viewModel: viewModel))
         XCTAssertEqual(result.outcome, .cancelled)
+        XCTAssertEqual(result.status, DC_STATUS_CANCELLED, "a host stop reads as cancelled whatever the driver said")
         XCTAssertEqual(result.divesDownloaded, 1)
         XCTAssertNil(result.fingerprintCommit)
         XCTAssertTrue(stores.fingerprints.loadFingerprints().isEmpty)
         drainMain { viewModel.progress == .cancelled }
-        XCTAssertEqual(viewModel.lastDownloadStatus, "cancelled")
-        XCTAssertNil(viewModel.lastDownloadInterruption)
+        XCTAssertEqual(viewModel.lastDownloadStatus, "CANCELLED", "as the CBPeripheral download reports a host stop")
+        XCTAssertEqual(viewModel.lastDownloadInterruption,
+                       DiveDataViewModel.DownloadInterruption(status: "CANCELLED", divesDownloaded: 1, divesRejected: 0))
     }
 
     func testACancelBeforeTheDownloadEndsItWithoutTouchingTheDevice() throws {
@@ -421,19 +503,69 @@ final class DiveComputerSessionTests: XCTestCase {
 
         let done = expectation(description: "download")
         var result: DiveDownloadResult?
+        var closedBeforeCompletion = false
         DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)) {
+            closedBeforeCompletion = session.isClosed && !lease.isHeld
             result = $0
             done.fulfill()
         }
         session.close()
         XCTAssertFalse(session.isClosed, "the close waits for the download")
         XCTAssertTrue(session.isCancelled)
+        XCTAssertTrue(session.closeCoordinator.isCloseDeferred(UnsafeMutableRawPointer(session.devicePtr)),
+                      "an owned device's close is held by its own coordinator")
         wait(for: [done], timeout: 10)
 
         XCTAssertEqual(result?.outcome, .cancelled)
+        XCTAssertEqual(result?.status, DC_STATUS_CANCELLED)
+        XCTAssertTrue(closedBeforeCompletion, "the held close runs before the host sees the result")
         XCTAssertTrue(session.isClosed)
         XCTAssertFalse(lease.isHeld)
         XCTAssertTrue(stores.fingerprints.loadFingerprints().isEmpty)
+    }
+
+    func testAnOwnersCloseDuringAnAdoptedDownloadWaitsForItAndEndsItCancelled() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
+        let stores = stores()
+        let lease = DiveComputerSessionLease()
+        let data = try descriptorlessNautic(watch)
+        // Stands in for the CoreBluetoothManager that opened the device.
+        let owner = RetrievalCloseCoordinator()
+        let session = try DiveComputerSession.adopt(devicePtr: data, displayName: "Suunto Ocean 123456", storageKey: "FAKE-UUID",
+                                                    deviceStorage: stores.devices, lease: lease, closeCoordinator: owner)
+        addTeardownBlock { session.close() }
+        var decision: RetrievalCloseCoordinator.Decision?
+        var ownerClosed = false
+        var lookupWithdrawnFirst = false
+        watch.onStreamStart = { count in
+            guard count == 2 else { return }
+            decision = owner.requestClose(UnsafeMutableRawPointer(data)) {
+                XCTAssertTrue(Thread.isMainThread)
+                lookupWithdrawnFirst = data.pointee.fingerprint_context == nil && session.isClosed
+                ownerClosed = true
+            }
+        }
+
+        let done = expectation(description: "download")
+        var result: DiveDownloadResult?
+        var ownerClosedBeforeCompletion = false
+        DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)) {
+            ownerClosedBeforeCompletion = ownerClosed
+            result = $0
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+
+        XCTAssertEqual(decision, .deferred, "the owner's close waits for the session's download")
+        XCTAssertEqual(result?.outcome, .cancelled)
+        XCTAssertEqual(result?.status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(result?.divesDownloaded, 1)
+        XCTAssertNil(result?.fingerprintCommit)
+        XCTAssertTrue(ownerClosedBeforeCompletion)
+        XCTAssertTrue(lookupWithdrawnFirst, "the session lets go of the device before the owner frees it")
+        XCTAssertFalse(lease.isHeld)
+        let refused = try XCTUnwrap(download(session, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints)))
+        XCTAssertEqual(refused.outcome, .failed(DC_STATUS_INVALIDARGS), "a session whose device is gone downloads nothing")
     }
 
     func testASecondDownloadOnTheSameSessionIsRefusedWhileOneRuns() throws {
@@ -643,32 +775,78 @@ final class DiveComputerSessionTests: XCTestCase {
 
     // MARK: - Outcome rules
 
-    private func sessionOutcome(_ status: dc_status_t, cancelled: Bool = false, failures: Int = 0, matched: Bool = false,
+    private func sessionOutcome(_ status: dc_status_t, held: Int = 0, unreadable: Int = 0, matched: Bool = false,
                                 stored: Bool = true, newDives: Bool, empty: Int = 0,
                                 family: dc_family_t = DC_FAMILY_SHEARWATER_PETREL) -> (DiveDownloadResult.Outcome, Bool) {
-        let legacy = DiveLogRetriever.outcome(status: status, family: family, fingerprintMatched: matched,
-                                              hasNewDives: newDives, hadStoredFingerprint: stored, emptyReadCount: empty)
-        let r = DiveLogRetriever.sessionOutcome(legacy, status: status, cancelled: cancelled, parseFailureCount: failures,
+        let settled = DiveLogRetriever.outcome(status: status, family: family, fingerprintMatched: matched,
+                                               hasNewDives: newDives, hadStoredFingerprint: stored, emptyReadCount: empty,
+                                               rejectedCount: held, unreadableCount: unreadable)
+        let r = DiveLogRetriever.sessionOutcome(settled, status: status, heldCount: held, rejectionStatus: DC_STATUS_DATAFORMAT,
                                                 fingerprintMatched: matched, hadStoredFingerprint: stored, hasNewDives: newDives)
         return (r.outcome, r.commits)
     }
 
-    func testOnlyACompleteFullyParsedWalkCommits() {
+    func testOnlyACompleteWalkWithNoHeldDiveCommits() {
         XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, newDives: true) == (.completed, true))
-        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, failures: 2, newDives: true) == (.unreadableDives(2), false))
-        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, failures: 1, newDives: false) == (.unreadableDives(1), false))
-        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, cancelled: true, newDives: true) == (.cancelled, false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, held: 2, newDives: true) == (.parseRejected(count: 2, status: DC_STATUS_DATAFORMAT), false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, held: 1, newDives: false) == (.parseRejected(count: 1, status: DC_STATUS_DATAFORMAT), false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, held: 1, unreadable: 1, newDives: true) == (.parseRejected(count: 1, status: DC_STATUS_DATAFORMAT), false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, unreadable: 1, newDives: true) == (.completed, true))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, unreadable: 1, newDives: false) == (.completed, true),
+                      "an unreadable dive alone still moves the commit past it")
         XCTAssertTrue(sessionOutcome(DC_STATUS_CANCELLED, newDives: true) == (.cancelled, false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_CANCELLED, newDives: false) == (.cancelled, false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_CANCELLED, held: 1, newDives: true) == (.cancelled, false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, newDives: true, empty: 1) == (.completed, false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, newDives: false, empty: 2) == (.emptyRead, false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_IO, newDives: true) == (.interrupted(DC_STATUS_IO), false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_IO, newDives: false) == (.failed(DC_STATUS_IO), false))
-        XCTAssertTrue(sessionOutcome(DC_STATUS_IO, failures: 1, newDives: true) == (.interrupted(DC_STATUS_IO), false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_IO, held: 1, newDives: true) == (.interrupted(DC_STATUS_IO), false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, newDives: false) == (.noNewDives, false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_SUCCESS, stored: false, newDives: false) == (.completed, false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_PROTOCOL, matched: true, newDives: false) == (.noNewDives, false))
         XCTAssertTrue(sessionOutcome(DC_STATUS_PROTOCOL, newDives: false, family: DC_FAMILY_SUUNTO_NAUTIC) == (.failed(DC_STATUS_PROTOCOL), false))
+    }
+
+    func testAHostStopOrACloseIsACancelledSessionWhateverTheDriverSaid() {
+        for (closed, stopped) in [(true, false), (false, true), (true, true)] {
+            let status = DiveLogRetriever.downloadStatus(foreach: DC_STATUS_SUCCESS, closedMidDownload: closed, stoppedByHost: stopped)
+            XCTAssertTrue(sessionOutcome(status, newDives: true) == (.cancelled, false))
+        }
+    }
+
+    // MARK: - Suunto Nautic start time
+
+    func testASessionTakesANauticStartFromTheParsersInstantNotTheFingerprint() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "sbem"))
+        let dive = try Data(contentsOf: url)
+        let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        data.initialize(to: device_data_t())
+        var descriptor: OpaquePointer?
+        XCTAssertEqual(find_descriptor_by_model(&descriptor, DC_FAMILY_SUUNTO_NAUTIC, 1), DC_STATUS_SUCCESS)
+        data.pointee.descriptor = descriptor
+        addTeardownBlock {
+            dc_descriptor_free(data.pointee.descriptor)
+            data.deallocate()
+        }
+        let viewModel = DiveDataViewModel(fingerprintStore: stores().fingerprints)
+        let context = DiveLogRetriever.CallbackContext(
+            viewModel: viewModel, deviceName: "Suunto Ocean", deviceUUID: UUID().uuidString, storedFingerprint: nil,
+            isCancelled: { false }, deviceStorage: stores().devices, policy: .session)
+        context.devicePtr = data
+        // A fingerprint that names another second, so a start taken from it would show.
+        let fingerprint = Self.le32(1_787_000_000)
+        let userdata = Unmanaged.passUnretained(context).toOpaque()
+        let rc = dive.withUnsafeBytes { bytes in
+            fingerprint.withUnsafeBytes { fp in
+                DiveLogRetriever.diveCallbackClosure(bytes.bindMemory(to: UInt8.self).baseAddress, UInt32(dive.count),
+                                                     fp.bindMemory(to: UInt8.self).baseAddress, UInt32(fp.count), userdata)
+            }
+        }
+        XCTAssertEqual(rc, 1)
+        XCTAssertTrue(context.rejectedFingerprints.isEmpty)
+        drainMain { viewModel.dives.count == 1 }
+        XCTAssertEqual(try XCTUnwrap(viewModel.dives.first).datetime.timeIntervalSince1970, 1_787_752_091, accuracy: 1)
     }
 
     // MARK: - Hardware model
