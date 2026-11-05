@@ -299,6 +299,22 @@ final class DiveComputerSessionTests: XCTestCase {
         XCTAssertEqual(again.outcome, .noNewDives)
     }
 
+    func testADiveTheBLEDownloadRejectedIsSkippedOnASessionsFirstRejection() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB, Self.diveC])
+        let stores = stores()
+        // What the CBPeripheral download's settle leaves after rejecting the dive once.
+        stores.fingerprints.setRejectedDives([Self.le32(Self.diveB.id)], forDeviceType: Self.deviceType, serial: Self.serial)
+
+        let session = try openNautic(watch, stores: stores, lease: DiveComputerSessionLease())
+        let result = try XCTUnwrap(download(session, viewModel: DiveDataViewModel(fingerprintStore: stores.fingerprints),
+                                            parseHook: Self.failB))
+        XCTAssertEqual(result.outcome, .completed, "the session recognises the BLE download's rejection")
+        XCTAssertEqual(result.unreadableDives, [Self.le32(Self.diveB.id)])
+        XCTAssertEqual(result.fingerprintCommit?.fingerprint, Self.le32(Self.diveC.id))
+        let identity = try XCTUnwrap(result.identity)
+        XCTAssertEqual(stores.fingerprints.rejectedDives(for: identity), [Self.le32(Self.diveB.id)])
+    }
+
     func testTheParseRejectedMessageCountsWhatWasDownloaded() {
         let retry = "Sync again to try once more; a dive that still can't be read is then skipped."
         XCTAssertEqual(DiveLogRetriever.parseRejectedMessage(rejected: 2, downloaded: 0), "2 dives couldn't be read. \(retry)")

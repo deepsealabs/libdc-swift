@@ -160,7 +160,12 @@ public class DeviceFingerprintStorage {
         }
         let removed = countBefore - fingerprints.count
         saveFingerprints(fingerprints)
-        saveRejectedDives(loadRejectedDives().filter { !$0.key.hasPrefix(rejectionKeyPrefix(deviceType)) })
+        let prefix = rejectionKeyPrefix(deviceType)
+        let rejected = loadRejectedDives()
+        let cleared = Set(rejected.keys.filter { $0.hasPrefix(prefix) }.flatMap { key -> [String] in
+            [key] + (Self.rejectionIdentityKey(legacyKey: key).map { [$0] } ?? [])
+        })
+        saveRejectedDives(rejected.filter { !cleared.contains($0.key) })
         logInfo("🗑️ Cleared \(removed) fingerprint(s) for device type: \(normalizedType)")
     }
 
@@ -194,15 +199,80 @@ public class DeviceFingerprintStorage {
         }
     }
 
-    /// Fingerprints of the device's dives the parser rejected on an earlier download and hasn't parsed since.
-    func rejectedDives(forDeviceType deviceType: String, serial: String) -> Set<Data> {
-        Set(loadRejectedDives()[rejectionKeyPrefix(deviceType) + serial] ?? [])
+    /// The 1.19 entry's identity key, when its device type names a family and it has a serial.
+    private static func rejectionIdentityKey(deviceType: String, serial: String) -> String? {
+        guard let family = DeviceCatalog.family(forName: deviceType),
+              DiveComputerIdentity.normalizedSerial(serial) != nil else { return nil }
+        return DiveComputerIdentity(family: family, model: 0, serial: serial, transport: .ble).storageKey()
     }
 
+    private static func rejectionIdentityKey(legacyKey: String) -> String? {
+        guard let bar = legacyKey.lastIndex(of: "|") else { return nil }
+        return rejectionIdentityKey(deviceType: String(legacyKey[..<bar]),
+                                    serial: String(legacyKey[legacyKey.index(after: bar)...]))
+    }
+
+    /// 1.19 entries are "<type>|<serial>"; identity keys hold no "|".
+    private static func legacyRejectionKeys(in all: [String: [Data]], of identity: DiveComputerIdentity) -> [String] {
+        guard let key = identity.storageKey(), identity.serial != nil else { return [] }
+        return all.keys.filter { $0.contains("|") && rejectionIdentityKey(legacyKey: $0) == key }
+    }
+
+    /// Dives an earlier download rejected and none has parsed since, under the 1.19 key or the same computer's identity key.
+    func rejectedDives(forDeviceType deviceType: String, serial: String) -> Set<Data> {
+        lock.lock(); defer { lock.unlock() }
+        let all = loadRejectedDives()
+        let legacy = rejectionKeyPrefix(deviceType) + serial
+        var dives = Set(all[legacy] ?? [])
+        if let key = Self.rejectionIdentityKey(legacyKey: legacy) { dives.formUnion(all[key] ?? []) }
+        return dives
+    }
+
+    /// Writes the 1.19 key, which older versions read, and the identity key derived from it, as clearing and migration derive it.
     func setRejectedDives(_ fingerprints: Set<Data>, forDeviceType deviceType: String, serial: String) {
+        lock.lock(); defer { lock.unlock() }
         var all = loadRejectedDives()
-        all[rejectionKeyPrefix(deviceType) + serial] = fingerprints.isEmpty ? nil : Array(fingerprints)
+        let value = fingerprints.isEmpty ? nil : Array(fingerprints)
+        let legacy = rejectionKeyPrefix(deviceType) + serial
+        all[legacy] = value
+        if let key = Self.rejectionIdentityKey(legacyKey: legacy) { all[key] = value }
         saveRejectedDives(all)
+    }
+
+    /// The identity's rejected dives, including those under a 1.19 key of its family and serial; none without a key.
+    func rejectedDives(for identity: DiveComputerIdentity, standIn: String? = nil) -> Set<Data> {
+        guard let key = identity.storageKey(standIn: standIn) else { return [] }
+        lock.lock(); defer { lock.unlock() }
+        let all = loadRejectedDives()
+        var dives = Set(all[key] ?? [])
+        for legacy in Self.legacyRejectionKeys(in: all, of: identity) { dives.formUnion(all[legacy] ?? []) }
+        return dives
+    }
+
+    /// Writes the identity key and any 1.19 key of its family and serial, so either download reads the same set.
+    func setRejectedDives(_ fingerprints: Set<Data>, for identity: DiveComputerIdentity, standIn: String? = nil) {
+        guard let key = identity.storageKey(standIn: standIn) else { return }
+        lock.lock(); defer { lock.unlock() }
+        var all = loadRejectedDives()
+        let value = fingerprints.isEmpty ? nil : Array(fingerprints)
+        all[key] = value
+        for legacy in Self.legacyRejectionKeys(in: all, of: identity) { all[legacy] = value }
+        saveRejectedDives(all)
+    }
+
+    /// Copies 1.19 entries with a serial to their identity key, keeping the 1.19 ones; returns how many changed.
+    private func migrateRejectedDives() -> Int {
+        var all = loadRejectedDives()
+        var changed = 0
+        for (legacy, dives) in all where legacy.contains("|") {
+            guard let key = Self.rejectionIdentityKey(legacyKey: legacy) else { continue }
+            let merged = Set(all[key] ?? []).union(dives)
+            guard merged != Set(all[key] ?? []) else { continue }
+            all[key] = Array(merged)
+            changed += 1
+        }
+        if changed > 0 { saveRejectedDives(all) }
+        return changed
     }
 
     // MARK: - Keyed by identity
@@ -249,6 +319,7 @@ public class DeviceFingerprintStorage {
         var fingerprints = loadFingerprints()
         fingerprints.removeAll { belongs($0, to: identity, key: key) }
         saveFingerprints(fingerprints)
+        setRejectedDives([], for: identity, standIn: standIn)
     }
 
     func clearFingerprints(forKey key: String) {
@@ -257,9 +328,11 @@ public class DeviceFingerprintStorage {
         let count = fingerprints.count
         fingerprints.removeAll { $0.key == key }
         if fingerprints.count != count { saveFingerprints(fingerprints) }
+        var rejected = loadRejectedDives()
+        if rejected.removeValue(forKey: key) != nil { saveRejectedDives(rejected) }
     }
 
-    /// Keys 1.18 records in place, keeping what a 1.18 lookup reads; idempotent (see Docs/DEVICE_IDENTITY.md).
+    /// Keys 1.18 records in place, keeping what a 1.18 lookup reads, and copies rejected dives to identity keys; idempotent (see Docs/DEVICE_IDENTITY.md).
     @discardableResult
     public func migrateLegacyKeys(storedDevices: [StoredDevice] = []) -> Int {
         lock.lock(); defer { lock.unlock() }
@@ -274,6 +347,10 @@ public class DeviceFingerprintStorage {
         if keyed > 0 {
             saveFingerprints(fingerprints)
             logInfo("Keyed \(keyed) fingerprint(s) by computer identity")
+        }
+        let rejected = migrateRejectedDives()
+        if rejected > 0 {
+            logInfo("Keyed \(rejected) device(s)' rejected dives by computer identity")
         }
         return keyed
     }

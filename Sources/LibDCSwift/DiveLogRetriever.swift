@@ -227,18 +227,33 @@ public class DiveLogRetriever {
     /// Returns the dives given up as unreadable. Main thread.
     static func settle(status: dc_status_t, family: dc_family_t, context: CallbackContext,
                        storage: DeviceFingerprintStorage = .shared) -> (outcome: DownloadOutcome, unreadable: [Data]) {
-        guard let serial = context.deviceSerial else {
+        guard let memory = rejectionMemory(context, storage: storage) else {
             return (outcome(status: status, family: family, context: context), [])
         }
-        let deviceType = fingerprintDeviceType(context)
-        let previous = storage.rejectedDives(forDeviceType: deviceType, serial: serial)
+        let previous = memory.read()
         let remembered = rememberedRejections(previous: previous, rejected: context.rejectedFingerprints,
                                               delivered: context.deliveredFingerprints)
         if remembered != previous {
-            storage.setRejectedDives(remembered, forDeviceType: deviceType, serial: serial)
+            memory.write(remembered)
         }
         let unreadable = splitRejections(context.rejectedFingerprints, previouslyRejected: previous).unreadable
         return (outcome(status: status, family: family, context: context, previouslyRejected: previous), unreadable)
+    }
+
+    /// A session keys rejections by identity, the `CBPeripheral` download by device type and serial; the store keeps both in step.
+    private static func rejectionMemory(_ context: CallbackContext, storage: DeviceFingerprintStorage)
+        -> (read: () -> Set<Data>, write: (Set<Data>) -> Void)? {
+        if context.policy == .session {
+            let standIn = context.session?.fingerprintStandIn
+            guard let identity = context.identity ?? context.session?.identity,
+                  identity.storageKey(standIn: standIn) != nil else { return nil }
+            return ({ storage.rejectedDives(for: identity, standIn: standIn) },
+                    { storage.setRejectedDives($0, for: identity, standIn: standIn) })
+        }
+        guard let serial = context.deviceSerial else { return nil }
+        let deviceType = fingerprintDeviceType(context)
+        return ({ storage.rejectedDives(forDeviceType: deviceType, serial: serial) },
+                { storage.setRejectedDives($0, forDeviceType: deviceType, serial: serial) })
     }
 
     /// The status a parse failure carries; DATAFORMAT when it carries none.

@@ -203,6 +203,92 @@ final class FingerprintIdentityTests: XCTestCase {
         XCTAssertNotNil(fingerprints.getFingerprint(for: perdix()))
     }
 
+    // MARK: - Rejected dives
+
+    private static let rejectedKey = "RejectedDiveFingerprints"
+
+    /// A 1.19 store: dives the BLE download rejected, keyed "<device type>|<serial>".
+    private func rejectedStore(_ name: String) -> (DeviceFingerprintStorage, UserDefaults) {
+        let defaults = isolatedSuite(name)
+        let entries: [String: [Data]] = ["shearwater perdix|0badf00d": [Data([7])], "oceans s1|00000000": [Data([8])]]
+        defaults.set(try! JSONEncoder().encode(entries), forKey: Self.rejectedKey)
+        return (DeviceFingerprintStorage(userDefaults: defaults), defaults)
+    }
+
+    private func rejectedEntries(_ defaults: UserDefaults) throws -> [String: [Data]] {
+        try JSONDecoder().decode([String: [Data]].self, from: try XCTUnwrap(defaults.data(forKey: Self.rejectedKey)))
+    }
+
+    func testRejectedDivesMigrateToTheIdentityKeyAndKeepThe119Key() throws {
+        let (store, defaults) = rejectedStore("rejectedMigrate")
+        store.migrateLegacyKeys()
+        let entries = try rejectedEntries(defaults)
+        XCTAssertEqual(entries[try XCTUnwrap(perdix().storageKey())], [Data([7])])
+        XCTAssertEqual(entries["shearwater perdix|0badf00d"], [Data([7])], "a 1.19 reader still finds it")
+        XCTAssertEqual(entries["oceans s1|00000000"], [Data([8])])
+        XCTAssertEqual(entries.count, 3, "a serial-0 entry has no identity key to move to")
+        XCTAssertEqual(store.rejectedDives(for: perdix(transport: .serial)), [Data([7])])
+
+        let once = defaults.data(forKey: Self.rejectedKey)
+        store.migrateLegacyKeys()
+        XCTAssertEqual(defaults.data(forKey: Self.rejectedKey), once, "a second run writes nothing")
+    }
+
+    func testAnUnmigratedBLERejectionIsReadOverACable() {
+        let (store, _) = rejectedStore("rejectedLazy")
+        XCTAssertEqual(store.rejectedDives(for: perdix(transport: .classicBTSerial)), [Data([7])])
+        XCTAssertEqual(store.rejectedDives(for: perdix("0badf00e")), [])
+        XCTAssertEqual(store.rejectedDives(for: DiveComputerIdentity(family: .suuntoEonSteel, model: 0, serial: "0badf00d",
+                                                                      transport: .usbHID)), [], "another family's serial")
+        XCTAssertEqual(store.rejectedDives(for: DiveComputerIdentity(family: .oceansS1, model: 0, serial: nil, transport: .serial),
+                                           standIn: "adapter:0403:6001:A1"), [])
+    }
+
+    func testBothDownloadsReadAndWriteTheSameRejectedDives() throws {
+        let (store, defaults) = rejectedStore("rejectedBoth")
+        store.setRejectedDives([Data([7]), Data([9])], for: perdix(transport: .serial))
+        XCTAssertEqual(store.rejectedDives(forDeviceType: "Shearwater Perdix", serial: "0badf00d"), [Data([7]), Data([9])])
+        XCTAssertEqual(Set(try rejectedEntries(defaults)["shearwater perdix|0badf00d"] ?? []), [Data([7]), Data([9])])
+
+        store.setRejectedDives([Data([9])], forDeviceType: "Shearwater Perdix", serial: "0badf00d")
+        XCTAssertEqual(store.rejectedDives(for: perdix(transport: .serial)), [Data([9])], "a dive the BLE download parsed is forgotten")
+
+        store.setRejectedDives([], for: perdix())
+        XCTAssertEqual(store.rejectedDives(forDeviceType: "Shearwater Perdix", serial: "0badf00d"), [])
+        XCTAssertNil(try rejectedEntries(defaults)["shearwater perdix|0badf00d"])
+    }
+
+    func testClearingAComputerClearsItsRejectedDivesUnderEveryKey() throws {
+        let (store, defaults) = rejectedStore("rejectedClear")
+        store.migrateLegacyKeys()
+        store.clearFingerprint(for: perdix())
+        XCTAssertEqual(store.rejectedDives(forDeviceType: "Shearwater Perdix", serial: "0badf00d"), [])
+        XCTAssertEqual(Set(try rejectedEntries(defaults).keys), ["oceans s1|00000000"])
+
+        let (other, otherDefaults) = rejectedStore("rejectedClearType")
+        other.migrateLegacyKeys()
+        other.clearFingerprintsForDeviceType("Shearwater Perdix")
+        XCTAssertEqual(Set(try rejectedEntries(otherDefaults).keys), ["oceans s1|00000000"])
+        XCTAssertEqual(other.rejectedDives(for: perdix()), [])
+    }
+
+    /// "A1" is a case-sensitive BLE name pattern, so only the normalized type may pick the identity key.
+    func testATypeThatResolvesOnlyInItsOwnCaseWritesOnlyKeysClearingFinds() throws {
+        let defaults = isolatedSuite("rejectedCase")
+        let store = DeviceFingerprintStorage(userDefaults: defaults)
+        XCTAssertNotNil(DeviceCatalog.family(forName: "Test Device A1"))
+        XCTAssertNil(DeviceCatalog.family(forName: "test device a1"))
+
+        store.setRejectedDives([Data([7])], forDeviceType: "Test Device A1", serial: "deadbeef")
+        XCTAssertEqual(Set(try rejectedEntries(defaults).keys), ["test device a1|deadbeef"])
+        store.migrateLegacyKeys()
+        XCTAssertEqual(Set(try rejectedEntries(defaults).keys), ["test device a1|deadbeef"])
+
+        store.clearFingerprintsForDeviceType("TEST DEVICE A1")
+        XCTAssertEqual(store.rejectedDives(forDeviceType: "Test Device A1", serial: "deadbeef"), [])
+        XCTAssertNil(defaults.data(forKey: Self.rejectedKey))
+    }
+
     // MARK: - Seeding
 
     func testSeedingStoresWhenThereIsNothing() {
