@@ -517,7 +517,7 @@ struct DeviceExplorerView: View {
     }
 
     /// Describes whose bytes these are when they aren't the requested dive's, e.g. "dive #1787752091's".
-    /// Nil when they match the request or the profile has no GPS start to tell by.
+    /// Nil when they match the request or the profile gives no start to tell by.
     private func foreignOwner(of data: Data, requested id: String, listed: [UInt32]) -> String? {
         guard let requested = UInt32(id),
               let start = (try? SuuntoNauticExplorer.decode(sbemData: data))?.startDate else { return nil }

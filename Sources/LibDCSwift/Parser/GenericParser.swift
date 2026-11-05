@@ -353,7 +353,7 @@ public class GenericParser {
         let haveParserDatetime = (datetimeStatus == DC_STATUS_SUCCESS)
 
         // Some families don't carry a datetime in the parsed stream (e.g. a
-        // Suunto Nautic dive with no surface GPS fix). The caller can supply a
+        // Suunto Nautic dive the parser finds no start in). The caller can supply a
         // fallback — typically derived from the dive's fingerprint/id — so the
         // dive still parses instead of throwing.
         guard haveParserDatetime || fallbackDate != nil else {
@@ -471,17 +471,13 @@ public class GenericParser {
 
             // Most families report the dive's local wall-clock, so the
             // components are interpreted in the device's local calendar. The
-            // Suunto Nautic is different: its datetime is derived from the GPS
-            // fix and returned as true UTC (dc_datetime_gmtime), so build the
-            // Date in UTC to preserve the correct absolute instant. The watch's
-            // local offset is not in the dive data (it's a device TZ setting the
-            // Suunto app reads separately, see issue #29), so display is left to
-            // localize into the viewer's timezone.
-            var calendar = Calendar(identifier: .gregorian)
-            if family == .suuntoNautic {
-                calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
-            }
-            guard let d = calendar.date(from: dateComponents) else {
+            // Suunto Nautic is different: the parser states the offset its
+            // fields are at, so they name an absolute instant. Display is left
+            // to localize into the viewer's timezone.
+            let start = family == .suuntoNautic
+                ? instant(of: datetime)
+                : Calendar(identifier: .gregorian).date(from: dateComponents)
+            guard let d = start else {
                 throw ParserError.invalidParameters
             }
             date = d
@@ -532,6 +528,14 @@ public class GenericParser {
             fingerprint: fingerprint,
             vendorSamples: wrapper.data.vendorSamples
         )
+    }
+
+    /// The instant a parser's datetime names: its fields are a wall clock at
+    /// `timezone`'s offset from UTC. Nil when libdivecomputer can't resolve them.
+    static func instant(of datetime: dc_datetime_t) -> Date? {
+        var datetime = datetime
+        let ticks = dc_datetime_mktime(&datetime)
+        return ticks == -1 ? nil : Date(timeIntervalSince1970: TimeInterval(ticks))
     }
 
     /// Last-sample time overcounts on computers that keep logging at the
