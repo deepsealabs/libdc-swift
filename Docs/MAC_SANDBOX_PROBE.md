@@ -1,4 +1,4 @@
-# Mac sandbox probe (L0)
+# Mac sandbox probe
 
 `DC Tester Mac` is a native macOS build of DC Tester that does one job: show,
 on real hardware, whether a sandboxed, hardened-runtime Mac app on macOS 26 can
@@ -22,7 +22,7 @@ xcodebuild -project NauticTestApp.xcodeproj -scheme 'DC Tester Mac' -configurati
 open "build/mac/Build/Products/Release/DC Tester Mac.app"
 ```
 
-- **Use Release for HIL runs.** A Release build carries exactly the six L0
+- **Use Release for HIL runs.** A Release build carries exactly the six probe
   entitlements. Debug builds also carry `get-task-allow`, which lets lldb
   attach. It doesn't change the sandbox's device checks, but it isn't the
   shipping shape, and the report lists it under "Other entitlements present".
@@ -81,7 +81,7 @@ open "build/mac/Build/Products/Release/DC Tester Mac.app"
 |---|---|---|
 | Environment | macOS version and build, Mac model, Apple silicon or Intel, binary slice and whether Rosetta is translating it, how it was launched, sandbox container, each entitlement as the kernel granted it (`SecTaskCopyValueForEntitlement`) plus any extra ones present, libdivecomputer version, probe commit, Input Monitoring state | |
 | Serial ports | IOKit `IOSerialBSDClient` enumeration (`kIOCalloutDeviceKey`). Parent USB VID/PID/serial/product come from `IORegistryEntrySearchCFProperty` (recursive, parents). Hot-plug uses `kIOFirstMatchNotification` and `kIOTerminatedNotification`. Each port is classified by walking its providers as USB, Bluetooth SPP, Bluetooth incoming or built-in. Ports with no USB parent are marked hidden in the product UI. The section also lists `/dev` and runs libdc's own `dc_serial_iterator` | device.serial |
-| Serial open test, raw | `open(O_RDWR\|O_NOCTTY\|O_NONBLOCK)`, `TIOCEXCL`, `tcgetattr`, then on USB and SPP ports `cfsetspeed(9600)`, `tcsetattr` and a `tcsetattr` back to the saved termios, then `TIOCNXCL` and `close`. This is the POSIX half of `dc_serial_open` and `dc_serial_close`, step by step, so each failure has its errno. On USB ports only, between the 9600 `tcsetattr` and the restore, it also sends `IOSSIOSPEED` (`0x80085402`, since Swift can't import the macro) at 460800 (Sporasub SP2) and 850000 (Cochran). That's the ioctl `serial_posix.c` uses for custom rates once L1 defines `HAVE_IOKIT_SERIAL_IOSS_H`, so this is the L0 evidence for L1's custom-baud check | device.serial |
+| Serial open test, raw | `open(O_RDWR\|O_NOCTTY\|O_NONBLOCK)`, `TIOCEXCL`, `tcgetattr`, then on USB and SPP ports `cfsetspeed(9600)`, `tcsetattr` and a `tcsetattr` back to the saved termios, then `TIOCNXCL` and `close`. This is the POSIX half of `dc_serial_open` and `dc_serial_close`, step by step, so each failure has its errno. On USB ports only, between the 9600 `tcsetattr` and the restore, it also sends `IOSSIOSPEED` (`0x80085402`, since Swift can't import the macro) at 460800 (Sporasub SP2) and 850000 (Cochran). That's the ioctl `serial_posix.c` uses for custom rates once the macOS build defines `HAVE_IOKIT_SERIAL_IOSS_H`, so this is the probe's evidence for the macOS custom-baud check | device.serial |
 | Serial open test, libdc line control | On USB and SPP ports only: libdc's own `dc_serial_open`, then `dc_iostream_configure` at each framing the HIL families use: 2400 8O1 (Suunto Vyper), 9600 8N1 (Suunto D9/Vyper 2), 38400 8N1 (Oceanic Atom 2), 115200 8E1 (Mares Icon HD) and 115200 8N1 (Shearwater, HW OSTC/OSTC3, Cressi Leonardo, iDive, Pelagic VTX/i750TC/Pro Plus X/i770R). Then `set_dtr(1)`, `set_rts(1)`, `set_rts(0)` (on the Suunto interface DTR powers the cable and RTS sets the direction), `purge(ALL)`, `set_break(1)` and `set_break(0)` (Cochran, Reefnet), `set_timeout(300)`, a 1-byte read that should time out, then `dc_iostream_close`, which restores termios. Each step reports its `dc_status_t` and the errno text libdc logged for it. On a Bluetooth SPP port the result rests on Shearwater's sequence alone (115200 8N1, `set_timeout`, `purge`, the read), and any other failed step is reported as informational | device.serial |
 | Serial identify | Manual, per port: `dc_device_open` with the descriptor picked in **Identify as**. The picker lists every libdc descriptor with a serial transport, HIL models first, and **Find model** filters it. Each entry says whether its family's open reads the version: Suunto D9/Vyper 2, the Oceanic Atom 2 family (Aqualung i770R included) and Mares Icon HD do, so a success is a real round trip; Suunto Vyper, HW OSTC, Cressi Leonardo and Shearwater Petrel only configure the line. Families nobody has checked show "open behaviour unknown". Pick the exact model: the Oceanic Atom 2 family opens at 38400 or 115200 depending on it | device.serial |
 | Built-in serial drivers | Reads `IOKitPersonalities` from the AppleUSBFTDI, SLCOM, PLCOM, CHCOM and Serial dexts in `/System/Library/DriverExtensions`, and marks each known cable VID:PID as covered or not, including which interface the personality binds. It needs no cable, so every Mac records its table | |
@@ -97,7 +97,7 @@ open "build/mac/Build/Products/Release/DC Tester Mac.app"
 The open test's HID listen is passive, and the EON Steel and G2 family only
 send when commanded, so 0 reports in 2 s is normal. **Send identify** is the
 round trip: it shows `IOHIDDeviceSetReport` works under the sandbox and that
-input reports arrive with the report-ID byte L8 expects.
+input reports arrive with the report-ID byte the USB HID stream expects.
 
 ## Reading results
 
@@ -117,13 +117,13 @@ input reports arrive with the report-ID byte L8 expects.
 | HID seize or shared `kIOReturnExclusiveAccess` | Another app has seized the device, e.g. SuuntoLink or Scubapro LogTRAK. A shared open returns the same code, and its reports are dropped until the seizing app closes. Quit the other app and rerun. A seize also succeeds over another app's non-exclusive open and silently cuts it off |
 | HID identify `SetReport FAILED` | The sandbox or the driver refused the output report. Record the IOReturn |
 | HID identify `no reply` | SetReport worked but no input report came back within 2 s. Check the computer is awake and in USB mode |
-| HID identify `byte 0 is …, expected report ID 0x3f` | The report-ID byte isn't in the buffer where L8's EON Steel reader expects it |
+| HID identify `byte 0 is …, expected report ID 0x3f` | The report-ID byte isn't in the buffer where the USB HID stream's EON Steel reader expects it |
 | HID or USB `kIOReturnNotPermitted` / `kIOReturnNotPrivileged` | The sandbox refused it (`device.usb`) or Input Monitoring denied it. Check System Settings > Privacy & Security |
 | Input Monitoring `unknown` before and after | No TCC request happened. A change to `granted` or `denied` after a HID test means the open asked for Input Monitoring |
 | USB plug-in fails at `IOCreatePlugInInterfaceForService` | The sandbox blocked the IOUSBLib user client. Record the IOReturn |
-| `USBDeviceOpen` ok, then `USBInterfaceOpen` `kIOReturnExclusiveAccess` | A kernel driver or dext owns interface 0, so L9 can't claim it. The interface line names the driver |
+| `USBDeviceOpen` ok, then `USBInterfaceOpen` `kIOReturnExclusiveAccess` | A kernel driver or dext owns interface 0, so the raw USB transport can't claim it. The interface line names the driver |
 | `device held by …` on an interface line | A device-level driver, such as a hub driver or a vendor dext, owns the whole device. Composite drivers only pick the configuration, so they don't count |
-| Cobalt `if0 class 0xff: no driver`, `USBInterfaceOpen` ok, `0x82 bulk in present, 0x02 bulk out present` | Nothing owns the vendor-class interface and the pipes match `atomics_cobalt.c`: the L9 assumption holds. If the Cobalt arrived unconfigured, read this from the "second run (configured)" row |
+| Cobalt `if0 class 0xff: no driver`, `USBInterfaceOpen` ok, `0x82 bulk in present, 0x02 bulk out present` | Nothing owns the vendor-class interface and the pipes match `atomics_cobalt.c`: the raw USB transport's assumption holds. If the Cobalt arrived unconfigured, read this from the "second run (configured)" row |
 | Cobalt `SetConfiguration` FAILED | The device came up unconfigured and couldn't be configured, so no interfaces exist |
 | BLE `unauthorized` | Bluetooth permission denied, or `device.bluetooth` missing |
 | Bookmark create fails | `files.bookmarks.app-scope` is missing. A stale resolve means the volume was renamed or reformatted |
@@ -185,7 +185,7 @@ This was a Mac16,12 (Apple M4) on macOS 26.4 (25E246). It ran the Release
 build's arm64 slice, launched with `open … --args --autorun` and from Terminal,
 at probe commit `dc1d5e2-dirty` (the probe wasn't committed yet).
 
-- The app is sandboxed and holds exactly the six L0 entitlements, with nothing
+- The app is sandboxed and holds exactly the six probe entitlements, with nothing
   else present. `--autorun` printed the report and exited 0 within 3 s. The
   full build logged no sandbox denials. The only denials all session were the
   two expected `deny file-read-data /dev/cu.*` in the `device.serial` control.
@@ -254,15 +254,15 @@ row. Paste the full report under "Raw reports".
 | Garmin Descent volume | mass storage, `GARMIN/Activity/*.fit` | files.user-selected.read-write, files.bookmarks.app-scope | | | | | |
 | BLE scan (any BLE dive computer) | BLE | device.bluetooth | | | | | |
 
-Decision: **v1** ships on, **flagged** ships labelled Beta behind the
-RemoteConfig kill switch, **dropped** doesn't ship. Record a vendor driver or a
+Decision: **v1** is supported, **flagged** is offered labelled Beta, and
+**dropped** isn't offered. Record a vendor driver or a
 vendor app that had to be quit in the error column.
 
-### Minimal entitlement set (feeds M49)
+### Minimal entitlement set
 
 Fill "Confirmed by" from the negative controls above.
 
-| Entitlement | Needed for | Confirmed by | M49 |
+| Entitlement | Needed for | Confirmed by | Notes |
 |---|---|---|---|
 | com.apple.security.app-sandbox | Mac App Store | | |
 | com.apple.security.device.serial | Serial cables, Bluetooth SPP | `EPERM` on open without it (baseline above) | |
