@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `NauticAutoSync`: hands-off Suunto Nautic/Ocean download. Waits for the watch, downloads only dives whose logbook id isn't synced yet, listens for the watch's `/Logbook/UnsynchronisedLogs` and `/Sync/BusyState` pushes while connected, and reconnects under a `ReconnectPolicy` that mirrors the Suunto app (4 s retry, 20/96 attempt caps, 120 min cool-down, loop detection), resuming with the dives still missing (#45)
 - `SuuntoNauticExplorer.subscribe`/`unsubscribe`/`waitForNotification` and `dc_device_t` overloads of `listDives`/`download`
 - DC Tester: Auto download switch on the device list and the Nautic device screen, with a live log that can be shared or copied as plain text
-- `SuuntoNauticExplorer.owningLogbookID(of:among:)`: which listed dive a download's bytes belong to, from the profile's GPS start time
+- `SuuntoNauticExplorer.owningLogbookID(of:among:)`: which listed dive a download's bytes belong to, from the profile's start time
 - DC Tester: a by-id download whose bytes belong to another dive says so in the status and the Last Response header, which always name the id requested
 - `DiveDataViewModel.lastDownloadInterruption`: set when a download delivered some dives and then failed, so the app can say "some dives couldn't be downloaded, reconnect and sync again"
 - `NauticAutoSync.Configuration.connectTimeout` (25 s): a connect attempt that hasn't finished is cancelled (`NauticSyncConnector.cancelConnect()`), the `watchUnreachable` event fires with a "press a button on the watch" hint, and the sync falls back to scanning; DC Tester shows the hint in its status (#29)
@@ -85,6 +85,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deco fields are only set on samples where the computer reported `DC_SAMPLE_DECO`; safety and deep stops now fill `decoStop`/`decoTime`
 - `SAMPLE_EVENT_SAFETYSTOP_VOLUNTARY` and `SAMPLE_EVENT_GASCHANGE2` map to their `DiveEvent` cases
 - macOS: libdivecomputer builds with `HAVE_IOKIT_SERIAL_IOSS_H` and `HAVE_CLOCK_GETTIME`. Serial rates with no `Bxxx` constant (Sporasub SP2 at 460800, Cochran EMC at 850000) are set with `IOSSIOSPEED` instead of failing with `DC_STATUS_UNSUPPORTED`, `DC_IOCTL_SERIAL_SET_LATENCY` sets the receive latency with `IOSSDATALAT`, and serial timeouts use the monotonic clock. iOS builds are unchanged. Details in `Docs/MACOS_BUILD_DEFINES.md`
+- Suunto Nautic/Ocean: `dc_parser_get_datetime` reports the wall clock a dive logged with `timezone` set to its offset, not UTC fields, and answers for a dive with no GPS fix. Where that record is unusable or a GPS fix contradicts it, the GPS start is reported as before, in UTC with `timezone` 0. `DiveData.datetime` and `SuuntoNauticExplorer`'s `startDate` stay the same instant (libdivecomputer submodule, deepsealabs/libdivecomputer#19)
 
 ### Fixed
 - `retrieveDiveLogs` appends each dive to `viewModel.dives` in that dive's own main-queue turn, so every dive is there when `completion` runs. The last dive used to land a turn after `completion` (and after `.completed`), so a host reading `dives` in `completion` missed the oldest new dive. A session download also numbers the dives, oldest first, before `completion`
