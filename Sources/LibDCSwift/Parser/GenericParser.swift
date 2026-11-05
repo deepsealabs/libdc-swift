@@ -500,23 +500,7 @@ public class GenericParser {
         // Create date from the parser's datetime, or the caller's fallback.
         let date: Date
         if haveParserDatetime {
-            var dateComponents = DateComponents()
-            dateComponents.year = Int(datetime.year)
-            dateComponents.month = Int(datetime.month)
-            dateComponents.day = Int(datetime.day)
-            dateComponents.hour = Int(datetime.hour)
-            dateComponents.minute = Int(datetime.minute)
-            dateComponents.second = Int(datetime.second)
-
-            // Most families report the dive's local wall-clock, so the
-            // components are interpreted in the device's local calendar. The
-            // Suunto Nautic is different: the parser states the offset its
-            // fields are at, so they name an absolute instant. Display is left
-            // to localize into the viewer's timezone.
-            let start = dcFamily == DC_FAMILY_SUUNTO_NAUTIC
-                ? instant(of: datetime)
-                : Calendar(identifier: .gregorian).date(from: dateComponents)
-            guard let d = start else {
+            guard let d = startDate(of: datetime, dcFamily: dcFamily) else {
                 throw ParserError.invalidParameters
             }
             date = d
@@ -567,6 +551,26 @@ public class GenericParser {
             fingerprint: fingerprint,
             vendorSamples: wrapper.data.vendorSamples
         )
+    }
+
+    /// A dive's start from its parser's datetime.
+    static func startDate(of datetime: dc_datetime_t, dcFamily: dc_family_t) -> Date? {
+        // Most families report the dive's local wall-clock, so the
+        // components are interpreted in the device's local calendar. The
+        // Suunto Nautic is different: the parser states the offset its
+        // fields are at, so they name an absolute instant. Display is left
+        // to localize into the viewer's timezone.
+        if dcFamily == DC_FAMILY_SUUNTO_NAUTIC {
+            return instant(of: datetime)
+        }
+        var dateComponents = DateComponents()
+        dateComponents.year = Int(datetime.year)
+        dateComponents.month = Int(datetime.month)
+        dateComponents.day = Int(datetime.day)
+        dateComponents.hour = Int(datetime.hour)
+        dateComponents.minute = Int(datetime.minute)
+        dateComponents.second = Int(datetime.second)
+        return Calendar(identifier: .gregorian).date(from: dateComponents)
     }
 
     /// The instant a parser's datetime names: its fields are a wall clock at

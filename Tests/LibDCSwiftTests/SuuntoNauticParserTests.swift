@@ -198,6 +198,17 @@ final class SuuntoNauticParserTests: XCTestCase {
         }
     }
 
+    func testANauticStartIsTheInstantTheParsersOffsetNames() {
+        // 13:48:11 UTC as the wall clock at +2:00 and -4:00; other families read the fields as local time.
+        for (hour, offset) in [(13, 0), (15, 7200), (9, -14400)] as [(Int32, Int32)] {
+            let datetime = dc_datetime_t(year: 2026, month: 8, day: 26, hour: hour, minute: 48, second: 11, timezone: offset)
+            XCTAssertEqual(GenericParser.startDate(of: datetime, dcFamily: DC_FAMILY_SUUNTO_NAUTIC)?.timeIntervalSince1970, 1_787_752_091)
+        }
+        let local = dc_datetime_t(year: 2026, month: 8, day: 26, hour: 15, minute: 48, second: 11, timezone: 7200)
+        let expected = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 15, minute: 48, second: 11))
+        XCTAssertEqual(GenericParser.startDate(of: local, dcFamily: DC_FAMILY_SHEARWATER_PETREL), expected)
+    }
+
     func testOwningLogbookIDNamesTheDiveTheBytesBelongTo() throws {
         // #29: dive 1788616918 was requested but these bytes came back.
         let data = try loadFixture()
