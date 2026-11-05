@@ -31,7 +31,7 @@ final class RejectedDiveTests: XCTestCase {
         DiveLogRetriever.CallbackContext(
             viewModel: DiveDataViewModel(), deviceName: "Suunto Ocean 260410000713",
             deviceUUID: UUID().uuidString, storedFingerprint: stored.map(fingerprint),
-            bluetoothManager: holder)
+            isCancelled: { [holder] in holder.isRetrievingLogs == false })
     }
 
     private func fingerprint(_ id: UInt32) -> Data {
@@ -198,7 +198,7 @@ final class RejectedDiveTests: XCTestCase {
     private func sync(_ dives: [(data: Data, id: UInt32)], stored: inout Data?, serial: String? = nil) -> Sync {
         let ctx = DiveLogRetriever.CallbackContext(
             viewModel: DiveDataViewModel(), deviceName: deviceType, deviceUUID: UUID().uuidString,
-            storedFingerprint: stored, bluetoothManager: holder)
+            storedFingerprint: stored, isCancelled: { [holder] in holder.isRetrievingLogs == false })
         ctx.deviceSerial = serial ?? self.serial
         var downloaded: [UInt32] = []
         for dive in dives {
@@ -316,7 +316,7 @@ final class RejectedDiveTests: XCTestCase {
         for _ in 0..<2 {
             let ctx = DiveLogRetriever.CallbackContext(
                 viewModel: DiveDataViewModel(), deviceName: deviceType, deviceUUID: UUID().uuidString,
-                storedFingerprint: stored, bluetoothManager: holder)
+                storedFingerprint: stored, isCancelled: { [holder] in holder.isRetrievingLogs == false })
             for (data, id) in watch { deliver(data, id: id, to: ctx) }
             let (o, unreadable) = DiveLogRetriever.settle(status: DC_STATUS_SUCCESS, family: DC_FAMILY_SUUNTO_NAUTIC, context: ctx)
             XCTAssertTrue(o.parseRejected, "with no key the dive can't be recognised again")
