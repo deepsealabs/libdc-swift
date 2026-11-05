@@ -145,6 +145,15 @@ reaches them.
   has, for example one another device downloaded. The first download on this host then stops there. It
   never replaces a stored fingerprint. Only seed from a download that completed: anything older than the
   seeded dive is never offered again.
+- **Rejected dives.** Both downloads remember the dives the parser rejected, so a dive rejected once holds
+  the fingerprint and a dive rejected again is skipped as unreadable (see `DiveDataViewModel.lastUnreadableDives`).
+  1.19 keyed these by `"<device type>|<serial>"`. A session download keys them by `storageKey(standIn:)`
+  and also reads and writes any 1.19 entry of the same family and serial. The `CBPeripheral` download
+  writes its 1.19 key and the identity key together. So a dive rejected over BLE counts as rejected once
+  already when a cable download meets it, and the other way round, and a dive either download parses is
+  forgotten by both. `migrateLegacyKeys` copies 1.19 entries to their identity key and keeps the 1.19 ones,
+  so going back a version still reads them. A serial-0 computer has no identity key to share, so its BLE and
+  cable rejections stay apart.
 
 Session downloads (`retrieveDiveLogs(session:)`) look up and commit by identity. The C lookup's context is
 the session, and it keys on DEVINFO instead of on the descriptor's name. The `CBPeripheral` download still
