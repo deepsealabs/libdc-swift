@@ -55,4 +55,17 @@ final class BLELinkStateTests: XCTestCase {
         }
         XCTAssertTrue(link.drop(peripheralState: .disconnecting), "a link tearing down is lost")
     }
+
+    func testFailedConnectLastsUntilTheNextConnect() {
+        let link = BLELinkState()
+        link.start()
+        XCTAssertFalse(link.connectFailed)
+
+        link.failConnect()
+        XCTAssertTrue(link.connectFailed)
+        XCTAssertFalse(link.isLost, "a connect that never came up isn't a dropped link")
+
+        link.start()
+        XCTAssertFalse(link.connectFailed)
+    }
 }

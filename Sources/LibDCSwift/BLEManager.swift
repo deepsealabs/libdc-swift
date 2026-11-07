@@ -190,6 +190,11 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             options: [CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier]
         )
     }
+
+    /// Tests: no central, so nothing touches Bluetooth; they drive the state CoreBluetooth's callbacks change.
+    init(withoutCentral: Void) {
+        super.init()
+    }
     
     // MARK: - Service Discovery
     @objc(getPeripheralReadyState)
@@ -445,16 +450,31 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         linkState.isLost
     }
 
+    /// True once CoreBluetooth failed the current connect, until the next one; the open's connect wait then ends.
+    @objc public func isConnectFailed() -> Bool {
+        linkState.connectFailed
+    }
+
+    /// Main. CoreBluetooth gave up connecting to `peripheral`. If that is this open's link, its error is the
+    /// open's failure, and the open stops waiting for a connect that won't come.
+    func connectFailed(_ peripheral: UUID, error: Error?) {
+        guard connectAttempt.link == peripheral else { return }
+        if let error {
+            connectAttempt.fail(error, from: peripheral)
+        }
+        linkState.failConnect()
+    }
+
     /// Main. The link the open device uses dropped: forget its characteristics and queued
     /// packets, and wake a read or write waiting on it so it answers `DC_STATUS_NODEVICE` now.
-    private func markLinkLost(_ peripheral: CBPeripheral, error: Error?) {
-        guard linkState.drop(peripheralState: peripheral.state) else {
-            logInfo("Disconnect from \(peripheral.name ?? "device") belongs to an earlier link (now \(peripheral.state.rawValue)); keeping the current one")
+    func markLinkLost(_ peripheral: UUID, name: String?, state: CBPeripheralState, error: Error?) {
+        guard linkState.drop(peripheralState: state) else {
+            logInfo("Disconnect from \(name ?? "device") belongs to an earlier link (now \(state.rawValue)); keeping the current one")
             return
         }
         // Our own cancel reports no error, so this is a drop.
         if let error {
-            connectAttempt.fail(error, from: peripheral.identifier)
+            connectAttempt.fail(error, from: peripheral)
         }
         writeCharacteristic = nil
         notifyCharacteristic = nil
@@ -468,7 +488,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         writeReadySemaphore.signal()
         writeConfirmSemaphore.signal()
         if openedDeviceDataPtr != nil {
-            logWarning("The link to \(peripheral.name ?? "device") dropped with a device open; it fails fast until the next connect")
+            logWarning("The link to \(name ?? "device") dropped with a device open; it fails fast until the next connect")
             hasLostLink = true
         }
     }
@@ -779,11 +799,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // A new generation: a cancel still scheduled for the closed link no longer applies,
         // and a lost link's fail-fast ends. Packets queued on the old link are not this one's.
         let startLink = {
-            self.linkState.start()
-            self.hasLostLink = false
             self.peripheral = peripheral
-            self.connectAttempt.connecting(to: peripheral.identifier)
-            self.isPeripheralReady = false
+            self.beginLink(to: peripheral.identifier)
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
             self.queue.sync { self.receivedPackets.removeAll() }
@@ -794,6 +811,14 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         return true  // Return immediately, connection status will be handled by delegate
     }
     
+    /// Main. The open connects to `peripheral`: a new link, whose errors are this open's.
+    func beginLink(to peripheral: UUID) {
+        linkState.start()
+        hasLostLink = false
+        connectAttempt.connecting(to: peripheral)
+        isPeripheralReady = false
+    }
+
     private func syncOnMain(_ work: () -> Void) {
         if Thread.isMainThread {
             work()
@@ -937,9 +962,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         logError("Failed to connect to \(peripheral.name ?? "Unknown Device"): \(error?.localizedDescription ?? "No error description")")
-        if let error {
-            connectAttempt.fail(error, from: peripheral.identifier)
-        }
+        connectFailed(peripheral.identifier, error: error)
     }
 
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -954,7 +977,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             self.isPeripheralReady = false
             self.connectedDevice = nil
             if self.peripheral?.identifier == peripheral.identifier {
-                self.markLinkLost(peripheral, error: error)
+                self.markLinkLost(peripheral.identifier, name: peripheral.name, state: peripheral.state, error: error)
             }
 
             // No auto-reconnect: a mid-session disconnect just surfaces as a
