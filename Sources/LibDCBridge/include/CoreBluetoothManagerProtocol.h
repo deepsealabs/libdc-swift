@@ -25,6 +25,8 @@
 - (BOOL)isIOCancelled;
 // YES from a drop of the current link until the next connect; link I/O then answers DC_STATUS_NODEVICE.
 - (BOOL)isLinkLost;
+// YES once CoreBluetooth failed the current connect, until the next one; the connect wait then ends.
+- (BOOL)isConnectFailed;
 @end
 
 #else
