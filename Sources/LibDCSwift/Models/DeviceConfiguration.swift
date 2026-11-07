@@ -365,6 +365,7 @@ import LibDCBridge
     ) -> Bool {
         logDebug("LibDCSwift build \(libDCSwiftBuildTag) -- attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
+        CoreBluetoothManager.sharedManager.beginOpenAttempt()
         closeOpenDeviceFirst(opening: name)
 
         // Set connecting flag to prevent auto-reconnect during connection attempt
