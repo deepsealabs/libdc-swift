@@ -17,6 +17,7 @@ final class BLELinkState {
     private let lock = NSLock()
     private var _generation = 0
     private var _lost = false
+    private var _connectFailed = false
 
     var generation: Int {
         lock.lock(); defer { lock.unlock() }
@@ -29,11 +30,24 @@ final class BLELinkState {
         return _lost
     }
 
+    /// True once CoreBluetooth gave up on this link's connect, until the next `start()`.
+    var connectFailed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _connectFailed
+    }
+
     /// A connect is starting a new link.
     func start() {
         lock.lock(); defer { lock.unlock() }
         _generation += 1
         _lost = false
+        _connectFailed = false
+    }
+
+    /// CoreBluetooth reported the connect failed; it won't retry, so nothing is left to wait for.
+    func failConnect() {
+        lock.lock(); defer { lock.unlock() }
+        _connectFailed = true
     }
 
     /// The link dropped. A disconnect that lands while the peripheral is already connecting or

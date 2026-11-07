@@ -126,4 +126,94 @@ final class BLEConnectionFailureTests: XCTestCase {
         XCTAssertFalse(attempt.fail(CBError(.connectionTimeout), from: watch))
         XCTAssertEqual(attempt.failure, .pairingRemoved)
     }
+
+    // MARK: - Through the manager
+
+    /// The manager an open runs against, with a link to `peripheral` as `connect(toDevice:)` starts it.
+    private func manager(connectingTo peripheral: UUID) -> CoreBluetoothManager {
+        let manager = CoreBluetoothManager(withoutCentral: ())
+        manager.beginOpenAttempt()
+        manager.beginLink(to: peripheral)
+        return manager
+    }
+
+    func testFailedConnectIsPublishedAndEndsTheConnectWait() {
+        let manager = manager(connectingTo: watch)
+        XCTAssertNil(manager.lastConnectionFailure)
+        XCTAssertFalse(manager.isConnectFailed())
+
+        manager.connectFailed(watch, error: CBError(.peerRemovedPairingInformation))
+
+        XCTAssertEqual(manager.lastConnectionFailure, .pairingRemoved)
+        XCTAssertTrue(manager.isConnectFailed(), "the bridge stops waiting out the rest of its 10 s")
+    }
+
+    func testFailedConnectWithoutAnErrorStillEndsTheWait() {
+        let manager = manager(connectingTo: watch)
+
+        manager.connectFailed(watch, error: nil)
+
+        XCTAssertNil(manager.lastConnectionFailure, "no error, no reason")
+        XCTAssertTrue(manager.isConnectFailed())
+    }
+
+    func testFailedConnectOfAnotherPeripheralIsIgnored() {
+        let manager = manager(connectingTo: watch)
+
+        manager.connectFailed(otherWatch, error: CBError(.peerRemovedPairingInformation))
+
+        XCTAssertNil(manager.lastConnectionFailure)
+        XCTAssertFalse(manager.isConnectFailed(), "this open's connect is still pending")
+    }
+
+    func testNextOpenClearsTheReasonAndItsConnectStartsWaiting() {
+        let manager = manager(connectingTo: watch)
+        manager.connectFailed(watch, error: CBError(.peerRemovedPairingInformation))
+
+        manager.beginOpenAttempt()
+        XCTAssertNil(manager.lastConnectionFailure, "an open that fails before connecting has no reason")
+
+        manager.beginLink(to: watch)
+        XCTAssertFalse(manager.isConnectFailed(), "a new connect waits again")
+    }
+
+    func testDropOfTheOpenLinkIsPublished() {
+        let manager = manager(connectingTo: watch)
+
+        manager.markLinkLost(watch, name: nil, state: .disconnected, error: CBError(.connectionTimeout))
+
+        XCTAssertEqual(manager.lastConnectionFailure, .bluetooth(.connectionTimeout))
+        XCTAssertTrue(manager.isLinkLost())
+    }
+
+    func testDisconnectOfAnEarlierLinkIsNotPublished() {
+        let manager = manager(connectingTo: watch)
+
+        manager.markLinkLost(watch, name: nil, state: .connected, error: CBError(.connectionTimeout))
+
+        XCTAssertNil(manager.lastConnectionFailure, "iOS reconnected the watch; the disconnect is the old link's")
+        XCTAssertFalse(manager.isLinkLost())
+    }
+
+    func testCloseIgnoresLateErrorsAndKeepsTheReason() {
+        let manager = manager(connectingTo: watch)
+        manager.connectFailed(watch, error: CBError(.peerRemovedPairingInformation))
+
+        manager.close()
+        manager.connectFailed(watch, error: CBError(.connectionTimeout))
+        manager.markLinkLost(watch, name: nil, state: .disconnected, error: CBError(.peripheralDisconnected))
+
+        XCTAssertEqual(manager.lastConnectionFailure, .pairingRemoved)
+    }
+
+    func testClosedLinkCannotFailTheNextOpenBeforeItConnects() {
+        let manager = manager(connectingTo: watch)
+        manager.close()
+
+        manager.beginOpenAttempt()
+        manager.connectFailed(watch, error: CBError(.peerRemovedPairingInformation))
+
+        XCTAssertNil(manager.lastConnectionFailure)
+        XCTAssertFalse(manager.isConnectFailed())
+    }
 }

@@ -12,6 +12,10 @@ static bool ble_link_lost(id<CoreBluetoothManagerProtocol> manager) {
     return [manager respondsToSelector:@selector(isLinkLost)] && [manager isLinkLost];
 }
 
+static bool ble_connect_failed(id<CoreBluetoothManagerProtocol> manager) {
+    return [manager respondsToSelector:@selector(isConnectFailed)] && [manager isConnectFailed];
+}
+
 dc_status_t ble_link_status(bool cancelled, bool lost) {
     if (cancelled) {
         return DC_STATUS_CANCELLED;
@@ -89,13 +93,20 @@ bool connectToBLEDevice(ble_object_t *io, const char *deviceAddress) {
             NSLog(@"Peripheral is ready for communication");
             break;
         }
+        // CoreBluetooth doesn't retry a failed connect, so the rest of the wait can't change the outcome.
+        if (ble_connect_failed(manager)) {
+            NSLog(@"Connect failed");
+            break;
+        }
         // Small sleep to avoid busy-waiting
         [NSThread sleepForTimeInterval:0.1];
     }
     
     // Final check if we're actually ready
     if (![manager getPeripheralReadyState]) {
-        NSLog(@"Timeout waiting for peripheral to be ready");
+        if (!ble_connect_failed(manager)) {
+            NSLog(@"Timeout waiting for peripheral to be ready");
+        }
         [manager close];
         return false;
     }

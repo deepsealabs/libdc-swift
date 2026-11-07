@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 ### Added
 - `CoreBluetoothManager.lastConnectionFailure` (`BLEConnectionFailure`): why the last connect failed or its link dropped, from CoreBluetooth's error code, so an app can explain an open that fails with `DC_STATUS_IO`. `.pairingRemoved` is "Peer removed pairing information": the dive computer dropped this device's pairing, and it won't connect again until the user forgets it in Bluetooth settings. Other CoreBluetooth errors come as `.bluetooth(CBError.Code)`. Published on main as soon as CoreBluetooth reports it, which for a failed connect is during the open's connect wait, so an app can observe it or read it on main in its own connect timeout, or once `openBLEDevice` returns false. A drop counts only when it is the current link's, the same check `isLinkLost` makes, and errors from a link already closed are ignored. Cleared when `openBLEDevice` starts, so an open that fails before connecting (Bluetooth off, no matching descriptor) never shows the previous open's reason
+- `CoreBluetoothManager.isConnectFailed()` (optional in `CoreBluetoothManagerProtocol`): true once CoreBluetooth failed the current connect. The open's connect wait ends as soon as CoreBluetooth reports the failure instead of running out its 10 s, so `openBLEDevice` returns false and releases the open for the next one sooner
 
 ## [1.22.0] - 2026-11-17
 ### Added
