@@ -333,10 +333,41 @@ public class GenericParser {
         fingerprint: Data? = nil,
         fallbackDate: Date? = nil
     ) throws -> DiveData {
+        try parseDiveData(
+            dcFamily: family.asDCFamily,
+            model: model,
+            diveNumber: diveNumber,
+            diveData: diveData,
+            dataSize: dataSize,
+            context: context,
+            fingerprint: fingerprint,
+            fallbackDate: fallbackDate,
+            clock: nil
+        )
+    }
+
+    /// The `DC_EVENT_CLOCK` pair a download reported: the device's tick count and the host time read with it.
+    struct DeviceClock: Equatable {
+        let devtime: UInt32
+        let systime: dc_ticks_t
+    }
+
+    /// `parseDiveData` for any `dc_family_t`, with the download's clock for parsers that date dives by device ticks.
+    static func parseDiveData(
+        dcFamily: dc_family_t,
+        model: UInt32,
+        diveNumber: Int,
+        diveData: UnsafePointer<UInt8>,
+        dataSize: Int,
+        context: OpaquePointer? = nil,
+        fingerprint: Data? = nil,
+        fallbackDate: Date? = nil,
+        clock: DeviceClock?
+    ) throws -> DiveData {
         var parser: OpaquePointer?
         
         // Create parser based on device family
-        let rc = create_parser_for_device(&parser, context, family.asDCFamily, model, diveData, size_t(dataSize))
+        let rc = create_parser_for_device(&parser, context, dcFamily, model, diveData, size_t(dataSize))
 
         guard rc == DC_STATUS_SUCCESS, parser != nil else {
             logError("Parser creation failed with status: \(rc)")
@@ -346,6 +377,14 @@ public class GenericParser {
         defer {
             dc_parser_destroy(parser)
         }
+
+        if let clock {
+            // Same rule as dc_parser_new: parsers without a clock hook ignore it.
+            let clockStatus = dc_parser_set_clock(parser, clock.devtime, clock.systime)
+            guard clockStatus == DC_STATUS_SUCCESS || clockStatus == DC_STATUS_UNSUPPORTED else {
+                throw ParserError.parserCreationFailed(clockStatus)
+            }
+        }
         
         // Get dive time
         var datetime = dc_datetime_t()
@@ -353,7 +392,7 @@ public class GenericParser {
         let haveParserDatetime = (datetimeStatus == DC_STATUS_SUCCESS)
 
         // Some families don't carry a datetime in the parsed stream (e.g. a
-        // Suunto Nautic dive with no surface GPS fix). The caller can supply a
+        // Suunto Nautic dive the parser finds no start in). The caller can supply a
         // fallback — typically derived from the dive's fingerprint/id — so the
         // dive still parses instead of throwing.
         guard haveParserDatetime || fallbackDate != nil else {
@@ -381,7 +420,7 @@ public class GenericParser {
             maxDepth: wrapper.data.maxDepth,
             sampled: wrapper.calculateAverageDepth(upTo: divetime))
         // Other families keep the sampled maximum; their field semantics aren't verified.
-        let maxDepth = family == .suuntoNautic
+        let maxDepth = dcFamily == DC_FAMILY_SUUNTO_NAUTIC
             ? resolveMaxDepth(field: getField(parser, type: DC_FIELD_MAXDEPTH), sampled: wrapper.data.maxDepth)
             : wrapper.data.maxDepth
 
@@ -461,27 +500,7 @@ public class GenericParser {
         // Create date from the parser's datetime, or the caller's fallback.
         let date: Date
         if haveParserDatetime {
-            var dateComponents = DateComponents()
-            dateComponents.year = Int(datetime.year)
-            dateComponents.month = Int(datetime.month)
-            dateComponents.day = Int(datetime.day)
-            dateComponents.hour = Int(datetime.hour)
-            dateComponents.minute = Int(datetime.minute)
-            dateComponents.second = Int(datetime.second)
-
-            // Most families report the dive's local wall-clock, so the
-            // components are interpreted in the device's local calendar. The
-            // Suunto Nautic is different: its datetime is derived from the GPS
-            // fix and returned as true UTC (dc_datetime_gmtime), so build the
-            // Date in UTC to preserve the correct absolute instant. The watch's
-            // local offset is not in the dive data (it's a device TZ setting the
-            // Suunto app reads separately, see issue #29), so display is left to
-            // localize into the viewer's timezone.
-            var calendar = Calendar(identifier: .gregorian)
-            if family == .suuntoNautic {
-                calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
-            }
-            guard let d = calendar.date(from: dateComponents) else {
+            guard let d = startDate(of: datetime, dcFamily: dcFamily) else {
                 throw ParserError.invalidParameters
             }
             date = d
@@ -532,6 +551,34 @@ public class GenericParser {
             fingerprint: fingerprint,
             vendorSamples: wrapper.data.vendorSamples
         )
+    }
+
+    /// A dive's start from its parser's datetime.
+    static func startDate(of datetime: dc_datetime_t, dcFamily: dc_family_t) -> Date? {
+        // Most families report the dive's local wall-clock, so the
+        // components are interpreted in the device's local calendar. The
+        // Suunto Nautic is different: the parser states the offset its
+        // fields are at, so they name an absolute instant. Display is left
+        // to localize into the viewer's timezone.
+        if dcFamily == DC_FAMILY_SUUNTO_NAUTIC {
+            return instant(of: datetime)
+        }
+        var dateComponents = DateComponents()
+        dateComponents.year = Int(datetime.year)
+        dateComponents.month = Int(datetime.month)
+        dateComponents.day = Int(datetime.day)
+        dateComponents.hour = Int(datetime.hour)
+        dateComponents.minute = Int(datetime.minute)
+        dateComponents.second = Int(datetime.second)
+        return Calendar(identifier: .gregorian).date(from: dateComponents)
+    }
+
+    /// The instant a parser's datetime names: its fields are a wall clock at
+    /// `timezone`'s offset from UTC. Nil when libdivecomputer can't resolve them.
+    static func instant(of datetime: dc_datetime_t) -> Date? {
+        var datetime = datetime
+        let ticks = dc_datetime_mktime(&datetime)
+        return ticks == -1 ? nil : Date(timeIntervalSince1970: TimeInterval(ticks))
     }
 
     /// Last-sample time overcounts on computers that keep logging at the

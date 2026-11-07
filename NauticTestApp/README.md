@@ -46,3 +46,10 @@ xcodegen generate
 
 Then open `NauticTestApp.xcodeproj`, set your own signing team, and
 build/archive for TestFlight as usual.
+
+## Mac sandbox probe
+
+The `DC Tester Mac` scheme builds a separate, sandboxed macOS app from
+`MacProbe/`. It checks serial, USB-HID, raw USB, BLE and Garmin volume access
+under the App Sandbox, and copies a markdown report for the hardware test
+matrix. See [`Docs/MAC_SANDBOX_PROBE.md`](../Docs/MAC_SANDBOX_PROBE.md).

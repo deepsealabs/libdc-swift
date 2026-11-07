@@ -18,7 +18,9 @@ public protocol NauticAutoSyncDelegate: AnyObject {
 ///   refresh covers firmware without those resources;
 /// - when the link drops or a dive comes back incomplete, reconnects under
 ///   `ReconnectPolicy` and resumes with the dives still missing, retrying a
-///   dive up to `retriesPerDive` times before moving on.
+///   dive up to `retriesPerDive` times before moving on. A dive the link
+///   dropped in carries on from the bytes already received when the link's
+///   device has a `SuuntoNauticResume` buffer.
 ///
 /// Never writes to the watch: dives stay unsynchronised for the Suunto app.
 public final class NauticAutoSync {
@@ -488,6 +490,9 @@ public final class NauticAutoSync {
             let id = pending[index]
             set(.downloading(index: index + 1, total: pending.count, id: id))
             let attempt = plan.recordAttempt(id)
+            if let bytes = try? await onLinkQueue({ link.resumableBytes(of: id) }) {
+                emit(.log("Dive \(id): carrying on from byte \(bytes) of an earlier attempt"))
+            }
             do {
                 let data = try await onLinkQueue { try link.download(id) }
                 deliver(id, data: data, complete: true, attempts: attempt, &plan)
@@ -738,53 +743,15 @@ private final class ConnectAttempt {
 public final class NauticLinkLease {
     public static let shared = NauticLinkLease()
 
-    private let lock = NSLock()
-    private var held = false
-    private var waiters: [(id: UUID, continuation: CheckedContinuation<Void, Error>)] = []
+    private let lease = DiveComputerSessionLease()
 
     public init() {}
 
-    public var isHeld: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return held
-    }
+    public var isHeld: Bool { lease.isHeld }
 
     /// Waits in turn; throws `CancellationError` if the task is cancelled meanwhile.
-    public func acquire() async throws {
-        let id = UUID()
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                lock.lock()
-                if Task.isCancelled {
-                    lock.unlock()
-                    continuation.resume(throwing: CancellationError())
-                } else if !held {
-                    held = true
-                    lock.unlock()
-                    continuation.resume()
-                } else {
-                    waiters.append((id, continuation))
-                    lock.unlock()
-                }
-            }
-        } onCancel: {
-            lock.lock()
-            let waiter = waiters.firstIndex { $0.id == id }.map { waiters.remove(at: $0) }
-            lock.unlock()
-            waiter?.continuation.resume(throwing: CancellationError())
-        }
-    }
+    public func acquire() async throws { try await lease.acquire() }
 
     /// Hands the lease to the next waiter, if any.
-    public func release() {
-        lock.lock()
-        guard !waiters.isEmpty else {
-            held = false
-            lock.unlock()
-            return
-        }
-        let next = waiters.removeFirst()
-        lock.unlock()
-        next.continuation.resume()
-    }
+    public func release() { lease.release() }
 }

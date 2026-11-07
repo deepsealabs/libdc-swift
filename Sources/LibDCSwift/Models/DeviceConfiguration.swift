@@ -149,8 +149,8 @@ import LibDCBridge
         ComputerModel(name: "Suunto Ocean",  family: .suuntoNautic, modelID: 1),
     ]
 
-    /// Represents the family of dive computers that support BLE communication.
-    public enum DeviceFamily: String, Codable, CaseIterable {
+    /// Every libdivecomputer family (`DC_FAMILY_*`); the raw values are storage strings.
+    public enum DeviceFamily: String, Codable, CaseIterable, Sendable {
         case suuntoEonSteel
         case shearwaterPetrel
         case hwOstc3
@@ -168,6 +168,36 @@ import LibDCBridge
         case seacScreen
         case halcyonSymbios
         case suuntoNautic
+        case suuntoSolution
+        case suuntoEon
+        case suuntoVyper
+        case suuntoVyper2
+        case suuntoD9
+        case reefnetSensus
+        case reefnetSensusPro
+        case reefnetSensusUltra
+        case uwatecAladin
+        case uwatecMemomouse
+        case uwatecMeridian
+        case uwatecG2
+        case oceanicVtpro
+        case oceanicVeo250
+        case maresNemo
+        case maresPuck
+        case maresDarwin
+        case hwOstc
+        case hwFrog
+        case cressiEdy
+        case cressiLeonardo
+        case zeagleN2ition3
+        case atomicsCobalt
+        case shearwaterPredator
+        case diveriteNitekq
+        case citizenAqualand
+        case cochranCommander
+        case tecdivingDivecomputereu
+        case liquivisionLynx
+        case sporasubSp2
 
         /// Converts the Swift enum to libdivecomputer's dc_family_t type
         public var asDCFamily: dc_family_t {
@@ -189,6 +219,36 @@ import LibDCBridge
             case .seacScreen: return DC_FAMILY_SEAC_SCREEN
             case .halcyonSymbios: return DC_FAMILY_HALCYON_SYMBIOS
             case .suuntoNautic: return DC_FAMILY_SUUNTO_NAUTIC
+            case .suuntoSolution: return DC_FAMILY_SUUNTO_SOLUTION
+            case .suuntoEon: return DC_FAMILY_SUUNTO_EON
+            case .suuntoVyper: return DC_FAMILY_SUUNTO_VYPER
+            case .suuntoVyper2: return DC_FAMILY_SUUNTO_VYPER2
+            case .suuntoD9: return DC_FAMILY_SUUNTO_D9
+            case .reefnetSensus: return DC_FAMILY_REEFNET_SENSUS
+            case .reefnetSensusPro: return DC_FAMILY_REEFNET_SENSUSPRO
+            case .reefnetSensusUltra: return DC_FAMILY_REEFNET_SENSUSULTRA
+            case .uwatecAladin: return DC_FAMILY_UWATEC_ALADIN
+            case .uwatecMemomouse: return DC_FAMILY_UWATEC_MEMOMOUSE
+            case .uwatecMeridian: return DC_FAMILY_UWATEC_MERIDIAN
+            case .uwatecG2: return DC_FAMILY_UWATEC_G2
+            case .oceanicVtpro: return DC_FAMILY_OCEANIC_VTPRO
+            case .oceanicVeo250: return DC_FAMILY_OCEANIC_VEO250
+            case .maresNemo: return DC_FAMILY_MARES_NEMO
+            case .maresPuck: return DC_FAMILY_MARES_PUCK
+            case .maresDarwin: return DC_FAMILY_MARES_DARWIN
+            case .hwOstc: return DC_FAMILY_HW_OSTC
+            case .hwFrog: return DC_FAMILY_HW_FROG
+            case .cressiEdy: return DC_FAMILY_CRESSI_EDY
+            case .cressiLeonardo: return DC_FAMILY_CRESSI_LEONARDO
+            case .zeagleN2ition3: return DC_FAMILY_ZEAGLE_N2ITION3
+            case .atomicsCobalt: return DC_FAMILY_ATOMICS_COBALT
+            case .shearwaterPredator: return DC_FAMILY_SHEARWATER_PREDATOR
+            case .diveriteNitekq: return DC_FAMILY_DIVERITE_NITEKQ
+            case .citizenAqualand: return DC_FAMILY_CITIZEN_AQUALAND
+            case .cochranCommander: return DC_FAMILY_COCHRAN_COMMANDER
+            case .tecdivingDivecomputereu: return DC_FAMILY_TECDIVING_DIVECOMPUTEREU
+            case .liquivisionLynx: return DC_FAMILY_LIQUIVISION_LYNX
+            case .sporasubSp2: return DC_FAMILY_SPORASUB_SP2
             }
         }
 
@@ -212,6 +272,36 @@ import LibDCBridge
             case DC_FAMILY_SEAC_SCREEN: self = .seacScreen
             case DC_FAMILY_HALCYON_SYMBIOS: self = .halcyonSymbios
             case DC_FAMILY_SUUNTO_NAUTIC: self = .suuntoNautic
+            case DC_FAMILY_SUUNTO_SOLUTION: self = .suuntoSolution
+            case DC_FAMILY_SUUNTO_EON: self = .suuntoEon
+            case DC_FAMILY_SUUNTO_VYPER: self = .suuntoVyper
+            case DC_FAMILY_SUUNTO_VYPER2: self = .suuntoVyper2
+            case DC_FAMILY_SUUNTO_D9: self = .suuntoD9
+            case DC_FAMILY_REEFNET_SENSUS: self = .reefnetSensus
+            case DC_FAMILY_REEFNET_SENSUSPRO: self = .reefnetSensusPro
+            case DC_FAMILY_REEFNET_SENSUSULTRA: self = .reefnetSensusUltra
+            case DC_FAMILY_UWATEC_ALADIN: self = .uwatecAladin
+            case DC_FAMILY_UWATEC_MEMOMOUSE: self = .uwatecMemomouse
+            case DC_FAMILY_UWATEC_MERIDIAN: self = .uwatecMeridian
+            case DC_FAMILY_UWATEC_G2: self = .uwatecG2
+            case DC_FAMILY_OCEANIC_VTPRO: self = .oceanicVtpro
+            case DC_FAMILY_OCEANIC_VEO250: self = .oceanicVeo250
+            case DC_FAMILY_MARES_NEMO: self = .maresNemo
+            case DC_FAMILY_MARES_PUCK: self = .maresPuck
+            case DC_FAMILY_MARES_DARWIN: self = .maresDarwin
+            case DC_FAMILY_HW_OSTC: self = .hwOstc
+            case DC_FAMILY_HW_FROG: self = .hwFrog
+            case DC_FAMILY_CRESSI_EDY: self = .cressiEdy
+            case DC_FAMILY_CRESSI_LEONARDO: self = .cressiLeonardo
+            case DC_FAMILY_ZEAGLE_N2ITION3: self = .zeagleN2ition3
+            case DC_FAMILY_ATOMICS_COBALT: self = .atomicsCobalt
+            case DC_FAMILY_SHEARWATER_PREDATOR: self = .shearwaterPredator
+            case DC_FAMILY_DIVERITE_NITEKQ: self = .diveriteNitekq
+            case DC_FAMILY_CITIZEN_AQUALAND: self = .citizenAqualand
+            case DC_FAMILY_COCHRAN_COMMANDER: self = .cochranCommander
+            case DC_FAMILY_TECDIVING_DIVECOMPUTEREU: self = .tecdivingDivecomputereu
+            case DC_FAMILY_LIQUIVISION_LYNX: self = .liquivisionLynx
+            case DC_FAMILY_SPORASUB_SP2: self = .sporasubSp2
             default: return nil
             }
         }
@@ -254,14 +344,15 @@ import LibDCBridge
     /// The manager holds one open device on one link. Opening another on top
     /// of it leaves the old link up and its state behind, so the new open can
     /// talk to the old watch (libdc-swift#75). Close it and wait for the
-    /// disconnect first, the same handoff auto download makes. A device an
-    /// auto download session holds the lease for is that session's to close.
+    /// disconnect first, the same handoff auto download makes. While an auto
+    /// download or a `DiveComputerSession` holds its lease, the device is that
+    /// session's to close.
     private static func closeOpenDeviceFirst(opening name: String) {
         guard !Thread.isMainThread else {
             logWarning("openBLEDevice called on main; not closing the open device first")
             return
         }
-        guard !NauticLinkLease.shared.isHeld else { return }
+        guard !NauticLinkLease.shared.isHeld, !DiveComputerSessionLease.shared.isHeld else { return }
         if let closed = CoreBluetoothManager.sharedManager.closeAndWaitForDisconnect() {
             logInfo("Closed \(closed) before opening \(name)")
         }
@@ -323,6 +414,11 @@ import LibDCBridge
         if status == DC_STATUS_SUCCESS, let data = deviceData {
             logDebug("Successfully opened device")
             logDebug("Device data pointer allocated at: \(String(describing: data))")
+
+            // Suunto Nautic/Ocean: a dive whose download a dropped link cut short carries on from there.
+            if let device = data.pointee.device {
+                SuuntoNauticResume.shared.attach(device, watch: name.isEmpty ? deviceAddress : name)
+            }
 
             // Store the configuration for future connections
             if let forced = forcedModel {
@@ -440,34 +536,73 @@ import LibDCBridge
         deviceDataPtr: UnsafeMutablePointer<device_data_t>,
         deviceName: String
     ) {
+        updateDeviceConfigurationFromHardware(
+            deviceAddress: deviceAddress,
+            deviceDataPtr: deviceDataPtr,
+            deviceName: deviceName,
+            storage: .shared,
+            requireKnownModel: false
+        )
+    }
+
+    /// With `requireKnownModel`, model 0 (not reported) or one no descriptor knows is never stored, since the next open looks it up.
+    static func updateDeviceConfigurationFromHardware(
+        deviceAddress: String,
+        deviceDataPtr: UnsafeMutablePointer<device_data_t>,
+        deviceName: String,
+        storage: DeviceStorage,
+        requireKnownModel: Bool,
+        transport: DCTransport? = nil,
+        locator: DiveComputerLocator? = nil
+    ) {
         guard deviceDataPtr.pointee.have_devinfo != 0 else {
             logDebug("Device info not yet available for \(deviceName)")
             return
         }
         
         let actualModel = deviceDataPtr.pointee.devinfo.model
+        func storable(_ family: DeviceFamily) -> Bool {
+            guard requireKnownModel else { return true }
+            guard actualModel != 0, hasDescriptor(family: family.asDCFamily, model: actualModel) else {
+                logWarning("Hardware reports model \(actualModel) for \(deviceName), which no descriptor knows; keeping the stored model")
+                return false
+            }
+            return true
+        }
         
-        if let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: deviceAddress) {
-            if storedDevice.model != actualModel {
+        if let storedDevice = storage.getStoredDevice(uuid: deviceAddress) {
+            if storedDevice.model != actualModel, storable(storedDevice.family) {
                 logInfo("🔄 Updating stored device model from \(storedDevice.model) to actual model \(actualModel) for \(deviceName)")
-                DeviceStorage.shared.storeDevice(
+                storage.storeDevice(
                     uuid: deviceAddress,
                     name: deviceName,
                     family: storedDevice.family,
-                    model: actualModel
+                    model: actualModel,
+                    transport: transport,
+                    locator: locator
                 )
             }
         } else if let deviceInfo = fromName(deviceName) {
-            if deviceInfo.model != actualModel {
+            if deviceInfo.model != actualModel, storable(deviceInfo.family) {
                 logInfo("🔄 Storing device with actual model \(actualModel) (name suggested \(deviceInfo.model)) for \(deviceName)")
-                DeviceStorage.shared.storeDevice(
+                storage.storeDevice(
                     uuid: deviceAddress,
                     name: deviceName,
                     family: deviceInfo.family,
-                    model: actualModel
+                    model: actualModel,
+                    transport: transport,
+                    locator: locator
                 )
             }
         }
+    }
+
+    /// Whether `find_descriptor_by_model` resolves this family and model.
+    static func hasDescriptor(family: dc_family_t, model: UInt32) -> Bool {
+        var descriptor: OpaquePointer?
+        guard find_descriptor_by_model(&descriptor, family, model) == DC_STATUS_SUCCESS, let descriptor else { return false }
+        dc_descriptor_free(descriptor)
+        return true
     }
     
     public static func fromName(_ name: String) -> (family: DeviceFamily, model: UInt32)? {

@@ -1,6 +1,9 @@
 // swift-tools-version:5.10
 import PackageDescription
 
+// Shared with LibDCBridge so libdc_has_custom_baud() sees what serial_posix.c was built with.
+let customBaudDefine = CSetting.define("HAVE_IOKIT_SERIAL_IOSS_H", .when(platforms: [.macOS]))
+
 let package = Package(
     name: "LibDCSwift",
     platforms: [
@@ -47,7 +50,10 @@ let package = Package(
                 // validation failure (e.g. in shearwater_common.c) surfaces
                 // to callers as a bare DC_STATUS_PROTOCOL with zero detail
                 // about which check actually failed.
-                .define("ENABLE_LOGGING")
+                .define("ENABLE_LOGGING"),
+                // Never HAVE_CONFIG_H (a local ./configure leaves an untracked config.h); other feature macros stay unset.
+                customBaudDefine,
+                .define("HAVE_CLOCK_GETTIME", .when(platforms: [.macOS]))
             ]
         ),
         .target(
@@ -56,14 +62,16 @@ let package = Package(
             path: "Sources/LibDCBridge",
             sources: [
                 "src/configuredc.c",
-                "src/BLEBridge.m"
+                "src/BLEBridge.m",
+                "src/transport_caps.c"
             ],
             publicHeadersPath: "include",
             cSettings: [
                 .headerSearchPath("include"),
                 .headerSearchPath("../../libdivecomputer/include"),
                 .headerSearchPath("../../libdivecomputer/src"),
-                .define("OBJC_OLD_DISPATCH_PROTOTYPES", to: "1")
+                .define("OBJC_OLD_DISPATCH_PROTOTYPES", to: "1"),
+                customBaudDefine
             ],
             linkerSettings: [
                 .linkedFramework("CoreBluetooth"),
@@ -90,10 +98,20 @@ let package = Package(
                 "DiveLogRetriever.swift",
                 "RetrievalCloseCoordinator.swift",
                 "SuuntoNauticExplorer.swift",
+                "SuuntoNauticResume.swift",
                 "AutoSync/AutoSyncPolicy.swift",
                 "AutoSync/NauticSyncLink.swift",
                 "AutoSync/NauticAutoSync.swift",
-                "AutoSync/CoreBluetoothNauticConnector.swift"
+                "AutoSync/CoreBluetoothNauticConnector.swift",
+                "Session/DiveComputerSession.swift",
+                "Transport/DCTransport.swift",
+                "Transport/DeviceCatalog.swift",
+                "Transport/DiveComputerIdentity.swift",
+                "Streams/DCIOStreamBackend.swift",
+                "Streams/DCCustomStream.swift",
+                "Streams/TapStream.swift",
+                "Streams/DCRecording.swift",
+                "Streams/ScriptedStream.swift"
             ],
             cSettings: [
                 .headerSearchPath("../LibDCBridge/include"),
@@ -123,7 +141,9 @@ let package = Package(
             path: "Tests/LibDCSwiftTests",
             resources: [
                 .copy("Fixtures/suunto_nautic_1787752091.sbem"),
-                .copy("Fixtures/logbook_entries_multi.bin")
+                .copy("Fixtures/logbook_entries_multi.bin"),
+                .copy("Fixtures/suunto_nautic_1787752091.golden.json"),
+                .copy("Fixtures/reefnet_sensus_synthetic.dcrec")
             ]
         )
     ]

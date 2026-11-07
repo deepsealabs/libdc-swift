@@ -23,7 +23,10 @@ public class DiveLogRetriever {
         var deviceSerial: String?
         var deviceTypeFromLibDC: String?  // Exact device type string from libdivecomputer
         var hasNewDives: Bool = false
-        weak var bluetoothManager: RetrievalFlagHolder?
+        /// Test seam standing in for `CoreBluetoothManager.isRetrievingLogs`.
+        let isCancelled: () -> Bool
+        /// Test seam: an isolated store instead of `DeviceStorage.shared`.
+        let deviceStorage: DeviceStorage
         var devicePtr: UnsafeMutablePointer<device_data_t>?
         var hasDeviceInfo: Bool = false
         var storedFingerprint: Data?
@@ -55,14 +58,61 @@ public class DiveLogRetriever {
         var detectedFamily: dc_family_t = DC_FAMILY_NULL
         var detectedModel: UInt32 = 0
 
-        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, bluetoothManager: RetrievalFlagHolder?, useFingerprint: Bool = true) {
+        let policy: RetrievalPolicy
+        /// The C lookup gave the device a stored fingerprint, so a walk that delivers nothing means no new dives.
+        var deviceHadStoredFingerprint: Bool = false
+        var hadStoredFingerprint: Bool { storedFingerprint != nil || deviceHadStoredFingerprint }
+        /// Test seam: wraps a session dive's parse, given the dive's fingerprint.
+        var parseHook: ParseHook?
+        /// The session a session download runs on; nil for the `CBPeripheral` download.
+        var session: DiveComputerSession?
+        /// The session's computer, from DEVINFO.
+        var identity: DiveComputerIdentity?
+        private var descriptorCheck: (family: dc_family_t, model: UInt32, known: Bool)?
+
+        init(viewModel: DiveDataViewModel, deviceName: String, deviceUUID: String, storedFingerprint: Data?, isCancelled: @escaping () -> Bool, deviceStorage: DeviceStorage = .shared, useFingerprint: Bool = true, policy: RetrievalPolicy = .legacy) {
             self.viewModel = viewModel
             self.deviceName = deviceName
             self.deviceUUID = deviceUUID
             self.storedFingerprint = storedFingerprint
-            self.bluetoothManager = bluetoothManager
+            self.isCancelled = isCancelled
+            self.deviceStorage = deviceStorage
             self.useFingerprint = useFingerprint
+            self.policy = policy
         }
+
+        /// A session parses with the hardware model when a descriptor knows it, else with the descriptor it opened.
+        func sessionParseTarget() -> (family: dc_family_t, model: UInt32)? {
+            let opened = devicePtr?.pointee.descriptor.map { (family: dc_descriptor_get_type($0), model: dc_descriptor_get_model($0)) }
+            guard detectedModel != 0, detectedFamily != DC_FAMILY_NULL else { return opened ?? configuredParseTarget() }
+            if descriptorCheck?.family != detectedFamily || descriptorCheck?.model != detectedModel {
+                descriptorCheck = (detectedFamily, detectedModel,
+                                   DeviceConfiguration.hasDescriptor(family: detectedFamily, model: detectedModel))
+            }
+            if descriptorCheck?.known == true { return (detectedFamily, detectedModel) }
+            return opened ?? (detectedFamily, detectedModel)
+        }
+
+        /// What the host stored or the name implies, for a device opened without a descriptor.
+        private func configuredParseTarget() -> (family: dc_family_t, model: UInt32)? {
+            if let stored = deviceStorage.getStoredDevice(uuid: deviceUUID) { return (stored.family.asDCFamily, stored.model) }
+            return DeviceConfiguration.fromName(deviceName).map { ($0.family.asDCFamily, $0.model) }
+        }
+
+        var deviceClock: GenericParser.DeviceClock? {
+            guard let devicePtr, devicePtr.pointee.have_clock != 0 else { return nil }
+            return GenericParser.DeviceClock(devtime: devicePtr.pointee.clock.devtime, systime: devicePtr.pointee.clock.systime)
+        }
+    }
+
+    typealias ParseHook = (_ fingerprint: Data, _ parse: () throws -> DiveData) throws -> DiveData
+
+    /// Whose contract a download follows.
+    enum RetrievalPolicy {
+        /// The `CBPeripheral` download's: it saves the fingerprint itself and completes with a `Bool`.
+        case legacy
+        /// `retrieveDiveLogs(session:)`'s: the host acknowledges the fingerprint, and the outcome is a `DiveDownloadResult`.
+        case session
     }
 
     /// A parsed record with no profile samples AND no meaningful duration is
@@ -138,7 +188,7 @@ public class DiveLogRetriever {
                         previouslyRejected: Set<Data> = []) -> DownloadOutcome {
         let rejections = splitRejections(context.rejectedFingerprints, previouslyRejected: previouslyRejected)
         return outcome(status: status, family: family, fingerprintMatched: context.fingerprintMatched,
-                       hasNewDives: context.hasNewDives, hadStoredFingerprint: context.storedFingerprint != nil,
+                       hasNewDives: context.hasNewDives, hadStoredFingerprint: context.hadStoredFingerprint,
                        emptyReadCount: context.emptyReadCount, rejectedCount: rejections.retry.count,
                        unreadableCount: rejections.unreadable.count)
     }
@@ -166,7 +216,7 @@ public class DiveLogRetriever {
 
     /// The key the device's fingerprint is stored under: the stored device's model name, else libdivecomputer's.
     static func fingerprintDeviceType(_ context: CallbackContext) -> String {
-        if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID),
+        if let stored = context.deviceStorage.getStoredDevice(uuid: context.deviceUUID),
            let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
             return modelInfo.name
         }
@@ -175,21 +225,35 @@ public class DiveLogRetriever {
 
     /// Judges a finished download against the dives earlier downloads rejected and remembers this one's rejections.
     /// Returns the dives given up as unreadable. Main thread.
-    static func settle(status: dc_status_t, family: dc_family_t,
-                       context: CallbackContext) -> (outcome: DownloadOutcome, unreadable: [Data]) {
-        guard let serial = context.deviceSerial else {
+    static func settle(status: dc_status_t, family: dc_family_t, context: CallbackContext,
+                       storage: DeviceFingerprintStorage = .shared) -> (outcome: DownloadOutcome, unreadable: [Data]) {
+        guard let memory = rejectionMemory(context, storage: storage) else {
             return (outcome(status: status, family: family, context: context), [])
         }
-        let deviceType = fingerprintDeviceType(context)
-        let storage = DeviceFingerprintStorage.shared
-        let previous = storage.rejectedDives(forDeviceType: deviceType, serial: serial)
+        let previous = memory.read()
         let remembered = rememberedRejections(previous: previous, rejected: context.rejectedFingerprints,
                                               delivered: context.deliveredFingerprints)
         if remembered != previous {
-            storage.setRejectedDives(remembered, forDeviceType: deviceType, serial: serial)
+            memory.write(remembered)
         }
         let unreadable = splitRejections(context.rejectedFingerprints, previouslyRejected: previous).unreadable
         return (outcome(status: status, family: family, context: context, previouslyRejected: previous), unreadable)
+    }
+
+    /// A session keys rejections by identity, the `CBPeripheral` download by device type and serial; the store keeps both in step.
+    private static func rejectionMemory(_ context: CallbackContext, storage: DeviceFingerprintStorage)
+        -> (read: () -> Set<Data>, write: (Set<Data>) -> Void)? {
+        if context.policy == .session {
+            let standIn = context.session?.fingerprintStandIn
+            guard let identity = context.identity ?? context.session?.identity,
+                  identity.storageKey(standIn: standIn) != nil else { return nil }
+            return ({ storage.rejectedDives(for: identity, standIn: standIn) },
+                    { storage.setRejectedDives($0, for: identity, standIn: standIn) })
+        }
+        guard let serial = context.deviceSerial else { return nil }
+        let deviceType = fingerprintDeviceType(context)
+        return ({ storage.rejectedDives(forDeviceType: deviceType, serial: serial) },
+                { storage.setRejectedDives($0, forDeviceType: deviceType, serial: serial) })
     }
 
     /// The status a parse failure carries; DATAFORMAT when it carries none.
@@ -238,14 +302,17 @@ public class DiveLogRetriever {
         UnsafeMutableRawPointer?
     ) -> Int32 = { data, size, fingerprint, fsize, userdata in
         guard let data = data,
-              let userdata = userdata,
-              let fingerprint = fingerprint else {
+              let userdata = userdata else {
             return 0
         }
         
         let context = Unmanaged<CallbackContext>.fromOpaque(userdata).takeUnretainedValue()
+        // Suunto Solution passes no fingerprint; a session still downloads those dives, it just can't commit one.
+        guard fingerprint != nil || context.policy == .session else {
+            return 0
+        }
         
-        if context.bluetoothManager?.isRetrievingLogs == false {
+        if context.isCancelled() {
             logInfo("🛑 Download cancelled")
             context.stoppedByHost = true
             return 0
@@ -266,21 +333,31 @@ public class DiveLogRetriever {
             if let desc = devicePtr.pointee.descriptor {
                 context.detectedFamily = dc_descriptor_get_type(desc)
             }
+            context.identity = context.session?.refreshIdentity()
 
             // Update stored device with serial for fingerprint cleanup when forgetting
-            if let serial = context.deviceSerial {
-                DeviceStorage.shared.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
+            if let session = context.session {
+                // A reported 0 is no serial: stored, it would match every unit of the family.
+                if let serial = context.identity?.serial {
+                    session.deviceStorage.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
+                }
+            } else if let serial = context.deviceSerial {
+                context.deviceStorage.updateDeviceSerial(uuid: context.deviceUUID, serial: serial)
             }
 
             // Firmware version reported alongside serial; a provenance snapshot
             // for the reading. 0 means the device reported none.
             let firmwareValue = devicePtr.pointee.devinfo.firmware
             if firmwareValue != 0 {
-                DeviceStorage.shared.updateDeviceFirmware(uuid: context.deviceUUID, firmware: String(firmwareValue))
+                context.deviceStorage.updateDeviceFirmware(uuid: context.deviceUUID, firmware: String(firmwareValue))
             }
 
             // Now that we have device info, load the stored fingerprint if we don't have it yet
-            if context.useFingerprint,
+            if context.useFingerprint, context.storedFingerprint == nil, let session = context.session {
+                if let identity = context.identity {
+                    context.storedFingerprint = context.viewModel.getFingerprint(for: identity, standIn: session.fingerprintStandIn)
+                }
+            } else if context.useFingerprint,
                context.storedFingerprint == nil,
                let deviceType = context.deviceTypeFromLibDC,
                let serial = context.deviceSerial {
@@ -288,16 +365,28 @@ public class DiveLogRetriever {
             }
 
             // Update storage if hardware tells us something different (e.g. 13 vs 9)
-            DeviceConfiguration.updateDeviceConfigurationFromHardware(
-                deviceAddress: context.deviceUUID,
-                deviceDataPtr: devicePtr,
-                deviceName: context.deviceName
-            )
+            if context.policy == .session {
+                DeviceConfiguration.updateDeviceConfigurationFromHardware(
+                    deviceAddress: context.deviceUUID,
+                    deviceDataPtr: devicePtr,
+                    deviceName: context.deviceName,
+                    storage: context.deviceStorage,
+                    requireKnownModel: true,
+                    transport: context.session?.identityTransport,
+                    locator: context.session?.locator
+                )
+            } else {
+                DeviceConfiguration.updateDeviceConfigurationFromHardware(
+                    deviceAddress: context.deviceUUID,
+                    deviceDataPtr: devicePtr,
+                    deviceName: context.deviceName
+                )
+            }
             
             context.hasDeviceInfo = true
         }
         
-        let fingerprintData = Data(bytes: fingerprint, count: Int(fsize))
+        let fingerprintData = fingerprint.map { Data(bytes: $0, count: Int(fsize)) } ?? Data()
 
         // Capture the FIRST dive's fingerprint (most recent dive on the device)
         // This is what we'll compare against on the next download
@@ -307,7 +396,8 @@ public class DiveLogRetriever {
         }
         
         // Check if this dive matches our stored fingerprint (already downloaded)
-        if let storedFingerprint = context.storedFingerprint {
+        if let storedFingerprint = context.storedFingerprint,
+           !(context.policy == .session && fingerprintData.isEmpty) {
             if storedFingerprint == fingerprintData {
                 logInfo("✨ Found matching fingerprint - all new dives downloaded")
                 context.fingerprintMatched = true
@@ -316,6 +406,70 @@ public class DiveLogRetriever {
         }
         
         // 4. Parse & Store Dive
+        let diveData: DiveData
+        do {
+            if context.policy == .session {
+                guard let target = context.sessionParseTarget() else {
+                    logError("Unknown device configuration for dive #\(context.logCount)")
+                    if context.rejectedFingerprints.isEmpty { context.rejectionStatus = DC_STATUS_UNSUPPORTED }
+                    // Recorded fingerprintless so it always holds: a configuration fault must never commit past the dive.
+                    context.rejectedFingerprints.append(Data())
+                    return 1
+                }
+                let parse = {
+                    try GenericParser.parseDiveData(
+                        dcFamily: target.family,
+                        model: target.model,
+                        diveNumber: context.logCount,
+                        diveData: data,
+                        dataSize: Int(size),
+                        fingerprint: fingerprintData.isEmpty ? nil : fingerprintData,
+                        fallbackDate: nauticFallbackDate(family: target.family, fingerprint: fingerprintData),
+                        clock: context.deviceClock
+                    )
+                }
+                diveData = try context.parseHook.map { try $0(fingerprintData, parse) } ?? parse()
+            } else {
+                guard let parsed = try parseLegacy(context, data: data, size: size, fingerprint: fingerprintData) else {
+                    return 0
+                }
+                diveData = parsed
+            }
+        } catch {
+            // Go on to the older dives; settle decides whether this one holds the fingerprint.
+            logError("❌ Failed to parse dive #\(context.logCount): \(error)")
+            if context.rejectedFingerprints.isEmpty { context.rejectionStatus = parseFailureStatus(error) }
+            context.rejectedFingerprints.append(fingerprintData)
+            return 1
+        }
+
+        // A record with no profile samples AND no duration isn't a real
+        // dive -- it's an empty read. Skip it: don't surface a phantom
+        // dive, don't count it as new, and (via emptyReadCount at
+        // completion) don't advance the fingerprint. logCount still
+        // advances so dive numbers stay unique. Both conditions are
+        // required so a genuine ultra-short dive (which still carries
+        // samples) is never dropped.
+        if isEmptyRead(diveData) {
+            logWarning("⚠️ Skipping empty/degenerate dive #\(context.logCount) (no samples, 0 duration)")
+            context.emptyReadCount += 1
+            context.logCount += 1
+            return 1
+        }
+
+        // One main-queue turn per dive, enqueued before the finish block, so completion sees every dive.
+        DispatchQueue.main.async {
+            context.viewModel.appendDownloadedDive(diveData)
+        }
+
+        context.hasNewDives = true
+        context.deliveredFingerprints.append(fingerprintData)
+        context.logCount += 1
+        return 1
+    }
+
+    /// Model selection for the `CBPeripheral` download; nil stops the walk (no configuration or family).
+    private static func parseLegacy(_ context: CallbackContext, data: UnsafePointer<UInt8>, size: UInt32, fingerprint fingerprintData: Data) throws -> DiveData? {
         var familyToUse: dc_family_t
         var modelToUse: UInt32
         
@@ -327,7 +481,7 @@ public class DiveLogRetriever {
         if context.detectedModel != 0 {
             familyToUse = context.detectedFamily
             modelToUse = context.detectedModel
-        } else if let stored = DeviceStorage.shared.getStoredDevice(uuid: context.deviceUUID) {
+        } else if let stored = context.deviceStorage.getStoredDevice(uuid: context.deviceUUID) {
             familyToUse = stored.family.asDCFamily
             modelToUse = stored.model
         } else if let deviceInfo = DeviceConfiguration.fromName(context.deviceName) {
@@ -335,66 +489,34 @@ public class DiveLogRetriever {
             modelToUse = deviceInfo.model
         } else {
             logError("❌ Unknown device configuration")
-            return 0
+            return nil
         }
 
         guard let deviceFamily = DeviceConfiguration.DeviceFamily(dcFamily: familyToUse) else {
             logError("❌ Failed to map C family ID \(familyToUse) to Swift DeviceFamily enum")
-            return 0
+            return nil
         }
 
-        // Suunto Nautic dives without a surface GPS fix carry no datetime in
-        // the parsed stream, but the fingerprint IS the dive's start time (a
-        // little-endian UNIX timestamp). Supply it as a fallback so the dive
-        // parses instead of throwing on the missing datetime.
-        var fallbackDate: Date? = nil
-        if deviceFamily == .suuntoNautic, fingerprintData.count == 4 {
-            let b = [UInt8](fingerprintData)
-            let id = UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
-            fallbackDate = Date(timeIntervalSince1970: TimeInterval(id))
-        }
+        return try GenericParser.parseDiveData(
+            family: deviceFamily,
+            model: modelToUse,
+            diveNumber: context.logCount,
+            diveData: data,
+            dataSize: Int(size),
+            fingerprint: fingerprintData,
+            fallbackDate: nauticFallbackDate(family: familyToUse, fingerprint: fingerprintData)
+        )
+    }
 
-        do {
-            let diveData = try GenericParser.parseDiveData(
-                family: deviceFamily,
-                model: modelToUse,
-                diveNumber: context.logCount,
-                diveData: data,
-                dataSize: Int(size),
-                fingerprint: fingerprintData,
-                fallbackDate: fallbackDate
-            )
-            
-            // A record with no profile samples AND no duration isn't a real
-            // dive -- it's an empty read. Skip it: don't surface a phantom
-            // dive, don't count it as new, and (via emptyReadCount at
-            // completion) don't advance the fingerprint. logCount still
-            // advances so dive numbers stay unique. Both conditions are
-            // required so a genuine ultra-short dive (which still carries
-            // samples) is never dropped.
-            if isEmptyRead(diveData) {
-                logWarning("⚠️ Skipping empty/degenerate dive #\(context.logCount) (no samples, 0 duration)")
-                context.emptyReadCount += 1
-                context.logCount += 1
-                return 1
-            }
-
-            DispatchQueue.main.async {
-                context.viewModel.appendDives([diveData])
-                context.viewModel.updateProgress(count: context.logCount)
-            }
-
-            context.hasNewDives = true
-            context.deliveredFingerprints.append(fingerprintData)
-            context.logCount += 1
-            return 1
-        } catch {
-            // Go on to the older dives; settle decides whether this one holds the fingerprint.
-            logError("❌ Failed to parse dive #\(context.logCount): \(error)")
-            if context.rejectedFingerprints.isEmpty { context.rejectionStatus = parseFailureStatus(error) }
-            context.rejectedFingerprints.append(fingerprintData)
-            return 1
-        }
+    /// A Suunto Nautic dive the parser finds no start in carries no datetime
+    /// in the parsed stream, but the fingerprint IS the dive's start time (a
+    /// little-endian UNIX timestamp). Supply it as a fallback so the dive
+    /// parses instead of throwing on the missing datetime.
+    private static func nauticFallbackDate(family: dc_family_t, fingerprint fingerprintData: Data) -> Date? {
+        guard family == DC_FAMILY_SUUNTO_NAUTIC, fingerprintData.count == 4 else { return nil }
+        let b = [UInt8](fingerprintData)
+        let id = UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
+        return Date(timeIntervalSince1970: TimeInterval(id))
     }
     
     private static let fingerprintLookup: @convention(c) (
@@ -440,33 +562,165 @@ public class DiveLogRetriever {
         }
         return nil
     }
+
+    /// A session's lookup: its context is the session, which keys the stored fingerprint by the computer's identity.
+    private static let sessionFingerprintLookup: @convention(c) (
+        UnsafeMutableRawPointer?,
+        UnsafePointer<CChar>?,
+        UnsafePointer<CChar>?,
+        UnsafeMutablePointer<Int>?
+    ) -> UnsafeMutablePointer<UInt8>? = { context, _, _, size in
+        guard let context, let size else { return nil }
+        size.pointee = 0
+        let session = Unmanaged<DiveComputerSession>.fromOpaque(context).takeUnretainedValue()
+        // malloc, not Swift's allocator: the C side free()s it.
+        guard let fingerprint = session.storedFingerprintForLookup(), !fingerprint.isEmpty,
+              let raw = malloc(fingerprint.count) else { return nil }
+        let buffer = raw.assumingMemoryBound(to: UInt8.self)
+        fingerprint.copyBytes(to: buffer, count: fingerprint.count)
+        size.pointee = fingerprint.count
+        return buffer
+    }
     
     private static var currentContext: CallbackContext?
-    
-    public static func retrieveDiveLogs(
+
+    /// Test seam: the retrieval path with no live `CBPeripheral`/`CoreBluetoothManager`.
+    static func retrieveDiveLogs(
             from devicePtr: UnsafeMutablePointer<device_data_t>,
-            device: CBPeripheral,
+            deviceName: String,
+            deviceUUID: String,
             viewModel: DiveDataViewModel,
-            bluetoothManager: CoreBluetoothManager,
+            isCancelled: @escaping () -> Bool,
+            markFinished: @escaping () -> Void,
+            closeCoordinator: RetrievalCloseCoordinator = RetrievalCloseCoordinator(),
+            deviceStorage: DeviceStorage = .shared,
             syncClock: Bool = false,
             useFingerprint: Bool = true,
             onProgress: ((Int, Int) -> Void)? = nil,
             completion: @escaping (Bool) -> Void
         ) {
-            markRetrievalStarted(bluetoothManager)
+            runRetrieval(
+                from: devicePtr,
+                deviceName: deviceName,
+                deviceUUID: deviceUUID,
+                viewModel: viewModel,
+                isCancelled: isCancelled,
+                deviceStorage: deviceStorage,
+                syncClock: syncClock,
+                useFingerprint: useFingerprint,
+                session: nil,
+                parseHook: nil,
+                closeCoordinator: closeCoordinator,
+                onProgress: onProgress,
+                noDevice: {
+                    viewModel.setDetailedError("No device connection found", status: DC_STATUS_IO)
+                    markFinished()
+                    completion(false)
+                },
+                finish: { context, enumStatus, family in
+                    finishLegacy(context, status: enumStatus, family: family, viewModel: viewModel,
+                                 markFinished: markFinished, completion: completion)
+                }
+            )
+        }
+
+    /// Saves no fingerprint itself: the result's `fingerprintCommit` (complete walks with no held dive; unreadable dives are skipped) waits for `acknowledge()`. Completes on main, with every dive in `viewModel.dives`, numbered.
+    public static func retrieveDiveLogs(
+            session: DiveComputerSession,
+            viewModel: DiveDataViewModel,
+            syncClock: Bool = false,
+            useFingerprint: Bool = true,
+            onProgress: ((Int, Int) -> Void)? = nil,
+            completion: @escaping (DiveDownloadResult) -> Void
+        ) {
+            retrieveDiveLogs(session: session, viewModel: viewModel, syncClock: syncClock, useFingerprint: useFingerprint,
+                             parseHook: nil, onProgress: onProgress, completion: completion)
+        }
+
+    static func retrieveDiveLogs(
+            session: DiveComputerSession,
+            viewModel: DiveDataViewModel,
+            syncClock: Bool = false,
+            useFingerprint: Bool = true,
+            parseHook: ParseHook?,
+            onProgress: ((Int, Int) -> Void)? = nil,
+            completion: @escaping (DiveDownloadResult) -> Void
+        ) {
+            func endEarly(_ outcome: DiveDownloadResult.Outcome, status: dc_status_t) {
+                DispatchQueue.main.async {
+                    if outcome == .cancelled {
+                        viewModel.lastDownloadStatus = statusName(DC_STATUS_CANCELLED)
+                        viewModel.updateProgress(.cancelled)
+                    }
+                    completion(DiveDownloadResult(outcome: outcome, status: status, divesDownloaded: 0,
+                                                  parseFailureCount: 0, fingerprintCommit: nil))
+                }
+            }
+            guard session.beginDownload() else {
+                logWarning("Session for \(session.displayName) is closed or already downloading")
+                return endEarly(.failed(DC_STATUS_INVALIDARGS), status: DC_STATUS_INVALIDARGS)
+            }
+            guard !session.isCancelled else {
+                session.endDownload()
+                return endEarly(.cancelled, status: DC_STATUS_CANCELLED)
+            }
+            runRetrieval(
+                from: session.devicePtr,
+                deviceName: session.displayName,
+                deviceUUID: session.storageKey,
+                viewModel: viewModel,
+                // An owner's close held back by this download stops it between dives too.
+                isCancelled: { session.isCancelled || session.closeCoordinator.isCloseDeferred(UnsafeMutableRawPointer(session.devicePtr)) },
+                deviceStorage: session.deviceStorage,
+                syncClock: syncClock,
+                useFingerprint: useFingerprint,
+                session: session,
+                parseHook: parseHook,
+                closeCoordinator: session.closeCoordinator,
+                onProgress: onProgress,
+                noDevice: {
+                    viewModel.setDetailedError("No device connection found", status: DC_STATUS_IO)
+                    session.endDownload()
+                    completion(DiveDownloadResult(outcome: .failed(DC_STATUS_IO), status: DC_STATUS_IO, divesDownloaded: 0,
+                                                  parseFailureCount: 0, fingerprintCommit: nil))
+                },
+                finish: { context, enumStatus, family in
+                    let result = finishSession(context, status: enumStatus, family: family, viewModel: viewModel)
+                    session.endDownload()
+                    completion(result)
+                }
+            )
+        }
+
+    /// The download both overloads share; `noDevice` and `finish` run on the main thread.
+    private static func runRetrieval(
+            from devicePtr: UnsafeMutablePointer<device_data_t>,
+            deviceName: String,
+            deviceUUID: String,
+            viewModel: DiveDataViewModel,
+            isCancelled: @escaping () -> Bool,
+            deviceStorage: DeviceStorage,
+            syncClock: Bool,
+            useFingerprint: Bool,
+            session: DiveComputerSession?,
+            parseHook: ParseHook?,
+            closeCoordinator: RetrievalCloseCoordinator,
+            onProgress: ((Int, Int) -> Void)?,
+            noDevice: @escaping () -> Void,
+            finish: @escaping (CallbackContext, dc_status_t, dc_family_t) -> Void
+        ) {
             let retrievalQueue = DispatchQueue(label: "com.libdcswift.retrieval", qos: .userInitiated)
+            let policy: RetrievalPolicy = session == nil ? .legacy : .session
             // Before the hop, so a close from here on can't free the device under the queued download.
-            bluetoothManager.beginRetrieval(devicePtr)
+            closeCoordinator.begin(UnsafeMutableRawPointer(devicePtr))
 
             retrievalQueue.async {
-                DispatchQueue.main.async { viewModel.resetProgress() }
-                
+                DispatchQueue.main.async { viewModel.applyResetProgress() }
+
                 guard let dcDevice = devicePtr.pointee.device else {
                     DispatchQueue.main.async {
-                        bluetoothManager.endRetrieval(devicePtr)
-                        viewModel.setDetailedError("No device connection found", status: DC_STATUS_IO)
-                        markRetrievalFinished(bluetoothManager)
-                        completion(false)
+                        releaseDevice(devicePtr, closeCoordinator: closeCoordinator, session: session)
+                        noDevice()
                     }
                     return
                 }
@@ -476,10 +730,8 @@ public class DiveLogRetriever {
                     DispatchQueue.main.async { viewModel.lastHandshakeAcknowledged = acknowledged }
                 }
 
-                let deviceName = device.name ?? "Unknown Device"
-
                 // Get device type from stored configuration (user-selected) for consistent fingerprint lookups
-                let storedDevice = DeviceStorage.shared.getStoredDevice(uuid: device.identifier.uuidString)
+                let storedDevice = deviceStorage.getStoredDevice(uuid: deviceUUID)
                 let deviceTypeForFingerprint: String
                 if let stored = storedDevice,
                    let modelInfo = DeviceConfiguration.supportedModels.first(where: { $0.modelID == stored.model && $0.family == stored.family }) {
@@ -489,24 +741,46 @@ public class DiveLogRetriever {
                 }
 
                 var storedFingerprint: Data? = nil
+                // Set on the device before the walk, for a family that never sends DEVINFO and so never runs the C lookup.
+                var devinfoLessFingerprint: Data?
                 // Try to get fingerprint if we already have device info (from a previous connection)
-                if devicePtr.pointee.have_devinfo != 0 {
+                if devicePtr.pointee.have_devinfo != 0, let session {
+                    if let identity = session.refreshIdentity() {
+                        if let serial = identity.serial {
+                            deviceStorage.updateDeviceSerial(uuid: deviceUUID, serial: serial)
+                        }
+                        if useFingerprint {
+                            storedFingerprint = viewModel.getFingerprint(for: identity, standIn: session.fingerprintStandIn)
+                        }
+                    }
+                } else if devicePtr.pointee.have_devinfo != 0 {
                     let serial = String(format: "%08x", devicePtr.pointee.devinfo.serial)
-                    DeviceStorage.shared.updateDeviceSerial(uuid: device.identifier.uuidString, serial: serial)
+                    deviceStorage.updateDeviceSerial(uuid: deviceUUID, serial: serial)
                     if useFingerprint {
                         storedFingerprint = viewModel.getFingerprint(forDeviceType: deviceTypeForFingerprint, serial: serial)
                     }
+                } else if let session, DiveComputerIdentity(descriptorOf: devicePtr, transport: session.identityTransport) != nil,
+                          let identity = session.refreshIdentity() {
+                    if useFingerprint {
+                        storedFingerprint = viewModel.getFingerprint(for: identity, standIn: session.fingerprintStandIn)
+                    }
+                    devinfoLessFingerprint = storedFingerprint ?? Data()
                 }
 
                 let context = CallbackContext(
                     viewModel: viewModel,
                     deviceName: deviceName,
-                    deviceUUID: device.identifier.uuidString,
+                    deviceUUID: deviceUUID,
                     storedFingerprint: storedFingerprint,
-                    bluetoothManager: bluetoothManager,
-                    useFingerprint: useFingerprint
+                    isCancelled: isCancelled,
+                    deviceStorage: deviceStorage,
+                    useFingerprint: useFingerprint,
+                    policy: policy
                 )
                 context.devicePtr = devicePtr
+                context.parseHook = parseHook
+                context.session = session
+                context.identity = session?.identity
                 
                 let contextPtr = UnsafeMutableRawPointer(Unmanaged.passRetained(context).toOpaque())
                 
@@ -526,22 +800,39 @@ public class DiveLogRetriever {
                 progressTimer.resume()
                 
                 if useFingerprint {
-                    devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
-                    devicePtr.pointee.lookup_fingerprint = fingerprintLookup
+                    if let session {
+                        session.retainLookupContext(viewModel)
+                        devicePtr.pointee.lookup_fingerprint = sessionFingerprintLookup
+                    } else {
+                        devicePtr.pointee.fingerprint_context = Unmanaged.passUnretained(viewModel).toOpaque()
+                        devicePtr.pointee.lookup_fingerprint = fingerprintLookup
+                    }
                 } else {
+                    session?.releaseLookupContext()
                     // An earlier download on this connection may have set one on the device.
                     devicePtr.pointee.fingerprint_context = nil
                     devicePtr.pointee.lookup_fingerprint = nil
                     dc_device_set_fingerprint(dcDevice, nil, 0)
                 }
+                if useFingerprint, let devinfoLessFingerprint {
+                    let status = devinfoLessFingerprint.withUnsafeBytes {
+                        dc_device_set_fingerprint(dcDevice, $0.bindMemory(to: UInt8.self).baseAddress, UInt32($0.count))
+                    }
+                    if status != DC_STATUS_SUCCESS {
+                        logWarning("Couldn't set the stored fingerprint on \(deviceName): DC_STATUS_\(statusName(status))")
+                    }
+                }
                 
                 let foreachStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
-                let closedMidDownload = bluetoothManager.isCloseDeferred(devicePtr)
+                let closedMidDownload = closeCoordinator.isCloseDeferred(UnsafeMutableRawPointer(devicePtr))
                 if closedMidDownload {
                     logWarning("Download stopped because the device is being closed")
                 }
                 let enumStatus = downloadStatus(foreach: foreachStatus, closedMidDownload: closedMidDownload,
                                                 stoppedByHost: context.stoppedByHost)
+                if policy == .session, useFingerprint, devicePtr.pointee.fingerprint != nil, devicePtr.pointee.fsize > 0 {
+                    context.deviceHadStoredFingerprint = true
+                }
 
                 // Log errors for debugging
                 if enumStatus != DC_STATUS_SUCCESS && enumStatus != DC_STATUS_PROTOCOL {
@@ -590,71 +881,208 @@ public class DiveLogRetriever {
                 let family = dc_device_get_type(dcDevice)
                 DispatchQueue.main.async {
                     // Before completion, so the host never sees a device a held-back close is about to free.
-                    bluetoothManager.endRetrieval(devicePtr)
-                    let (outcome, unreadable) = DiveLogRetriever.settle(status: enumStatus, family: family, context: context)
-                    let failureStatus = outcome.parseRejected ? context.rejectionStatus : enumStatus
-                    let downloadSucceeded = outcome.succeeded
-                    let shouldSaveFingerprint = outcome.saveFingerprint
-                    let emptyReadOnly = outcome.emptyReadOnly
-                    markRetrievalFinished(bluetoothManager)
-
-                    // Record a stable status key for analytics before routing.
-                    viewModel.lastDownloadStatus = emptyReadOnly
-                        ? "emptyRead"
-                        : (downloadSucceeded ? "success" : statusName(failureStatus))
-                    viewModel.lastDownloadInterruption = outcome.interrupted
-                        ? DiveDataViewModel.DownloadInterruption(status: statusName(failureStatus),
-                                                                 divesDownloaded: context.logCount - 1 - context.emptyReadCount,
-                                                                 divesRejected: context.rejectedCount)
-                        : nil
-                    viewModel.lastUnreadableDives = downloadSucceeded ? unreadable : []
-
-                    // Handle the outcome
-                    if !downloadSucceeded {
-                        if context.stoppedByHost {
-                            logInfo("Download stopped by the app after \(context.logCount - 1) dive(s); fingerprint kept")
-                            viewModel.updateProgress(.cancelled)
-                        } else if emptyReadOnly {
-                            logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
-                            viewModel.updateProgress(.emptyRead)
-                        } else if outcome.parseRejected {
-                            logWarning("⚠️ \(context.rejectedCount) dive(s) failed to parse: DC_STATUS_\(statusName(failureStatus)); fingerprint kept")
-                            viewModel.setDetailedError("\(context.rejectedCount) dive(s) couldn't be read. Sync again to try once more; a dive that still can't be read is then skipped.", status: failureStatus)
-                        } else if outcome.interrupted {
-                            logWarning("⚠️ Download interrupted after \(context.logCount - 1) dive(s): DC_STATUS_\(statusName(enumStatus)); fingerprint kept")
-                            viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: enumStatus)
-                        } else {
-                            viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(enumStatus)", status: enumStatus)
-                        }
-                        completion(false)
-                    } else {
-                        // Download completed successfully
-                        if !unreadable.isEmpty {
-                            logWarning("⚠️ \(unreadable.count) dive(s) failed to parse again; skipped as unreadable, the fingerprint moves past them")
-                        }
-                        if shouldSaveFingerprint, let lastFP = context.lastFingerprint, let serial = context.deviceSerial {
-                            // Use stored device configuration (user-selected) for consistent fingerprint storage
-                            let deviceType = fingerprintDeviceType(context)
-                            logInfo("✅ Download completed - \(context.logCount - 1) dive(s) downloaded")
-                            viewModel.saveFingerprint(lastFP, deviceType: deviceType, serial: serial)
-                            viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
-                            viewModel.updateProgress(.completed)
-                        } else if context.fingerprintMatched || (context.storedFingerprint != nil && !context.hasNewDives) {
-                            logInfo("ℹ️ No new dives found")
-                            viewModel.updateProgress(.noNewDives)
-                        } else {
-                            viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
-                            viewModel.updateProgress(.completed)
-                        }
-                        completion(true)
-                    }
-                    
+                    releaseDevice(devicePtr, closeCoordinator: closeCoordinator, session: session)
+                    finish(context, enumStatus, family)
                     context.isCompleted = true
                     Unmanaged<CallbackContext>.fromOpaque(contextPtr).release()
                 }
 
-                currentContext = context
+                // A session's view model must not outlive its close through this static.
+                if policy == .legacy {
+                    currentContext = context
+                }
             }
+        }
+
+    /// Ends the download's hold on the device and runs a close it held back; an adopted session lets go of the device first.
+    private static func releaseDevice(_ devicePtr: UnsafeMutablePointer<device_data_t>,
+                                      closeCoordinator: RetrievalCloseCoordinator, session: DiveComputerSession?) {
+        guard let heldClose = closeCoordinator.end(UnsafeMutableRawPointer(devicePtr)) else { return }
+        session?.ownerWillCloseDevice()
+        heldClose()
+    }
+
+    private static func finishLegacy(_ context: CallbackContext, status enumStatus: dc_status_t, family: dc_family_t,
+                                     viewModel: DiveDataViewModel, markFinished: () -> Void, completion: (Bool) -> Void) {
+        let (outcome, unreadable) = settle(status: enumStatus, family: family, context: context)
+        let failureStatus = outcome.parseRejected ? context.rejectionStatus : enumStatus
+        let downloadSucceeded = outcome.succeeded
+        let shouldSaveFingerprint = outcome.saveFingerprint
+        let emptyReadOnly = outcome.emptyReadOnly
+        markFinished()
+
+        // Record a stable status key for analytics before routing.
+        viewModel.lastDownloadStatus = emptyReadOnly
+            ? "emptyRead"
+            : (downloadSucceeded ? "success" : statusName(failureStatus))
+        viewModel.lastDownloadInterruption = outcome.interrupted
+            ? DiveDataViewModel.DownloadInterruption(status: statusName(failureStatus),
+                                                     divesDownloaded: context.logCount - 1 - context.emptyReadCount,
+                                                     divesRejected: context.rejectedCount)
+            : nil
+        viewModel.lastUnreadableDives = downloadSucceeded ? unreadable : []
+
+        // Handle the outcome
+        if !downloadSucceeded {
+            if context.stoppedByHost {
+                logInfo("Download stopped by the app after \(context.logCount - 1) dive(s); fingerprint kept")
+                viewModel.updateProgress(.cancelled)
+            } else if emptyReadOnly {
+                logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
+                viewModel.updateProgress(.emptyRead)
+            } else if outcome.parseRejected {
+                logWarning("⚠️ \(context.rejectedCount) dive(s) failed to parse: DC_STATUS_\(statusName(failureStatus)); fingerprint kept")
+                viewModel.setDetailedError("\(context.rejectedCount) dive(s) couldn't be read. Sync again to try once more; a dive that still can't be read is then skipped.", status: failureStatus)
+            } else if outcome.interrupted {
+                logWarning("⚠️ Download interrupted after \(context.logCount - 1) dive(s): DC_STATUS_\(statusName(enumStatus)); fingerprint kept")
+                viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: enumStatus)
+            } else {
+                viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(enumStatus)", status: enumStatus)
+            }
+            completion(false)
+        } else {
+            // Download completed successfully
+            if !unreadable.isEmpty {
+                logWarning("⚠️ \(unreadable.count) dive(s) failed to parse again; skipped as unreadable, the fingerprint moves past them")
+            }
+            if shouldSaveFingerprint, let lastFP = context.lastFingerprint, let serial = context.deviceSerial {
+                // Use stored device configuration (user-selected) for consistent fingerprint storage
+                let deviceType = fingerprintDeviceType(context)
+                logInfo("✅ Download completed - \(context.logCount - 1) dive(s) downloaded")
+                viewModel.saveFingerprint(lastFP, deviceType: deviceType, serial: serial)
+                viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
+                viewModel.updateProgress(.completed)
+            } else if context.fingerprintMatched || (context.storedFingerprint != nil && !context.hasNewDives) {
+                logInfo("ℹ️ No new dives found")
+                viewModel.updateProgress(.noNewDives)
+            } else {
+                viewModel.finalizeDiveNumbering()  // Sort by date and renumber (oldest = #1)
+                viewModel.updateProgress(.completed)
+            }
+            completion(true)
+        }
+    }
+
+    /// `outcome`'s rule, with a commit in place of the save: a cancel, a failure or a first parse rejection never commits.
+    static func sessionOutcome(_ outcome: DownloadOutcome, status: dc_status_t, heldCount: Int, rejectionStatus: dc_status_t,
+                               fingerprintMatched: Bool, hadStoredFingerprint: Bool, hasNewDives: Bool)
+        -> (outcome: DiveDownloadResult.Outcome, commits: Bool) {
+        if status == DC_STATUS_CANCELLED { return (.cancelled, false) }
+        guard outcome.succeeded else {
+            if outcome.emptyReadOnly { return (.emptyRead, false) }
+            if outcome.parseRejected { return (.parseRejected(count: heldCount, status: rejectionStatus), false) }
+            return (outcome.interrupted ? .interrupted(status) : .failed(status), false)
+        }
+        if outcome.saveFingerprint { return (.completed, true) }
+        if fingerprintMatched || (hadStoredFingerprint && !hasNewDives) { return (.noNewDives, false) }
+        return (.completed, false)
+    }
+
+    private static func finishSession(_ context: CallbackContext, status enumStatus: dc_status_t, family: dc_family_t,
+                                      viewModel: DiveDataViewModel) -> DiveDownloadResult {
+        let (settled, unreadable) = settle(status: enumStatus, family: family, context: context,
+                                           storage: viewModel.fingerprintStore)
+        let (outcome, commits) = sessionOutcome(settled, status: enumStatus,
+                                                heldCount: context.rejectedCount - unreadable.count,
+                                                rejectionStatus: context.rejectionStatus,
+                                                fingerprintMatched: context.fingerprintMatched,
+                                                hadStoredFingerprint: context.hadStoredFingerprint,
+                                                hasNewDives: context.hasNewDives)
+        let divesDownloaded = context.logCount - 1 - context.emptyReadCount
+        let skipped = settled.succeeded ? unreadable : []
+
+        var commit: FingerprintCommit?
+        let identity = context.identity ?? context.session?.identity
+        let standIn = context.session?.fingerprintStandIn
+        // No fingerprints (Suunto Solution), or no serial and no stand-in to key one by: every download fetches every dive.
+        if commits, let lastFP = context.lastFingerprint, !lastFP.isEmpty, let identity,
+           identity.storageKey(standIn: standIn) != nil {
+            commit = FingerprintCommit(fingerprint: lastFP, identity: identity, standIn: standIn, viewModel: viewModel)
+        }
+
+        let failureStatus = settled.parseRejected ? context.rejectionStatus : enumStatus
+        viewModel.lastDownloadInterruption = settled.interrupted
+            ? DiveDataViewModel.DownloadInterruption(status: statusName(failureStatus), divesDownloaded: divesDownloaded,
+                                                     divesRejected: context.rejectedCount)
+            : nil
+        viewModel.lastUnreadableDives = skipped
+        if context.hasNewDives {
+            viewModel.applyDiveNumbering()  // Sort by date and renumber (oldest = #1) before completion reads them
+        }
+        if !skipped.isEmpty {
+            logWarning("\(skipped.count) dive(s) failed to parse again; skipped as unreadable, the commit moves past them")
+        }
+
+        switch outcome {
+        case .completed:
+            logInfo("Download completed - \(divesDownloaded) dive(s) downloaded\(commit == nil ? "" : "; fingerprint awaits acknowledgement")")
+            viewModel.lastDownloadStatus = "success"
+            viewModel.updateProgress(.completed)
+        case .noNewDives:
+            logInfo("No new dives found")
+            viewModel.lastDownloadStatus = "success"
+            viewModel.updateProgress(.noNewDives)
+        case .cancelled:
+            logInfo("Download cancelled after \(divesDownloaded) dive(s); fingerprint kept")
+            viewModel.lastDownloadStatus = statusName(DC_STATUS_CANCELLED)
+            viewModel.updateProgress(.cancelled)
+        case .emptyRead:
+            logWarning("Download returned only empty reads (\(context.emptyReadCount)), likely BLE contention (official app holding the link)")
+            viewModel.lastDownloadStatus = "emptyRead"
+            viewModel.updateProgress(.emptyRead)
+        case .parseRejected(let count, let status):
+            logWarning("\(count) dive(s) failed to parse: DC_STATUS_\(statusName(status)); fingerprint kept")
+            viewModel.lastDownloadStatus = statusName(status)
+            viewModel.setDetailedError(parseRejectedMessage(rejected: count, downloaded: divesDownloaded), status: status)
+        case .interrupted(let status):
+            logWarning("Download interrupted after \(divesDownloaded) dive(s): DC_STATUS_\(statusName(status)); fingerprint kept")
+            viewModel.lastDownloadStatus = statusName(status)
+            viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: status)
+        case .failed(let status):
+            viewModel.lastDownloadStatus = statusName(status)
+            viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(status)", status: status)
+        }
+
+        return DiveDownloadResult(outcome: outcome, status: enumStatus, divesDownloaded: divesDownloaded,
+                                  parseFailureCount: context.rejectedCount, unreadableDives: skipped,
+                                  fingerprintCommit: commit, identity: identity)
+    }
+
+    /// The `CBPeripheral` download's words for a first rejection, plus what else arrived.
+    static func parseRejectedMessage(rejected: Int, downloaded: Int) -> String {
+        func dives(_ n: Int) -> String { n == 1 ? "1 dive" : "\(n) dives" }
+        let failed = "\(dives(rejected)) couldn't be read. Sync again to try once more; a dive that still can't be read is then skipped."
+        guard downloaded > 0 else { return failed }
+        return failed + " \(downloaded) other \(downloaded == 1 ? "dive was" : "dives were") downloaded."
+    }
+
+    /// Legacy contract, kept for existing callers: saves the fingerprint itself instead of offering a commit; prefer `retrieveDiveLogs(session:)`.
+    public static func retrieveDiveLogs(
+            from devicePtr: UnsafeMutablePointer<device_data_t>,
+            device: CBPeripheral,
+            viewModel: DiveDataViewModel,
+            bluetoothManager: CoreBluetoothManager,
+            syncClock: Bool = false,
+            useFingerprint: Bool = true,
+            onProgress: ((Int, Int) -> Void)? = nil,
+            completion: @escaping (Bool) -> Void
+        ) {
+            markRetrievalStarted(bluetoothManager)
+            retrieveDiveLogs(
+                from: devicePtr,
+                deviceName: device.name ?? "Unknown Device",
+                deviceUUID: device.identifier.uuidString,
+                viewModel: viewModel,
+                // Matches the pre-seam nil semantics: a deallocated manager reads as cancelled.
+                isCancelled: { [weak bluetoothManager] in bluetoothManager?.isRetrievingLogs == false },
+                markFinished: { markRetrievalFinished(bluetoothManager) },
+                closeCoordinator: bluetoothManager.retrievalClose,
+                deviceStorage: .shared,
+                syncClock: syncClock,
+                useFingerprint: useFingerprint,
+                onProgress: onProgress,
+                completion: completion
+            )
         }
 
     public static func getCurrentContext() -> CallbackContext? {

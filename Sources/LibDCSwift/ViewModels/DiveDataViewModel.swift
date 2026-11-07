@@ -67,8 +67,11 @@ public class DiveDataViewModel: ObservableObject {
     private let fingerprintKey = "DeviceFingerprints"
     private static weak var activeInstance: DiveDataViewModel?
     public weak var persistence: DiveDataPersistence?
-    
-    public init() {
+    /// Test seam: an isolated store instead of `DeviceFingerprintStorage.shared`. Session downloads keep their rejected dives here too.
+    let fingerprintStore: DeviceFingerprintStorage
+
+    public init(fingerprintStore: DeviceFingerprintStorage = .shared) {
+        self.fingerprintStore = fingerprintStore
         DiveDataViewModel.activeInstance = self
         DeviceConfiguration.setupContext()
     }
@@ -129,7 +132,7 @@ public class DiveDataViewModel: ObservableObject {
     ///   - serial: Serial number of the device
     /// - Returns: Stored fingerprint data if found, nil otherwise
     public func getFingerprint(forDeviceType deviceType: String, serial: String) -> Data? {
-        DeviceFingerprintStorage.shared.getFingerprint(
+        fingerprintStore.getFingerprint(
             forDeviceType: deviceType, 
             serial: serial
         )?.fingerprint
@@ -146,7 +149,7 @@ public class DiveDataViewModel: ObservableObject {
             return
         }
         
-        DeviceFingerprintStorage.shared.saveFingerprint(
+        fingerprintStore.saveFingerprint(
             fingerprint,
             deviceType: deviceType,
             serial: serial
@@ -159,7 +162,7 @@ public class DiveDataViewModel: ObservableObject {
     ///   - deviceType: Type/model of the device
     ///   - serial: Serial number of the device
     public func clearFingerprint(forDeviceType deviceType: String, serial: String) {
-        DeviceFingerprintStorage.shared.clearFingerprint(
+        fingerprintStore.clearFingerprint(
             forDeviceType: deviceType,
             serial: serial
         )
@@ -168,17 +171,40 @@ public class DiveDataViewModel: ObservableObject {
     
     /// Removes all stored fingerprints from persistent storage
     public func clearAllFingerprints() {
-        DeviceFingerprintStorage.shared.clearAllFingerprints()
+        fingerprintStore.clearAllFingerprints()
         objectWillChange.send()
     }
     
     public func getFingerprintInfo(forDeviceType type: String, serial: String) -> Date? {
-        DeviceFingerprintStorage.shared.getFingerprint(
+        fingerprintStore.getFingerprint(
             forDeviceType: type,
             serial: serial
         )?.timestamp
     }
-    
+
+    /// `DeviceFingerprintStorage.getFingerprint(for:standIn:)` on this view model's store.
+    public func getFingerprint(for identity: DiveComputerIdentity, standIn: String? = nil) -> Data? {
+        fingerprintStore.getFingerprint(for: identity, standIn: standIn)?.fingerprint
+    }
+
+    /// `DeviceFingerprintStorage.saveFingerprint(_:for:standIn:)` on this view model's store; an empty fingerprint is ignored.
+    public func saveFingerprint(_ fingerprint: Data, for identity: DiveComputerIdentity, standIn: String? = nil) {
+        guard !fingerprint.isEmpty else {
+            logWarning("Attempted to save an empty fingerprint - ignoring")
+            return
+        }
+        fingerprintStore.saveFingerprint(fingerprint, for: identity, standIn: standIn)
+        objectWillChange.send()
+    }
+
+    /// `DeviceFingerprintStorage.seedFingerprint(identity:data:standIn:)` on this view model's store.
+    @discardableResult
+    public func seedFingerprint(identity: DiveComputerIdentity, data: Data, standIn: String? = nil) -> Bool {
+        let seeded = fingerprintStore.seedFingerprint(identity: identity, data: data, standIn: standIn)
+        if seeded { objectWillChange.send() }
+        return seeded
+    }
+
     // Add this to your existing DownloadProgress enum if not already present
     public enum DownloadProgress: Equatable {
         case notStarted
@@ -287,11 +313,28 @@ public class DiveDataViewModel: ObservableObject {
     
     public func updateProgress(count: Int) {
         DispatchQueue.main.async {
-            // Don't show dive number during download since dives arrive newest-first
-            // and we renumber them after download (oldest = #1)
-            self.status = "Downloading dive \(count)..."
-            self.progress = .inProgress(count)
+            self.applyProgressCount(count)
         }
+    }
+
+    // A count can land after the download's end, or after a host's own .cancelled; it must not reopen either.
+    private func applyProgressCount(_ count: Int) {
+        switch progress {
+        case .notStarted, .inProgress: break
+        default: return
+        }
+        // Don't show dive number during download since dives arrive newest-first
+        // and we renumber them after download (oldest = #1)
+        status = "Downloading dive \(count)..."
+        progress = .inProgress(count)
+    }
+
+    /// The retriever's per-dive append, in that dive's own main-queue turn, so every dive is in `dives` before the download finishes.
+    func appendDownloadedDive(_ dive: DiveData) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        hasNewDives = true
+        dives.append(dive)
+        applyProgressCount(dives.count)
     }
     
     public func setError(_ message: String) {
@@ -372,18 +415,24 @@ public class DiveDataViewModel: ObservableObject {
     /// Call this after all dives have been downloaded.
     public func finalizeDiveNumbering() {
         DispatchQueue.main.async {
-            guard !self.dives.isEmpty else { return }
-
-            // Sort by datetime (oldest first)
-            self.dives.sort { $0.datetime < $1.datetime }
-
-            // Renumber starting from 1
-            for i in 0..<self.dives.count {
-                self.dives[i].number = i + 1
-            }
-
-            logInfo("📋 Finalized dive numbering: \(self.dives.count) dives (oldest=#1, newest=#\(self.dives.count))")
+            self.applyDiveNumbering()
         }
+    }
+
+    /// `finalizeDiveNumbering` in the caller's main-queue turn.
+    func applyDiveNumbering() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !dives.isEmpty else { return }
+
+        // Sort by datetime (oldest first)
+        dives.sort { $0.datetime < $1.datetime }
+
+        // Renumber starting from 1
+        for i in 0..<dives.count {
+            dives[i].number = i + 1
+        }
+
+        logInfo("📋 Finalized dive numbering: \(dives.count) dives (oldest=#1, newest=#\(dives.count))")
     }
     
     func forgetDevice(deviceType: String, serial: String) {
@@ -412,11 +461,17 @@ public class DiveDataViewModel: ObservableObject {
     
     public func resetProgress() {
         DispatchQueue.main.async {
-            self.progress = .notStarted
-            self.status = ""
-            self.lastDownloadInterruption = nil
-            self.lastHandshakeAcknowledged = nil
+            self.applyResetProgress()
         }
+    }
+
+    /// `resetProgress` in the caller's main-queue turn, so a download's reset lands ahead of what that download reports.
+    func applyResetProgress() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        progress = .notStarted
+        status = ""
+        lastDownloadInterruption = nil
+        lastHandshakeAcknowledged = nil
     }
 }
 
