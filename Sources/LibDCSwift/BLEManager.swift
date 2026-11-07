@@ -69,10 +69,11 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// The open device's link dropped. The device can't be used again: close it and connect
     /// again. Cleared when the next connect starts.
     @Published public private(set) var hasLostLink = false
-    /// Why the current connect failed or its link dropped, from CoreBluetooth's error. Nil until then, and
+    /// Why the current open's connect failed or its link dropped, from CoreBluetooth's error. Nil until then, and
     /// when CoreBluetooth reports no error (a device that never answers just runs out the connect wait).
-    /// Set on main when CoreBluetooth reports it, which for a failed connect is during the open's connect
-    /// wait: once `openBLEDevice` returns false, read it on main. Cleared when `connect(toDevice:)` starts.
+    /// Published on main as soon as CoreBluetooth reports it, which for a failed connect is during the open's
+    /// connect wait: observe it, or read it on main in your own timeout or once `openBLEDevice` returns false.
+    /// Cleared when `openBLEDevice` starts. Errors from a link already closed are ignored.
     @Published public private(set) var lastConnectionFailure: BLEConnectionFailure?
     private var connectAttempt = BLEConnectAttempt() {
         didSet {
@@ -453,7 +454,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         // Our own cancel reports no error, so this is a drop.
         if let error {
-            connectAttempt.fail(error, from: peripheral.identifier, current: self.peripheral?.identifier)
+            connectAttempt.fail(error, from: peripheral.identifier)
         }
         writeCharacteristic = nil
         notifyCharacteristic = nil
@@ -554,6 +555,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
     private func closeLink(clearDevicePtr: Bool) {
         isDisconnecting = true
+        onMain { self.connectAttempt.close() }
         // isPeripheralReady/connectedDevice are NOT published here when there's
         // an actual peripheral to disconnect — didDisconnectPeripheral is the
         // only truthful confirmation that CoreBluetooth has actually torn the
@@ -715,9 +717,12 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         isScanning = false
     }
     
-    @objc public func connect(toDevice address: String!) -> Bool {
-        // Before the guards: an attempt that fails without connecting isn't explained by the last one.
+    /// Starts an open: the last open's failure no longer applies, even if this one fails before it connects.
+    func beginOpenAttempt() {
         syncOnMain { self.connectAttempt.start() }
+    }
+
+    @objc public func connect(toDevice address: String!) -> Bool {
         // Must not touch CoreBluetooth before .poweredOn (see startScanning);
         // this call is blocking, so it fails rather than defers.
         guard isBluetoothReady else {
@@ -777,6 +782,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             self.linkState.start()
             self.hasLostLink = false
             self.peripheral = peripheral
+            self.connectAttempt.connecting(to: peripheral.identifier)
             self.isPeripheralReady = false
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
@@ -793,6 +799,15 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             work()
         } else {
             DispatchQueue.main.sync(execute: work)
+        }
+    }
+
+    // close() runs on any thread; it must not block on main, and a later open's main.sync still runs after it.
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
         }
     }
 
@@ -829,6 +844,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             self.writeCharacteristic = nil
             self.notifyCharacteristic = nil
             self.peripheral = nil
+            self.connectAttempt.close()
         }
         centralManager.cancelPeripheralConnection(peripheral)
     }
@@ -922,7 +938,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         logError("Failed to connect to \(peripheral.name ?? "Unknown Device"): \(error?.localizedDescription ?? "No error description")")
         if let error {
-            connectAttempt.fail(error, from: peripheral.identifier, current: self.peripheral?.identifier)
+            connectAttempt.fail(error, from: peripheral.identifier)
         }
     }
 

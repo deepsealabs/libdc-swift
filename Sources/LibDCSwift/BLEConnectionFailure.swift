@@ -25,20 +25,32 @@ public enum BLEConnectionFailure: Equatable, Sendable {
     }
 }
 
-/// The failure `CoreBluetoothManager` publishes as `lastConnectionFailure`. Main thread.
+/// The failure `CoreBluetoothManager` publishes as `lastConnectionFailure`, and the link it can come from. Main thread.
 struct BLEConnectAttempt {
     private(set) var failure: BLEConnectionFailure?
+    /// The peripheral this attempt connected to, until its link is closed.
+    private(set) var link: UUID?
 
-    /// A connect is starting: an earlier attempt's failure doesn't explain this one.
+    /// An open is starting: an earlier attempt's failure doesn't explain this one, even if it fails before connecting.
     mutating func start() {
         failure = nil
+        link = nil
     }
 
-    /// CoreBluetooth reported `error` for `peripheral` while the manager's link is to `current`.
-    /// An error for any other peripheral, or with no link, belongs to an earlier one and is ignored.
+    /// The open is connecting to `peripheral`; its errors are this attempt's.
+    mutating func connecting(to peripheral: UUID) {
+        link = peripheral
+    }
+
+    /// The link was closed. A late error from it isn't a failure; the one already recorded stays.
+    mutating func close() {
+        link = nil
+    }
+
+    /// CoreBluetooth reported `error` for `peripheral`. Recorded only while it is this attempt's open link.
     @discardableResult
-    mutating func fail(_ error: Error, from peripheral: UUID, current: UUID?) -> Bool {
-        guard peripheral == current else { return false }
+    mutating func fail(_ error: Error, from peripheral: UUID) -> Bool {
+        guard peripheral == link else { return false }
         failure = BLEConnectionFailure(error)
         return true
     }
