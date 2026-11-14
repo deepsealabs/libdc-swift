@@ -29,8 +29,10 @@ public protocol HIDDeviceIO: AnyObject {
 public enum HIDVendors {
     /// Suunto, Scubapro, and Keil (whose VID the Aladin Square uses; its other PIDs are debug probes).
     public static let vendorIDs: [UInt16] = [0x1493, 0x2e6c, 0xc251]
-    /// kHIDPage_GenericDesktop: keyboards and mice, whose open can raise the Input Monitoring prompt.
+    /// kHIDPage_GenericDesktop, where keyboards and mice are, whose open can raise the Input Monitoring prompt.
     static let genericDesktopUsagePage: UInt32 = 0x01
+    /// kHIDUsage_GD_Mouse, kHIDUsage_GD_Keyboard, kHIDUsage_GD_Keypad.
+    static let keyboardOrMouseUsages: Set<UInt32> = [0x02, 0x06, 0x07]
 }
 
 /// The IOHIDDevice for one registry entry. It is only ever opened per device, never through IOHIDManagerOpen.

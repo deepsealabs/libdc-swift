@@ -240,8 +240,57 @@ final class HIDCableSessionTests: XCTestCase {
         XCTAssertTrue(session.wasUnplugged, "the device's own removal callback says so, with no discovery")
         XCTAssertEqual(CableError(download: download, session: session), .unplugged)
         session.close()
-        XCTAssertFalse(device.calls.contains(.close(seize: true)), "an unplugged device isn't closed")
-        XCTAssertTrue(device.calls.contains(.cancelHandlerRan))
+        XCTAssertEqual(Array(device.calls.suffix(2)), [.cancelHandlerRan, .close(seize: true)], "closed after an unplug too, as hidapi does")
+    }
+
+    // MARK: - Silent after DEVINFO, with a fingerprint stored
+
+    /// Downloads once to learn the identity and stores a fingerprint under it, so the next download's lookup finds one.
+    private func storeFingerprint(_ endpoint: CableEndpoint, model: String, devices: FakeHIDFactory,
+                                  viewModel: DiveDataViewModel) throws {
+        let first = try openCable(endpoint, model: HIDFixtures.model(model), hidDevice: devices.factory)
+        let identity = try XCTUnwrap(downloadToEnd(first, viewModel: viewModel).result?.identity)
+        first.close()
+        XCTAssertTrue(viewModel.seedFingerprint(identity: identity, data: Data([0x01, 0x02, 0x03, 0x04])))
+    }
+
+    func testAnEONSteelSilentAfterDEVINFOIsNoResponseNotUpToDate() throws {
+        let computer = FakeEONSteel()
+        let devices = factory(computer)
+        let viewModel = DiveDataViewModel(fingerprintStore: DeviceFingerprintStorage(userDefaults: isolatedDefaults("fp")))
+        try storeFingerprint(HIDFixtures.eonSteel, model: "Suunto EON Steel", devices: devices, viewModel: viewModel)
+        computer.silentAfterInit = true
+        let session = try openCable(HIDFixtures.eonSteel, model: HIDFixtures.model("Suunto EON Steel"), hidDevice: devices.factory)
+        let download = try XCTUnwrap(downloadToEnd(session, viewModel: viewModel).result)
+        XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT), "not .noNewDives: the directory read timed out")
+        XCTAssertNil(download.fingerprintCommit)
+        XCTAssertEqual(CableError(download: download, session: session), .noResponse(.suuntoEonSteel))
+        XCTAssertEqual(computer.commands.last, Wire.cmdDirOpen)
+        session.close()
+    }
+
+    func testAG2SilentAfterDEVINFOIsNoResponseNotUpToDate() throws {
+        let computer = FakeG2(model: 0x32)
+        let devices = factory(computer)
+        let viewModel = DiveDataViewModel(fingerprintStore: DeviceFingerprintStorage(userDefaults: isolatedDefaults("fp")))
+        try storeFingerprint(HIDFixtures.g2, model: "Scubapro G2", devices: devices, viewModel: viewModel)
+        computer.silentFrom = 0xC6
+        let session = try openCable(HIDFixtures.g2, model: HIDFixtures.model("Scubapro G2"), hidDevice: devices.factory)
+        let download = try XCTUnwrap(downloadToEnd(session, viewModel: viewModel).result)
+        XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT))
+        XCTAssertNotNil(download.identity, "DEVINFO arrived before the silence")
+        XCTAssertEqual(CableError(download: download, session: session), .noResponse(.uwatecSmart))
+        session.close()
+    }
+
+    func testAClosedSessionsEndpointIsReadyAgain() throws {
+        let computer = FakeEONSteel()
+        let discovery = StaticCableDiscovery(endpoints: [HIDFixtures.eonSteel])
+        let session = try openCable(HIDFixtures.eonSteel, model: HIDFixtures.model("Suunto EON Steel"),
+                                    discovery: discovery, hidDevice: factory(computer).factory)
+        XCTAssertEqual(discovery.endpoints.map(\.status), [.busy])
+        session.close()
+        XCTAssertEqual(discovery.endpoints.map(\.status), [.ready], "the claim goes with the session's teardown")
     }
 
     func testCancellingTheSessionEndsABlockedRead() throws {
@@ -283,8 +332,9 @@ final class HIDCableSessionTests: XCTestCase {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
         XCTAssertLessThan(milliseconds(since: cancelled), 150)
-        XCTAssertFalse(lease.isHeld)
-        XCTAssertEqual(devices.devices.first?.calls.last, .close(seize: true))
+        // The cancel throws at once; the open lets go of the lease and the device as its read sees the cancel.
+        XCTAssertTrue(waitFor { !lease.isHeld })
+        XCTAssertTrue(waitFor { devices.devices.first?.calls.last == .close(seize: true) })
         XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(endpoint.id))
     }
 

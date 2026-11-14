@@ -146,14 +146,15 @@ final class HIDStreamTests: XCTestCase {
         XCTAssertEqual(read(stream, size: 64).bytes, Self.report(0x20), "the cut-off rest of the first report is gone, as in hidapi")
     }
 
-    func testATimeoutIsSuccessWithNothingRead() {
+    func testATimeoutIsTimeoutWithNothingReadAndAZeroTimeoutIsSuccess() {
         let device = FakeHIDDevice()
         let stream = started(device)
         XCTAssertEqual(stream.setTimeout(120), DC_STATUS_SUCCESS)
         let start = DispatchTime.now()
         let result = read(stream)
         let elapsed = milliseconds(since: start)
-        XCTAssertEqual(result.status, DC_STATUS_SUCCESS, "usbhid.c's hidapi read returns SUCCESS with 0 bytes on a timeout")
+        // hidapi's SUCCESS with 0 bytes becomes PROTOCOL in both drivers, which a fingerprinted download reads as no new dives.
+        XCTAssertEqual(result.status, DC_STATUS_TIMEOUT)
         XCTAssertEqual(result.bytes, [])
         XCTAssertGreaterThanOrEqual(elapsed, 115)
         XCTAssertLessThan(elapsed, 1000)
@@ -192,8 +193,21 @@ final class HIDStreamTests: XCTestCase {
         XCTAssertFalse(device.calls.contains { if case .setReport = $0 { return true } else { return false } })
 
         _ = stream.close()
-        XCTAssertFalse(device.calls.contains(.close(seize: true)), "an unplugged device is never closed, as in hidapi")
-        XCTAssertTrue(device.calls.contains(.cancelHandlerRan))
+        XCTAssertEqual(Array(device.calls.suffix(2)), [.cancelHandlerRan, .close(seize: true)],
+                       "hidapi closes an unplugged device too on macOS 10.10+")
+    }
+
+    func testTheRemovalReachesTheSessionBeforeTheReaderWakes() {
+        let device = FakeHIDDevice()
+        let stream = started(device)
+        _ = stream.setTimeout(-1)
+        let unplugged = Flag()
+        let sawUnplugFirst = Flag()
+        stream.setRemovalHandler { unplugged.value = true }
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(100)) { device.remove() }
+        XCTAssertEqual(read(stream).status, DC_STATUS_IO)
+        sawUnplugFirst.value = unplugged.value
+        XCTAssertTrue(sawUnplugFirst.value, "the read can't return before the session is marked unplugged")
     }
 
     func testRemovalWakesABlockedRead() {
@@ -247,15 +261,17 @@ final class HIDStreamTests: XCTestCase {
         XCTAssertEqual(write(stream, [0x00, 0x01]).actual, 2, "writes still go out after a cancel, so a quit command does")
     }
 
-    func testAtMostThirtyReportsWaitAndTheOldestGo() {
+    func testAFullInboxDropsTheOldestAndFailsTheNextRead() {
         let device = FakeHIDDevice()
         let stream = started(device)
-        for index in 0..<35 { device.deliver(Self.report(UInt8(index))) }
+        XCTAssertEqual(HIDStream.maxQueuedReports, 1024)
+        for index in 0..<(HIDStream.maxQueuedReports + 5) { device.deliver(Self.report(UInt8(truncatingIfNeeded: index))) }
         device.settle()
         XCTAssertEqual(stream.reportInbox.queuedCount, HIDStream.maxQueuedReports)
         XCTAssertEqual(stream.reportInbox.dropped, 5)
         _ = stream.setTimeout(0)
-        XCTAssertEqual(read(stream).bytes.first, 5, "hidapi drops the oldest")
+        XCTAssertEqual(read(stream).status, DC_STATUS_IO, "the loss fails the read where it happened")
+        XCTAssertEqual(read(stream).bytes.first, 5, "then the oldest kept report")
     }
 
     func testTheBufferIsTheDevicesLargestReportAndNeverUnder64() {

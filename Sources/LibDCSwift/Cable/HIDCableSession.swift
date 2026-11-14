@@ -80,6 +80,7 @@ extension DiveComputerSession {
         let isCancelled: () -> Bool = { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
         tap.setCancellation(isCancelled)
         hid.setCancellation(isCancelled)
+        session.onClosing { tap.beginClosing() }
         claims.claim(claimKey)
         session.onTeardown { claims.release(claimKey) }
         // The device itself says when it goes, so an unplug is seen without a discovery too.

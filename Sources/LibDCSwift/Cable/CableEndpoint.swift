@@ -255,15 +255,31 @@ public struct RegistrySnapshot: Hashable, Sendable {
         public var productName: String?
         /// kIOHIDPrimaryUsagePageKey.
         public var primaryUsagePage: UInt32?
+        /// kIOHIDPrimaryUsageKey.
+        public var primaryUsage: UInt32?
 
         public init(registryID: UInt64, vendorID: UInt16, productID: UInt16, serialNumber: String? = nil,
-                    productName: String? = nil, primaryUsagePage: UInt32? = nil) {
+                    productName: String? = nil, primaryUsagePage: UInt32? = nil, primaryUsage: UInt32? = nil) {
             self.registryID = registryID
             self.vendorID = vendorID
             self.productID = productID
             self.serialNumber = serialNumber
             self.productName = productName
             self.primaryUsagePage = primaryUsagePage
+            self.primaryUsage = primaryUsage
+        }
+
+        var isKeyboardOrMouse: Bool {
+            primaryUsagePage == HIDVendors.genericDesktopUsagePage
+                && primaryUsage.map(HIDVendors.keyboardOrMouseUsages.contains) == true
+        }
+
+        /// A keyboard or mouse interface of a composite device that has another HID interface with the same VID:PID. Nobody has
+        /// read the dive computers' real usage pages, so a computer's only interface is never hidden, whatever page it declares.
+        func isRedundantInputInterface(among devices: [HIDDevice]) -> Bool {
+            isKeyboardOrMouse && devices.contains {
+                $0.registryID != registryID && $0.vendorID == vendorID && $0.productID == productID && !$0.isKeyboardOrMouse
+            }
         }
     }
 
@@ -316,7 +332,7 @@ public struct RegistrySnapshot: Hashable, Sendable {
                                      status: .driverMissing)
             }
         let hid = hidDevices
-            .filter { $0.primaryUsagePage != HIDVendors.genericDesktopUsagePage }
+            .filter { !$0.isRedundantInputInterface(among: hidDevices) }
             .compactMap { device in
                 CableEndpoint.usbHIDDevice(registryID: device.registryID, vendorID: device.vendorID, productID: device.productID,
                                            serialNumber: device.serialNumber, productName: device.productName)
