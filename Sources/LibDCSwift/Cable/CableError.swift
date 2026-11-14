@@ -87,7 +87,7 @@ public enum CableError: Error, Equatable {
             guard portPresent else { self = .unplugged; return }
             // The paired port stays after the link goes, so a classic-Bluetooth failure never reads as an unplug.
             if case .classicBTSerial? = session.locator, status == DC_STATUS_TIMEOUT || status == DC_STATUS_IO {
-                self = session.cableReceivedBytes ? .bluetoothLinkLost : .bluetoothNotConnected
+                self = result.divesDownloaded > 0 || session.cableReceivedBytes ? .bluetoothLinkLost : .bluetoothNotConnected
                 return
             }
             guard let family else { self = .protocolError(status); return }

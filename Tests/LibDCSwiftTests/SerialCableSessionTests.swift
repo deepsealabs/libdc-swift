@@ -348,7 +348,8 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(milliseconds(since: start), Double(TapStream.bluetoothReadTimeoutFloorMilliseconds) - 100)
         XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT))
         XCTAssertEqual(CableError(download: download, session: session), .bluetoothNotConnected)
-        session.close()
+        closeAndWait(session)
+        XCTAssertEqual(CableError(download: download, session: session), .bluetoothNotConnected, "the same after the close")
     }
 
     func testASecondSessionIsRefusedBeforeThePortOpens() throws {
