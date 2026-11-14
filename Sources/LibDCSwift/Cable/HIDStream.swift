@@ -15,8 +15,9 @@ public final class HIDStream: DCUSBHIDStreamBackend {
         case closed
     }
 
-    /// hidapi's macOS backend keeps this many unread reports and drops the oldest.
-    public static let maxQueuedReports = 30
+    /// Unread reports kept before the oldest is dropped. hidapi keeps 30, but IOKit polls the IN pipe whatever the reader is doing,
+    /// and a G2 dump streams about one report a millisecond through the tap's logging; 1024 is 64 KiB.
+    public static let maxQueuedReports = 1024
     /// The longest a blocked read waits between cancel checks.
     public static let cancelCheckMilliseconds: Int32 = TapStream.cancelCheckMilliseconds
     /// libdivecomputer's HID drivers read 64-byte reports, so the buffer is never smaller even when the device doesn't say.
@@ -89,9 +90,10 @@ public final class HIDStream: DCUSBHIDStreamBackend {
         device.registerInputReportHandler(buffer: inbox.buffer, length: inbox.capacity) { [weak inbox] _, report in
             inbox?.deliver(report)
         }
+        // The session hears of the unplug first, so a reader the removal wakes already sees wasUnplugged.
         device.registerRemovalHandler { [weak self, weak inbox] in
-            inbox?.markRemoved()
             self?.deviceRemoved()
+            inbox?.markRemoved()
         }
         device.setDispatchQueue(queue)
         // The handler owns what IOKit may still touch until it runs: the device and the buffer reports are copied into.
@@ -101,10 +103,11 @@ public final class HIDStream: DCUSBHIDStreamBackend {
         device.setCancelHandler {
             guard let resources = owned else { return }
             owned = nil
-            // hidapi never closes an unplugged device.
-            if !resources.inbox.isRemoved {
-                let closed = resources.device.close(seize: seize)
-                if closed != kIOReturnSuccess { logWarning(String(format: "IOHIDDeviceClose failed: 0x%08x", closed)) }
+            // hidapi closes on macOS 10.10+ even after an unplug, since 10.15+ can crash without it; NotAttached or NoDevice is expected then.
+            let closed = resources.device.close(seize: seize)
+            if closed != kIOReturnSuccess {
+                let expected = resources.inbox.isRemoved && (closed == kIOReturnNotAttached || closed == kIOReturnNoDevice)
+                if !expected { logWarning(String(format: "IOHIDDeviceClose failed: 0x%08x", closed)) }
             }
             ran.signal()
         }
@@ -158,7 +161,9 @@ public final class HIDStream: DCUSBHIDStreamBackend {
         return DC_STATUS_SUCCESS
     }
 
-    /// One report per call, report-ID byte included as IOKit delivered it, cut to the buffer; a timeout is SUCCESS with nothing read, as hid_read_timeout's 0.
+    /// One report per call, report-ID byte included as IOKit delivered it, cut to the buffer. A positive timeout that passes is
+    /// `DC_STATUS_TIMEOUT`, not hidapi's SUCCESS with 0 bytes, which both HID drivers turn into PROTOCOL; a 0 timeout with nothing
+    /// waiting is still SUCCESS with 0 bytes. After a dropped report the next read is `DC_STATUS_IO`, so the loss fails where it happened.
     public func read(into buffer: UnsafeMutableRawBufferPointer, actual: inout Int) -> dc_status_t {
         actual = 0
         lock.lock()
@@ -183,11 +188,14 @@ public final class HIDStream: DCUSBHIDStreamBackend {
                 return DC_STATUS_SUCCESS
             case .removed:
                 return DC_STATUS_IO
+            case .overflowed:
+                logWarning("A HID report was dropped before it was read; failing this read")
+                return DC_STATUS_IO
             case .empty:
                 break
             }
             if timeout == 0 { return DC_STATUS_SUCCESS }
-            if let deadline, DispatchTime.now().uptimeNanoseconds >= deadline { return DC_STATUS_SUCCESS }
+            if let deadline, DispatchTime.now().uptimeNanoseconds >= deadline { return DC_STATUS_TIMEOUT }
         }
     }
 
@@ -209,7 +217,7 @@ public final class HIDStream: DCUSBHIDStreamBackend {
         return DC_STATUS_SUCCESS
     }
 
-    /// Cancels the device and waits for the cancel handler, which closes it (unless it was removed) and only then releases it and the report buffer.
+    /// Cancels the device and waits for the cancel handler, which closes it (after an unplug too, as hidapi does) and only then releases it and the report buffer.
     public func close() -> dc_status_t {
         lock.lock()
         let wasActive = currentState == .active
@@ -243,6 +251,8 @@ final class HIDReportInbox {
     enum Take: Equatable {
         case report(Int)
         case removed
+        /// A report was dropped since the last take; the reports after it are kept.
+        case overflowed
         case empty
     }
 
@@ -252,6 +262,7 @@ final class HIDReportInbox {
     private var reports: [[UInt8]] = []
     private var removed = false
     private var droppedCount = 0
+    private var unreportedDrop = false
 
     init(capacity: Int) {
         self.capacity = capacity
@@ -285,6 +296,7 @@ final class HIDReportInbox {
         if reports.count >= HIDStream.maxQueuedReports {
             reports.removeFirst()
             droppedCount += 1
+            unreportedDrop = true
             logWarning("Dropped the oldest unread HID report: more than \(HIDStream.maxQueuedReports) are waiting")
         }
         reports.append(bytes)
@@ -299,10 +311,14 @@ final class HIDReportInbox {
         condition.unlock()
     }
 
-    /// The oldest report, cut to `buffer`, waiting once for up to `milliseconds` when there is none; removal reads after the reports that came before it.
+    /// The oldest report, cut to `buffer`, waiting once for up to `milliseconds` when there is none; removal reads after the reports that came before it, and a drop reads once before them.
     func take(into buffer: UnsafeMutableRawBufferPointer, waitingAtMost milliseconds: Int32) -> Take {
         condition.lock()
         defer { condition.unlock() }
+        if unreportedDrop {
+            unreportedDrop = false
+            return .overflowed
+        }
         if reports.isEmpty, !removed, milliseconds > 0 {
             _ = condition.wait(until: Date(timeIntervalSinceNow: Double(milliseconds) / 1000))
         }

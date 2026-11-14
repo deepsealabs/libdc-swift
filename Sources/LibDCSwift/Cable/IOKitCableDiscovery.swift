@@ -198,7 +198,9 @@ public final class IOKitRegistrySource: RegistrySource {
             }
         }
         let hid = hidWatch?.devices ?? Self.hidDevices(in: Self.makeHIDManager())
-        return RegistrySnapshot(ports: ports, cableDevices: cables, hidDevices: hid)
+        let snapshot = RegistrySnapshot(ports: ports, cableDevices: cables, hidDevices: hid)
+        Self.logHIDMatches(snapshot)
+        return snapshot
     }
 
     public func startWatching(on queue: DispatchQueue, changed: @escaping (RegistryChange) -> Void) -> Bool {
@@ -254,6 +256,25 @@ public final class IOKitRegistrySource: RegistrySource {
 
     // MARK: - HID
 
+    /// Per vendor, how many HID devices the manager matched and how many became endpoints, so a log tells "nothing enumerated"
+    /// (a sandbox without device.usb, say) from "enumerated but not a known model". Logged only when it changes.
+    private static let hidLogLock = NSLock()
+    private static var lastHIDLog = ""
+
+    static func logHIDMatches(_ snapshot: RegistrySnapshot) {
+        let listed = Set(snapshot.endpoints.compactMap { $0.transport == .usbHID ? $0.registryID : nil })
+        let line = HIDVendors.vendorIDs.map { vendor -> String in
+            let matched = snapshot.hidDevices.filter { $0.vendorID == vendor }
+            let kept = matched.filter { listed.contains($0.registryID) }.count
+            return String(format: "%04x: %d matched, %d listed, %d rejected", vendor, matched.count, kept, matched.count - kept)
+        }.joined(separator: "; ")
+        hidLogLock.lock()
+        let changed = line != lastHIDLog
+        lastHIDLog = line
+        hidLogLock.unlock()
+        if changed { logInfo("USB HID discovery: \(line)") }
+    }
+
     // Matching only these vendors means no keyboard or mouse is ever enumerated, so nothing here can raise Input Monitoring.
     static func makeHIDManager() -> IOHIDManager {
         let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
@@ -276,7 +297,8 @@ public final class IOKitRegistrySource: RegistrySource {
             vendorID: UInt16(truncatingIfNeeded: number(kIOHIDVendorIDKey)?.intValue ?? 0),
             productID: UInt16(truncatingIfNeeded: number(kIOHIDProductIDKey)?.intValue ?? 0),
             serialNumber: string(kIOHIDSerialNumberKey), productName: string(kIOHIDProductKey),
-            primaryUsagePage: number(kIOHIDPrimaryUsagePageKey).map { UInt32(truncatingIfNeeded: $0.intValue) })
+            primaryUsagePage: number(kIOHIDPrimaryUsagePageKey).map { UInt32(truncatingIfNeeded: $0.intValue) },
+            primaryUsage: number(kIOHIDPrimaryUsageKey).map { UInt32(truncatingIfNeeded: $0.intValue) })
     }
 
     /// HID devices as they come and go, kept as they read on arrival because a removed device may no longer answer property reads.

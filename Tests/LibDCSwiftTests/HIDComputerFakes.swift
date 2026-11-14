@@ -169,8 +169,11 @@ final class FakeG2: @unchecked Sendable {
     let serial: UInt32
     let devtime: UInt32
     var silent = false
+    /// Stops answering from this command on: 0xC6 (CMD_SIZE) is the first one after DEVINFO.
+    var silentFrom: UInt8?
 
     private let lock = NSLock()
+    private var wentSilent = false
     private var commandLog: [UInt8] = []
     private var badReports: [String] = []
 
@@ -203,7 +206,8 @@ final class FakeG2: @unchecked Sendable {
         }
         let command = bytes[1]
         commandLog.append(command)
-        if silent { return [] }
+        if command == silentFrom { wentSilent = true }
+        if silent || wentSilent { return [] }
         let payload: [UInt8]
         switch command {
         case 0x1B, 0x1C: payload = [0x01]

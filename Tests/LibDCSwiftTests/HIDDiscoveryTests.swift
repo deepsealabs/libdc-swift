@@ -18,11 +18,12 @@ final class HIDDiscoveryTests: XCTestCase {
                                                                 productName: "Ambit3")
     private static let debugProbe = RegistrySnapshot.HIDDevice(registryID: 0xDAB, vendorID: 0xc251, productID: 0xf002,
                                                                productName: "CMSIS-DAP")
-    private static let keyboardPage = RegistrySnapshot.HIDDevice(registryID: 0xBAD, vendorID: 0x1493, productID: 0x0033,
-                                                                 primaryUsagePage: 0x01)
+    // A keyboard interface beside the EON Steel's own, as a composite device would have.
+    private static let keyboardBesideSteel = RegistrySnapshot.HIDDevice(registryID: 0xBAD, vendorID: 0x1493, productID: 0x0030,
+                                                                        primaryUsagePage: 0x01, primaryUsage: 0x06)
 
     func testOnlyKnownHIDModelsBecomeEndpoints() throws {
-        let snapshot = RegistrySnapshot(hidDevices: [Self.suuntoWatch, Self.g2, Self.debugProbe, Self.eonSteel, Self.keyboardPage,
+        let snapshot = RegistrySnapshot(hidDevices: [Self.suuntoWatch, Self.g2, Self.debugProbe, Self.eonSteel, Self.keyboardBesideSteel,
                                                      Self.aladinSquare, Self.d5])
         let endpoints = snapshot.endpoints
         XCTAssertEqual(Set(endpoints.map(\.registryID)), [0xE05, 0xD05, 0x062, 0xA1A])
@@ -43,6 +44,19 @@ final class HIDDiscoveryTests: XCTestCase {
         XCTAssertEqual(endpoints.first { $0.registryID == 0xA1A }?.candidates.map(\.name), ["Scubapro Aladin Square"])
         XCTAssertEqual(endpoints.first { $0.registryID == 0xA1A }?.displayName, "Scubapro Aladin Square")
         XCTAssertEqual(endpoints.map(\.id), endpoints.map(\.id).sorted())
+    }
+
+    func testAComputersOnlyInterfaceIsListedWhateverUsagePageItDeclares() {
+        for usage: UInt32 in [0x00, 0x02, 0x06] {
+            let core = RegistrySnapshot.HIDDevice(registryID: 0xC0E, vendorID: 0x1493, productID: 0x0033,
+                                                  primaryUsagePage: 0x01, primaryUsage: usage)
+            XCTAssertEqual(RegistrySnapshot(hidDevices: [core]).endpoints.map(\.registryID), [0xC0E], "usage \(usage)")
+        }
+        // Only a keyboard or mouse interface beside another interface of the same VID:PID is dropped.
+        let vendorPage = RegistrySnapshot.HIDDevice(registryID: 0xC0F, vendorID: 0x1493, productID: 0x0033, primaryUsagePage: 0xFF00)
+        let mouse = RegistrySnapshot.HIDDevice(registryID: 0xC10, vendorID: 0x1493, productID: 0x0033,
+                                               primaryUsagePage: 0x01, primaryUsage: 0x02)
+        XCTAssertEqual(RegistrySnapshot(hidDevices: [vendorPage, mouse]).endpoints.map(\.registryID), [0xC0F])
     }
 
     func testHIDComputersComeBeforeSerialPorts() {

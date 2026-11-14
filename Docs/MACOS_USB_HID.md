@@ -7,8 +7,11 @@ libdivecomputer's EON Steel and Uwatec Smart drivers take their USB HID code pat
 and `HAVE_HIDAPI` stays undefined, so `usbhid.c` is still a stub. iOS builds contain none of this: every type
 on this page is `#if os(macOS)`.
 
-A sandboxed app needs the `com.apple.security.device.usb` entitlement to open a device. Listing devices needs
-no entitlement. Downloads never ask for Input Monitoring (see below).
+A sandboxed app needs the `com.apple.security.device.usb` entitlement to open a device. Whether a sandboxed
+`IOHIDManager` lists the devices without it hasn't been checked; an app missing the key may see an empty list
+rather than `permissionDenied`. Discovery logs, per vendor ID, how many HID devices were matched, listed and
+rejected, so a log tells "nothing enumerated" from "not a known model". Downloads never ask for Input Monitoring
+(see below).
 
 | VID:PID | Models offered | Notes |
 |---|---|---|
@@ -33,8 +36,9 @@ activated on the discovery's queue, reports arrivals and removals.
 
 A matched device becomes an endpoint only when its VID:PID is a model above (`DeviceCatalog.candidates`). That
 leaves out other devices on the same vendor IDs: a Suunto watch on 0x1493, or a Keil debug probe on 0xc251,
-whose vendor ID the Aladin Square uses. A device on the generic desktop usage page (keyboards and mice) is never
-listed either.
+whose vendor ID the Aladin Square uses. Nobody has read the computers' real usage pages, so the usage page
+doesn't decide anything, except that a keyboard or mouse interface (generic desktop page, usage 0x02, 0x06 or
+0x07) is hidden when the same VID:PID has another HID interface. A computer's only interface is always listed.
 
 A USB HID endpoint has `transport == .usbHID`, an `id` of `usbhid:<registry id>`, no `calloutPath`, the device's
 `registryID`, and a `locator` of `.usbHID(vid:pid:registryID:)`. Its `status` is `ready`, or `busy` while a
@@ -74,7 +78,7 @@ discovery. With one, the endpoint also disappears.
 | `permissionDenied` | `kIOReturnNotPermitted`, `kIOReturnNotPrivileged`: usually a sandbox without `device.usb` |
 | `notFound` | The registry entry is gone, or `kIOReturnNoDevice`, `kIOReturnNotAttached`, `kIOReturnNotFound`, `kIOReturnOffline` |
 | `usbError(ioReturn:)` | `IOHIDDeviceOpen` failed for another reason |
-| `noResponse(family)` | `DC_STATUS_TIMEOUT` before any dive. `message` adds `DeviceCatalog.cableConnectInstructions(for:)` |
+| `noResponse(family)` | `DC_STATUS_TIMEOUT` before any dive, including a computer that answers the open and then goes silent with a fingerprint stored. `message` adds `DeviceCatalog.cableConnectInstructions(for:)` |
 | `unplugged` | The device went away during the session |
 | `protocolError(status)` | Anything else libdivecomputer reports once the device is open |
 
@@ -89,15 +93,18 @@ path libdivecomputer uses on macOS:
 | Operation | Behaviour |
 |---|---|
 | `set_timeout` | Negative blocks, 0 returns at once, N waits N ms. The stream starts at -1, as `usbhid.c` does |
-| `read` | One input report per call, with the report-ID byte exactly as IOKit delivered it (the EON Steel driver checks byte 0 is 0x3f), cut to the requested size. The rest of a cut report is dropped. A timeout is `SUCCESS` with 0 bytes, as `hid_read_timeout` returning 0 is. After a removal, reports that arrived first are still read, then `IO` |
+| `read` | One input report per call, with the report-ID byte exactly as IOKit delivered it (the EON Steel driver checks byte 0 is 0x3f), cut to the requested size. The rest of a cut report is dropped. A positive timeout that passes is `TIMEOUT` with 0 bytes, not hidapi's `SUCCESS` with 0: both drivers turn that into `PROTOCOL`, which a download with a stored fingerprint and no new dives reads as "up to date". A 0 timeout with nothing waiting is `SUCCESS` with 0 bytes. After a removal, reports that arrived first are still read, then `IO`. After a dropped report, the next read is `IO` |
 | `write` | If byte 0 is 0, `IOHIDDeviceSetReport(Output, 0, data + 1, n - 1)`; otherwise `IOHIDDeviceSetReport(Output, data[0], data, n)`. In both cases `actual` is n, report-ID byte included. An empty write sends nothing. A failed report is `IO` |
 | `poll`, `ioctl` | `UNSUPPORTED` |
 | `configure`, `purge`, `flush`, `sleep`, `set_break`, `set_dtr`, `set_rts` | `SUCCESS`, doing nothing, because `usbhid.c` has no entry for them. `purge` doesn't drop queued reports, and `sleep` returns at once |
 | `get_lines`, `get_available` | `SUCCESS` with 0 |
 | `close` | See the lifecycle below |
 
-At most 30 unread reports are kept, and the oldest is dropped beyond that, as in hidapi's macOS backend. The
-report buffer is the device's `kIOHIDMaxInputReportSizeKey`, and never under 64 bytes.
+At most 1024 unread reports (64 KiB) are kept, and the oldest is dropped beyond that. hidapi keeps 30, but IOKit
+polls the interrupt pipe whatever the reader is doing, and a G2 memory dump streams about one report a
+millisecond through the tap's logging. A drop fails the next read with `IO`, so the download fails where the
+report was lost instead of later as a protocol error. The report buffer is the device's
+`kIOHIDMaxInputReportSizeKey`, and never under 64 bytes.
 
 ## Lifecycle
 
@@ -117,7 +124,7 @@ created --start()--> IOHIDDeviceOpen --fails--> closed (nothing else was called)
                       active  --close()--> IOHIDDeviceCancel --> cancelling
                                                                     |
                          cancel handler, on the device's queue:     v
-                           IOHIDDeviceClose (skipped once removed)
+                           IOHIDDeviceClose (after an unplug too)
                            release the device and the report buffer --> closed
 ```
 
@@ -126,7 +133,9 @@ created --start()--> IOHIDDeviceOpen --fails--> closed (nothing else was called)
   handler has run, even if the stream itself is gone, because IOKit can still deliver a report up to then.
 - `close()` waits up to 2 s for the handler. If the handler is late, `close()` returns anyway, and the handler
   still closes and releases the device when it runs.
-- An unplugged device is never closed, as in hidapi.
+- An unplugged device is still closed, as hidapi does on macOS 10.10 and later: since 10.15 some setups crash when
+  `IOHIDDeviceClose` is skipped. `kIOReturnNotAttached` or `kIOReturnNoDevice` from that close is expected and ignored.
+- On removal, the session is marked unplugged before a blocked read is woken, so the download reads as `unplugged`.
 - A stream that is dropped without being closed cancels its device, and the handler cleans up.
 
 `HIDDeviceIO` is the seam: `IOKitHIDDevice` is the live device, and the tests use a fake that checks this order
