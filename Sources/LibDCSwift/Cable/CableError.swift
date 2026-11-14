@@ -6,13 +6,14 @@ import Clibdivecomputer
 public enum CableError: Error, Equatable {
     /// No cable opener for this transport (a paired Bluetooth port, for now), or the model isn't reachable over it or has no libdivecomputer descriptor; nothing touched the port.
     case unsupportedTransport(DCTransport)
-    /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where.
+    /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where, and
+    /// `driverMissingStoreMessage` says what to do without pointing to a driver download.
     case driverMissing
     /// The app may not open the port (EPERM, EACCES): a sandboxed app without `com.apple.security.device.serial`, say.
     case permissionDenied
     /// Another app has the port open exclusively (EBUSY), often the computer maker's own app.
     case busy
-    /// Another `DiveComputerSession` is open; there is one at a time.
+    /// Another `DiveComputerSession` is open, or still closing, or another open is in progress on the same port; there is one at a time.
     case sessionInProgress
     /// The port isn't there (ENOENT, ENXIO, ENODEV): the cable came out before the open.
     case notFound
@@ -88,13 +89,13 @@ public enum CableError: Error, Equatable {
         case .unsupportedTransport(let transport):
             return "This dive computer can't be downloaded over this connection (\(transport.rawValue))."
         case .driverMissing:
-            return "macOS made no serial port for this cable. Install the driver for its USB-serial chip, then unplug the cable and plug it in again."
+            return "macOS made no serial port for this cable. Unplug it and plug it in again; if it still has none, macOS has no driver for it."
         case .permissionDenied:
             return "This app isn't allowed to open the cable's serial port."
         case .busy:
             return "Another app is using the cable. Quit the dive computer maker's app, then try again."
         case .sessionInProgress:
-            return "Another dive computer download is in progress."
+            return "Another dive computer is open in this app. Let its download finish, or cancel it, then try again."
         case .notFound:
             return "The cable isn't connected. Plug it in and try again."
         case .unplugged:

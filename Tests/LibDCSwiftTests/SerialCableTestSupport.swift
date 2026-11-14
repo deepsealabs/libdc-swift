@@ -261,8 +261,17 @@ extension XCTestCase {
             throw CableOpenTimedOut(seconds: timeout)
         }
         let session = try result.get()
-        addTeardownBlock { session.close() }
+        addTeardownBlock { self.closeAndWait(session) }
         return session
+    }
+
+    /// Closes `session` and waits until its device is closed and its lease is free, which a close on the main thread returns before.
+    func closeAndWait(_ session: DiveComputerSession, timeout: TimeInterval = 10, file: StaticString = #filePath, line: UInt = #line) {
+        let closed = XCTestExpectation(description: "closed")
+        session.close { closed.fulfill() }
+        if XCTWaiter.wait(for: [closed], timeout: timeout) != .completed {
+            XCTFail("the session did not close within \(timeout) s", file: file, line: line)
+        }
     }
 
     /// Polls `condition` until it holds or `timeout` passes.

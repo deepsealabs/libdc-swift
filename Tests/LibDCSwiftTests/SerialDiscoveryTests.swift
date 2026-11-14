@@ -92,6 +92,25 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertNil(CableEndpoint.serialPort(path: "/dev/cu.usbserial-A", vendorID: 0x0403, productID: 0x6001).driverMissingMessage)
     }
 
+    func testTheStoreMessageNeverPointsToADriverDownload() throws {
+        let epson = USB(registryID: 0x55, vendorID: 0x04B8, productID: 0x0521)
+        let cp2108 = USB(registryID: 0x77, vendorID: 0x10C4, productID: 0xEA71)
+        let endpoints = RegistrySnapshot(cableDevices: [Self.pelagic, Self.suunto, Self.cp210x, epson, cp2108]).endpoints
+        XCTAssertEqual(endpoints.count, 5)
+        for endpoint in endpoints {
+            let message = try XCTUnwrap(endpoint.driverMissingStoreMessage, endpoint.id)
+            XCTAssertTrue(message.contains(endpoint.displayName), message)
+            XCTAssertFalse(message.contains("http"), message)
+            XCTAssertFalse(message.lowercased().contains("install"), message)
+        }
+        let pelagic = try XCTUnwrap(endpoints.first { $0.hint?.productID == 0xF460 }?.driverMissingStoreMessage)
+        XCTAssertTrue(pelagic.contains("macOS has no driver"), pelagic)
+        let suunto = try XCTUnwrap(endpoints.first { $0.hint?.productID == 0xF680 }?.driverMissingStoreMessage)
+        XCTAssertTrue(suunto.contains("Unplug it and plug it in again"), suunto)
+        XCTAssertFalse(CableError.driverMissing.message.lowercased().contains("install"))
+        XCTAssertNil(CableEndpoint.serialPort(path: "/dev/cu.usbserial-A", vendorID: 0x0403, productID: 0x6001).driverMissingStoreMessage)
+    }
+
     func testDiveCablesMacOSHasNoDriverForAreListedAndExplained() throws {
         let epson = USB(registryID: 0x55, vendorID: 0x04B8, productID: 0x0521)
         let zeagle = USB(registryID: 0x66, vendorID: 0x04B8, productID: 0x0522)

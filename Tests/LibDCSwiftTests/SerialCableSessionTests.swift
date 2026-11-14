@@ -75,7 +75,7 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertEqual(line.c_cflag & tcflag_t(CRTSCTS), 0)
         XCTAssertNotEqual(line.c_cflag & tcflag_t(CLOCAL | CREAD), 0)
         XCTAssertEqual(line.c_lflag & tcflag_t(ICANON | ECHO), 0)
-        session.close()
+        closeAndWait(session)
         // dc_serial_close puts back what the port had.
         XCTAssertEqual(link.termios.outputSpeed, initial.outputSpeed)
         XCTAssertEqual(link.termios.c_lflag, initial.c_lflag)
@@ -172,13 +172,59 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT))
         XCTAssertFalse(session.isCancelled)
         let start = DispatchTime.now()
-        session.close()
+        let closed = expectation(description: "closed")
+        var closedAfter: Double?
+        session.close { closedAfter = milliseconds(since: start); closed.fulfill() }
+        XCTAssertLessThan(milliseconds(since: start), wallClockBound(50), "the close left the main thread")
+        XCTAssertTrue(session.isClosed)
+        wait(for: [closed], timeout: 5)
         // hw_ostc3's close sends EXIT and would wait 3000 ms for its echo; the read is capped instead of cancelled.
-        let elapsed = milliseconds(since: start)
+        let elapsed = try XCTUnwrap(closedAfter)
         XCTAssertGreaterThanOrEqual(elapsed, Double(TapStream.closingReadLimitMilliseconds) - 50)
         XCTAssertLessThan(elapsed, Double(TapStream.closingReadLimitMilliseconds) + 1000)
-        XCTAssertTrue(session.isClosed)
         XCTAssertTrue(waitFor { ostc3.received.last == FakeOSTC3.exitCommand }, "EXIT still goes out")
+    }
+
+    func testAMainThreadCloseHoldsTheLeaseUntilThePortIsClosed() throws {
+        let link = try link()
+        let lease = DiveComputerSessionLease()
+        let endpoint = CableFixtures.endpoint(link)
+        let model = try CableFixtures.model("Heinrichs Weikamp OSTC Mk2")
+        let session = try openCable(endpoint, model: model, lease: lease)
+        let proceed = DispatchSemaphore(value: 0)
+        var closedOnMain: Bool?
+        // Stands in for a driver's close that sleeps and waits on a silent computer.
+        session.onClosing {
+            closedOnMain = Thread.isMainThread
+            _ = proceed.wait(timeout: .now() + 5)
+        }
+        session.close()
+        XCTAssertTrue(session.isClosed)
+        XCTAssertTrue(lease.isHeld, "the driver's close is still running")
+        XCTAssertEqual(cableOpenError(endpoint, model: model, lease: lease), .sessionInProgress)
+        proceed.signal()
+        XCTAssertTrue(waitFor(5) { !lease.isHeld })
+        XCTAssertEqual(closedOnMain, false)
+        closeAndWait(try openCable(endpoint, model: model, lease: lease))
+    }
+
+    func testCloseMidDownloadRunsTheDriversCloseOffTheMainThread() throws {
+        let silent = SilentDevice()
+        let link = try link(silent)
+        let lease = DiveComputerSessionLease()
+        let session = try openCable(CableFixtures.endpoint(link), model: CableFixtures.model("Reefnet Sensus"), lease: lease)
+        var closedOnMain: Bool?
+        session.onClosing { closedOnMain = Thread.isMainThread }
+        let viewModel = DiveDataViewModel(fingerprintStore: DeviceFingerprintStorage(userDefaults: isolatedDefaults("fp")))
+        let done = expectation(description: "download")
+        var result: DiveDownloadResult?
+        DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel) { result = $0; done.fulfill() }
+        XCTAssertTrue(waitFor(5) { silent.bytesReceived > 0 }, "the handshake went out")
+        session.close()
+        wait(for: [done], timeout: 10)
+        XCTAssertEqual(result?.outcome, .cancelled)
+        XCTAssertTrue(waitFor(5) { !lease.isHeld })
+        XCTAssertEqual(closedOnMain, false, "the held close ran off the main thread")
     }
 
     func testAnOpenSessionShowsItsPortBusyUntilItCloses() throws {
@@ -188,7 +234,7 @@ final class SerialCableSessionTests: XCTestCase {
         let discovery = StaticCableDiscovery(endpoints: [endpoint, other])
         let session = try openCable(endpoint, model: CableFixtures.model("Heinrichs Weikamp OSTC Mk2"))
         XCTAssertEqual(discovery.endpoints.map(\.status), [.busy, .ready])
-        session.close()
+        closeAndWait(session)
         XCTAssertEqual(discovery.endpoints.map(\.status), [.ready, .ready])
     }
 
@@ -241,6 +287,23 @@ final class SerialCableSessionTests: XCTestCase {
         lease.release()
     }
 
+    func testAPortWithAnOpenAlreadyInProgressIsRefusedWithoutTheLease() throws {
+        let link = try link(SilentDevice())
+        let lease = DiveComputerSessionLease()
+        let opening = SerialOpensInFlight()
+        // An open(2) on a CDC-ACM node can block until the cable is replugged (Apple FB6153687).
+        XCTAssertTrue(opening.begin(link.path))
+        XCTAssertThrowsError(try DiveComputerSession.openSerial(
+            CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC Mk2"), discovery: nil, recorder: nil,
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: lease,
+            cancellation: CableOpenCancellation(), opening: opening)) {
+            XCTAssertEqual($0 as? CableError, .sessionInProgress)
+        }
+        XCTAssertFalse(lease.isHeld, "a stuck open never held it, so other cables and Bluetooth still open")
+        opening.end(link.path)
+        closeAndWait(try openCable(CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC Mk2"), lease: lease))
+    }
+
     func testFailedOpensLeaveTheLeaseFreeAndThePortUnclaimed() throws {
         let link = try link(SilentDevice())
         let lease = DiveComputerSessionLease()
@@ -254,7 +317,7 @@ final class SerialCableSessionTests: XCTestCase {
         // And the next open on the same lease goes through.
         let session = try openCable(CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC Mk2"), lease: lease)
         XCTAssertTrue(lease.isHeld)
-        session.close()
+        closeAndWait(session)
         XCTAssertFalse(lease.isHeld)
     }
 
@@ -300,7 +363,7 @@ final class SerialCableSessionTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
-        XCTAssertLessThan(milliseconds(since: cancelled), 150)
+        XCTAssertLessThan(milliseconds(since: cancelled), wallClockBound(150))
         XCTAssertTrue(waitFor { !lease.isHeld })
         XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
     }
@@ -352,7 +415,7 @@ final class SerialCableSessionTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
-        XCTAssertLessThan(milliseconds(since: cancelled), 150)
+        XCTAssertLessThan(milliseconds(since: cancelled), wallClockBound(150))
         XCTAssertTrue(cancellation.isCancelled)
         stuck.release.signal()
         XCTAssertTrue(waitFor { stuck.session?.isClosed == true }, "the late session is closed, not leaked")
@@ -372,7 +435,7 @@ final class SerialCableSessionTests: XCTestCase {
             XCTAssertEqual($0 as? CableError, .cancelled)
         }
         XCTAssertTrue(session.isClosed)
-        XCTAssertFalse(lease.isHeld)
+        XCTAssertTrue(waitFor { !lease.isHeld })
         XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
     }
 

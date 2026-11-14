@@ -95,7 +95,7 @@ final class SerialHardwareTests: XCTestCase {
         let first = try XCTUnwrap(firstResult)
         let rawSerial = session.devicePtr.pointee.have_devinfo != 0 ? session.devicePtr.pointee.devinfo.serial : 0
         let error = CableError(download: first, session: session)
-        session.close()
+        closeAndWait(session)
         XCTAssertNil(error, error?.message ?? "")
         XCTAssertEqual(first.outcome, .completed)
         let identity = first.identity
@@ -128,7 +128,7 @@ final class SerialHardwareTests: XCTestCase {
         try XCTUnwrap(first.fingerprintCommit, "a completed download carries a fingerprint commit").acknowledge()
         let again = try openCable(endpoint, model: model, discovery: discovery, timeout: 30)
         let (secondResult, newDives) = downloadToEnd(again, viewModel: DiveDataViewModel(fingerprintStore: fingerprints), timeout: 900)
-        again.close()
+        closeAndWait(again)
         XCTAssertEqual(secondResult?.outcome, .noNewDives)
         XCTAssertEqual(newDives.count, 0)
     }

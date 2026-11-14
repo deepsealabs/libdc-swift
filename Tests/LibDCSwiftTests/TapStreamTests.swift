@@ -149,7 +149,7 @@ final class TapStreamTests: XCTestCase {
     }
 
     /// Hosted CI runners can overshoot a 50 ms wait by 100 ms or more, so there the wall clock only shows the wait ends; the slice tests below hold everywhere.
-    private var cancelBound: Double { ProcessInfo.processInfo.environment["CI"] == "true" ? 500 : 100 }
+    private var cancelBound: Double { wallClockBound(100) }
 
     private func cancelLatency(_ t: Tapped, _ done: DispatchSemaphore, finished: () -> DispatchTime) -> Double {
         usleep(200_000)

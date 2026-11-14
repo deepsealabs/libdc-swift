@@ -171,6 +171,15 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
         return "macOS made no serial port for the \(displayName). Unplug it and plug it in again. "
             + "If it still has no port, install the chip maker's driver\(source)."
     }
+
+    /// `driverMissingMessage` with no download link and no install step, for an App Store build (Guideline 2.4.5).
+    public var driverMissingStoreMessage: String? {
+        guard status == .driverMissing else { return nil }
+        if hint?.needsVendorDriver == true {
+            return "macOS has no driver for the \(displayName), so it has no serial port. Ask the cable's maker about macOS support."
+        }
+        return "macOS made no serial port for the \(displayName). Unplug it and plug it in again."
+    }
 }
 
 /// What the IORegistry says about serial ports and known cables at one moment: the seam `IOKitCableDiscovery` maps, so the mapping runs on fixtures.

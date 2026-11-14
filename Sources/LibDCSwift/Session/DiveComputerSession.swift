@@ -98,8 +98,11 @@ public final class DiveComputerSession {
     private var cancelInstalled = false
     private var lookupContext: Unmanaged<DiveDataViewModel>?
     private var currentIdentity: DiveComputerIdentity?
+    private let closeWaiters = CloseWaiters()
 #if os(macOS)
     private var unplugged = false
+    /// A cable session's close reached on the main thread runs on `cableQueue`: the driver's close sleeps and reads.
+    private var closesOffMain = false
     private var closingActions: [() -> Void] = []
     private var teardownActions: [() -> Void] = []
     /// The family the device opened as, read while the descriptor is valid; `CableError(download:)` reads it after a close too.
@@ -266,7 +269,10 @@ public final class DiveComputerSession {
         cancelled = true
     }
 
-    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends. On macOS an owned cable session's close runs the driver's quit with its sleeps, but each read waits at most `TapStream.closingReadLimitMilliseconds`, so a silent computer can't hold it for the driver's timeout.
+    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends.
+    /// On macOS an owned cable session's close runs the driver's quit with its sleeps, each read capped at
+    /// `TapStream.closingReadLimitMilliseconds`; reached on the main thread (this call, the end of a download, or the last release)
+    /// it runs on a background queue, so `isClosed` is true at once but the lease stays held until the port is closed.
     public func close() {
         lock.lock()
         guard !closed else { lock.unlock(); return }
@@ -284,6 +290,12 @@ public final class DiveComputerSession {
         closed = true
         lock.unlock()
         teardown()
+    }
+
+    /// `close()`, then `completion` on the main queue once the device is closed and the lease is free.
+    public func close(completion: @escaping () -> Void) {
+        closeWaiters.add(completion)
+        close()
     }
 
     /// False when closed or already downloading.
@@ -355,24 +367,66 @@ public final class DiveComputerSession {
         cancelInstalled = libdc_set_cancel(devicePtr, Self.cancelCallback, Unmanaged.passUnretained(self).toOpaque()) == DC_STATUS_SUCCESS
     }
 
+    // The device's close captures no self, so a close from deinit can still leave the main thread.
     private func teardown() {
         if cancelInstalled {
             libdc_set_cancel(devicePtr, nil, nil)
             cancelInstalled = false
         }
         releaseLookupContext()
-        if ownsDevice {
+        let devicePtr = devicePtr, ownsDevice = ownsDevice, lease = lease, waiters = closeWaiters
 #if os(macOS)
-            runActions(\.closingActions)
+        let beforeClose = takeActions(\.closingActions), afterClose = takeActions(\.teardownActions)
 #endif
-            libdc_close_device_data(devicePtr)
-            devicePtr.deinitialize(count: 1)
-            devicePtr.deallocate()
+        let closeDevice = {
+            if ownsDevice {
+#if os(macOS)
+                beforeClose.forEach { $0() }
+#endif
+                libdc_close_device_data(devicePtr)
+                devicePtr.deinitialize(count: 1)
+                devicePtr.deallocate()
+            }
+#if os(macOS)
+            afterClose.forEach { $0() }
+#endif
+            lease.release()
+            waiters.finish()
         }
 #if os(macOS)
-        runActions(\.teardownActions)
+        if closesOffMain, Thread.isMainThread {
+            Self.cableQueue.async(execute: closeDevice)
+            return
+        }
 #endif
-        lease.release()
+        closeDevice()
+    }
+}
+
+/// Run on the main queue once a session's device is closed and its lease is free.
+private final class CloseWaiters {
+    private let lock = NSLock()
+    private var done = false
+    private var waiting: [() -> Void] = []
+
+    func add(_ completion: @escaping () -> Void) {
+        lock.lock()
+        guard !done else {
+            lock.unlock()
+            DispatchQueue.main.async(execute: completion)
+            return
+        }
+        waiting.append(completion)
+        lock.unlock()
+    }
+
+    func finish() {
+        lock.lock()
+        done = true
+        let all = waiting
+        waiting = []
+        lock.unlock()
+        all.forEach { DispatchQueue.main.async(execute: $0) }
     }
 }
 
@@ -387,6 +441,7 @@ extension DiveComputerSession {
                                           transport: transport, locator: locator, deviceStorage: deviceStorage,
                                           ownsDevice: true, lease: lease, closeCoordinator: RetrievalCloseCoordinator())
         session.installCancelIfCable()
+        session.closesOffMain = true
         return session
     }
 
@@ -422,12 +477,11 @@ extension DiveComputerSession {
         lock.unlock()
     }
 
-    private func runActions(_ list: ReferenceWritableKeyPath<DiveComputerSession, [() -> Void]>) {
-        lock.lock()
+    private func takeActions(_ list: ReferenceWritableKeyPath<DiveComputerSession, [() -> Void]>) -> [() -> Void] {
+        lock.lock(); defer { lock.unlock() }
         let actions = self[keyPath: list]
         self[keyPath: list] = []
-        lock.unlock()
-        actions.forEach { $0() }
+        return actions
     }
 }
 #endif

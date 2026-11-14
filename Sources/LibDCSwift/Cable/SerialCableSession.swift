@@ -29,7 +29,8 @@ extension DiveComputerSession {
     }
 
     /// Runs `open` on the cable queue. A cancel throws `CableError.cancelled` at once, even while `open` is blocked (in open(2), say);
-    /// `open` then finishes on its own and a session it returns is closed. Until then it holds the lease, so another open is `sessionInProgress`.
+    /// `open` then finishes on its own and a session it returns is closed. A serial open takes the lease only once its port is open,
+    /// so one stuck in open(2) blocks only another open of the same port.
     static func runCableOpen(cancellation: CableOpenCancellation,
                              _ open: @escaping @Sendable () throws -> DiveComputerSession) async throws -> DiveComputerSession {
         let gate = CableOpenGate()
@@ -62,7 +63,8 @@ extension DiveComputerSession {
         deviceStorage: DeviceStorage,
         lease: DiveComputerSessionLease,
         cancellation: CableOpenCancellation,
-        claims: SerialPortClaims = .shared
+        claims: SerialPortClaims = .shared,
+        opening: SerialOpensInFlight = .shared
     ) throws -> DiveComputerSession {
         guard endpoint.transport == .serial else { throw CableError.unsupportedTransport(endpoint.transport) }
         guard endpoint.status != .driverMissing, let path = endpoint.calloutPath, let locator = endpoint.locator else {
@@ -74,16 +76,16 @@ extension DiveComputerSession {
             throw CableError.unsupportedTransport(.serial)
         }
         guard !cancellation.isCancelled else { throw CableError.cancelled }
-        guard lease.tryAcquire() else { throw CableError.sessionInProgress }
-        var leaseHeld = true
-        defer { if leaseHeld { lease.release() } }
+        // Refused here while another session is open; the open itself takes the lease in the wrap, once the port is open.
+        guard !lease.isHeld, opening.begin(path) else { throw CableError.sessionInProgress }
+        defer { opening.end(path) }
 
         var context: OpaquePointer?
         guard dc_context_new(&context) == DC_STATUS_SUCCESS, let context else { throw CableError.protocolError(DC_STATUS_NOMEMORY) }
         let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
         data.initialize(to: device_data_t())
         data.pointee.context = context
-        let factory = SerialTapFactory(recorder: recorder, cancellation: cancellation)
+        let factory = SerialTapFactory(recorder: recorder, cancellation: cancellation, lease: lease)
         let status = withExtendedLifetime(factory) {
             open_serial_device(data, path, model.dcFamily, model.model, SerialTapFactory.wrap,
                                Unmanaged.passUnretained(factory).toOpaque())
@@ -91,13 +93,14 @@ extension DiveComputerSession {
         guard status == DC_STATUS_SUCCESS else {
             data.deinitialize(count: 1)
             data.deallocate()
+            if factory.leaseTaken { lease.release() }
             guard factory.wrapCalled else { throw SerialPortPreflight.explain(status, path: path) }
+            guard factory.leaseTaken else { throw CableError.sessionInProgress }
             throw CableError.deviceFailed(status, family: model.family, portPresent: access(path, F_OK) == 0)
         }
 
         let session = openedCable(devicePtr: data, displayName: model.name, storageKey: locator.locatorKey,
                                   locator: locator, deviceStorage: deviceStorage, lease: lease)
-        leaseHeld = false
         factory.attach(session)
         claims.claim(path)
         session.onTeardown { claims.release(path) }
@@ -174,22 +177,49 @@ final class CableOpenCancellation: @unchecked Sendable {
     }
 }
 
-/// Builds the `TapStream` around the port `open_serial_device` opens.
+/// The ports a serial open is in progress on: a second open of one would block in the same open(2) as the first.
+final class SerialOpensInFlight {
+    static let shared = SerialOpensInFlight()
+
+    private let lock = NSLock()
+    private var paths: Set<String> = []
+
+    func begin(_ path: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return paths.insert(path).inserted
+    }
+
+    func end(_ path: String) {
+        lock.lock(); defer { lock.unlock() }
+        paths.remove(path)
+    }
+}
+
+/// Builds the `TapStream` around the port `open_serial_device` opens, taking the session lease once the port is open.
 final class SerialTapFactory {
     let recorder: DCStreamRecorder?
     let cancellation: CableOpenCancellation
+    let lease: DiveComputerSessionLease
     private(set) var wrapCalled = false
+    /// False after a wrap only when another session took the lease first; the wrap then closed the port.
+    private(set) var leaseTaken = false
     private(set) var tap: TapStream?
 
-    init(recorder: DCStreamRecorder?, cancellation: CableOpenCancellation) {
+    init(recorder: DCStreamRecorder?, cancellation: CableOpenCancellation, lease: DiveComputerSessionLease) {
         self.recorder = recorder
         self.cancellation = cancellation
+        self.lease = lease
     }
 
     static let wrap: libdc_iostream_wrap_t = { context, inner, userdata in
         guard let userdata, let inner else { return nil }
         let factory = Unmanaged<SerialTapFactory>.fromOpaque(userdata).takeUnretainedValue()
         factory.wrapCalled = true
+        guard factory.lease.tryAcquire() else {
+            dc_iostream_close(inner)
+            return nil
+        }
+        factory.leaseTaken = true
         let cancellation = factory.cancellation
         let tap = TapStream(inner: inner, recorder: factory.recorder, isCancelled: { cancellation.isCancelled })
         guard let stream = try? DCCustomStream.open(backend: tap, transport: tap.transport, context: context) else {

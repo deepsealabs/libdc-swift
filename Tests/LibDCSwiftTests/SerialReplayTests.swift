@@ -118,7 +118,7 @@ final class SerialReplayTests: XCTestCase {
         let recorder = DCStreamRecorder(scrubber: Self.scrubber)
         let session = try openCable(CableFixtures.endpoint(link), model: model(), recorder: recorder)
         let (result, dives) = downloadToEnd(session)
-        session.close()
+        closeAndWait(session)
         return (try XCTUnwrap(result), dives, recorder.recording(family: DC_FAMILY_HW_OSTC, model: 1))
     }
 

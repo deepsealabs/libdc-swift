@@ -234,4 +234,9 @@ final class Flag: @unchecked Sendable {
 func milliseconds(since start: DispatchTime) -> Double {
     Double(DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
 }
+
+/// A wall-clock upper bound: `local` here, at least `ci` on a hosted runner, which can overshoot a short wait by 100 ms or more.
+func wallClockBound(_ local: Double, ci: Double = 500) -> Double {
+    ProcessInfo.processInfo.environment["CI"] == "true" ? max(local, ci) : local
+}
 #endif
