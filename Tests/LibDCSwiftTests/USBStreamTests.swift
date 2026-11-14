@@ -382,8 +382,7 @@ final class USBStreamTests: XCTestCase {
         XCTAssertFalse(device.calls.contains(.clearStall(endpoint: 0x82)))
     }
 
-    /// Hosted CI runners can overshoot a 50 ms check by 100 ms or more.
-    private var abortBound: Double { ProcessInfo.processInfo.environment["CI"] == "true" ? 500 : 150 }
+    private var abortBound: Double { wallClockBound(150) }
 
     func testACancelAbortsAReadThatWouldWaitForEver() throws {
         let device = FakeUSBDevice()
@@ -441,6 +440,29 @@ final class USBStreamTests: XCTestCase {
         cancelled.value = false
         device.queue(Self.bytes(16, seed: 9))
         XCTAssertEqual(read(stream, 16).bytes, Self.bytes(16, seed: 9))
+    }
+
+    func testACancelDuringARequestStillReadsItsReply() throws {
+        let device = FakeUSBDevice()
+        let cancelled = Flag()
+        let reply = Self.bytes(100, seed: 5)
+        device.onControl = { _, _ in
+            cancelled.value = true
+            return (kIOReturnSuccess, [], reply)
+        }
+        let (stream, _) = try open(device, cancel: { cancelled.value })
+        defer { dc_iostream_close(stream) }
+        XCTAssertEqual(dc_iostream_set_timeout(stream, 2000), DC_STATUS_SUCCESS)
+        var command = USBControl.command(0x0A)
+        XCTAssertEqual(ioctl(stream, USBControl.controlWrite, &command), DC_STATUS_SUCCESS)
+        let answered = read(stream, 8192)
+        XCTAssertEqual(answered.status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(answered.bytes, reply, "the request went out, so its reply is read before CANCELLED")
+        XCTAssertEqual(device.pendingIn, 0)
+        XCTAssertEqual(device.aborts, 0)
+        let reads = device.reads.count
+        XCTAssertEqual(read(stream, 8192).status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(device.reads.count, reads, "with no request pending, a cancelled read touches nothing")
     }
 
     func testACancelOnTheReadAfterAFullOneStillFinishesTheDive() throws {
