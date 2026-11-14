@@ -6,6 +6,8 @@ import Clibdivecomputer
 public final class TapStream: DCIOStreamBackend {
     /// The longest a blocked read, poll or sleep waits between cancel checks; half of 100 ms so a cancel lands within 100 ms.
     public static let cancelCheckMilliseconds: Int32 = 50
+    /// While closing, the longest one read or poll waits, so a silent computer can't hold a driver's close for its full timeout.
+    public static let closingReadLimitMilliseconds: Int32 = 500
 
     /// The inner stream's transport, to open the tap's own stream with.
     public let transport: dc_transport_t
@@ -16,6 +18,7 @@ public final class TapStream: DCIOStreamBackend {
     private var inner: OpaquePointer?
     private let cancelLock = NSLock()
     private var cancelCheck: (() -> Bool)?
+    private var closingLimit: Int32?
     private var timeout: Int32?
     private var innerTimeout: Int32?
     private var slicedReads = true
@@ -46,11 +49,29 @@ public final class TapStream: DCIOStreamBackend {
         cancelCheck = isCancelled
     }
 
+    /// For a driver's close: the cancel check is ignored, sleeps and writes run in full, and each read or poll waits at most `readLimit` ms.
+    /// Upstream never interrupts a close, and some drivers need their pre-command sleep for the quit to land (Cressi Goa's 100 ms).
+    public func beginClosing(readLimit: Int32 = TapStream.closingReadLimitMilliseconds) {
+        cancelLock.lock(); defer { cancelLock.unlock() }
+        closingLimit = max(readLimit, 1)
+    }
+
     private var cancelled: Bool {
         cancelLock.lock()
-        let check = cancelCheck
+        let check = closingLimit == nil ? cancelCheck : nil
         cancelLock.unlock()
         return check?() ?? false
+    }
+
+    /// `timeout` capped by the closing limit: blocking becomes the limit, 0 stays a no-wait read.
+    private func limited(_ timeout: Int32?) -> Int32? {
+        cancelLock.lock()
+        let limit = closingLimit
+        cancelLock.unlock()
+        guard let limit else { return timeout }
+        guard let timeout else { return limit }
+        if timeout == 0 { return 0 }
+        return timeout < 0 ? limit : min(timeout, limit)
     }
 
     // MARK: - DCIOStreamBackend
@@ -231,8 +252,9 @@ public final class TapStream: DCIOStreamBackend {
     // Keeps serial_posix's rules: -1 blocks, 0 takes what is there, N ms is a deadline, a timeout keeps the partial count.
     private func cancellableRead(_ buffer: UnsafeMutableRawBufferPointer, _ actual: inout Int) -> dc_status_t {
         guard let inner else { return DC_STATUS_IO }
-        guard slicedReads, let timeout, timeout != 0, buffer.count > 0 else {
-            return directRead(inner, buffer, from: 0, timeout: timeout, &actual)
+        let readTimeout = limited(timeout)
+        guard slicedReads, let timeout = readTimeout, timeout != 0, buffer.count > 0 else {
+            return directRead(inner, buffer, from: 0, timeout: readTimeout, &actual)
         }
         let deadline = Self.deadline(after: timeout)
         while true {
@@ -268,9 +290,10 @@ public final class TapStream: DCIOStreamBackend {
         deadline.map(Self.millisecondsLeft) ?? -1
     }
 
-    private func cancellablePoll(_ timeout: Int32) -> dc_status_t {
+    private func cancellablePoll(_ requested: Int32) -> dc_status_t {
         guard let inner else { return DC_STATUS_IO }
         if cancelled { return DC_STATUS_CANCELLED }
+        let timeout = limited(requested) ?? requested
         if timeout == 0 { return dc_iostream_poll(inner, 0) }
         let deadline = Self.deadline(after: timeout)
         while true {
