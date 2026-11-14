@@ -321,6 +321,7 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
 
 // One max-size packet per request: a timed-out ReadPipeTO reports no count, so a whole-size request would lose what came first.
 // A cancel mid-dive lets the dive finish before CANCELLED, as upstream's cooperative cancel does; only an infinite wait is aborted.
+// After a request went out (_inTail set by the write), a cancel still reads its reply, so none is left on the IN pipe.
 - (dc_status_t)readInto:(unsigned char *)data size:(size_t)size actual:(size_t *)actual
 {
     if (actual) *actual = 0;
@@ -398,6 +399,7 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
     IOReturn result = [_device transferOnEndpoint:_endpointOut data:(void *)data length:(uint32_t)size actual:&written timeout:0];
     [self endTransfer];
     if (!libdc_usb_succeeded(result)) return [self failure:result endpoint:_endpointOut];
+    if (written > 0) _inTail = YES;
     if (actual) *actual = MIN((size_t)written, size);
     return DC_STATUS_SUCCESS;
 }
@@ -411,10 +413,13 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
     memcpy(&setup, data, header);
     if (setup.wLength > size - header) return DC_STATUS_INVALIDARGS;
     if ([self cancelRequested]) return DC_STATUS_CANCELLED;
-    [self beginTransfer:YES];
+    // Not aborted on cancel unless it can wait for ever: an aborted request may still have reached the computer.
+    [self beginTransfer:_timeout == 0];
     IOReturn result = [_device controlTransfer:&setup data:(setup.wLength > 0 ? data + header : NULL) timeout:_timeout];
     [self endTransfer];
     if (!libdc_usb_succeeded(result)) return [self failure:result endpoint:0];
+    // A host-to-device request (the Cobalt's 0x01, 0x09, 0x0A) is answered on bulk IN.
+    if ((setup.bmRequestType & 0x80) == 0) _inTail = YES;
     return DC_STATUS_SUCCESS;
 }
 

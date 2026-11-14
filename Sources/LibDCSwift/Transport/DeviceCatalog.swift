@@ -170,14 +170,15 @@ extension DCModel {
 
 #if os(macOS)
 extension DeviceCatalog {
-    /// The families a cable transport reaches with no download from a real computer confirmed yet; hosts label them "Beta" there.
+    /// The families a cable transport reaches through a stream with no upstream-proven transport behind it (the Cobalt's
+    /// IOUSBLib stream in place of libusb); hosts label them "Beta" there. No cable path has run on a real computer yet.
     public static let betaFamilies: [DCTransport: Set<DeviceConfiguration.DeviceFamily>] = [
         .usb: [.atomicsCobalt],
     ]
 }
 
 extension DCModel {
-    /// This model's download over `transport` hasn't been confirmed on a real computer yet, so hosts label it "Beta" there.
+    /// This model's path over `transport` has no upstream-proven transport behind it (`DeviceCatalog.betaFamilies`), so hosts label it "Beta" there.
     public func isBeta(on transport: DCTransport) -> Bool {
         DeviceCatalog.betaFamilies[transport]?.contains(family) ?? false
     }
