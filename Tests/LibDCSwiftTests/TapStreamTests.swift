@@ -293,6 +293,34 @@ final class TapStreamTests: XCTestCase {
         XCTAssertEqual(probe.log.map(\.operation), [.write, .setDTR])
     }
 
+    func testWhileClosingSleepsRunInFullAndReadsWaitAtMostTheLimit() throws {
+        let t = try tappedPort()
+        t.cancelled.value = true
+        t.tap.beginClosing(readLimit: 200)
+        var start = DispatchTime.now()
+        // Cressi Goa sleeps 100 ms before its close's EXIT; a cancelled tap would skip it.
+        XCTAssertEqual(dc_iostream_sleep(t.stream, 120), DC_STATUS_SUCCESS)
+        XCTAssertGreaterThanOrEqual(milliseconds(since: start), 110)
+
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var actual = 0
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, 3000), DC_STATUS_SUCCESS)
+        t.port.send([0x01])
+        start = DispatchTime.now()
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT)
+        XCTAssertEqual(actual, 1, "the partial count is kept")
+        XCTAssertLessThan(milliseconds(since: start), 1000, "capped at the limit, not the driver's 3000 ms")
+
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, -1), DC_STATUS_SUCCESS)
+        start = DispatchTime.now()
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT, "a blocking read ends at the limit")
+        XCTAssertLessThan(milliseconds(since: start), 1000)
+        XCTAssertEqual(dc_iostream_poll(t.stream, -1), DC_STATUS_TIMEOUT)
+
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, 0), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT, "0 still takes what is there")
+    }
+
     func testSetCancellationReplacesTheCheck() throws {
         let probe = ProbeBackend()
         let tap = TapStream(inner: try probeStream(probe))

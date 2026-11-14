@@ -4,8 +4,9 @@ import Clibdivecomputer
 import LibDCBridge
 
 extension DiveComputerSession {
-    /// Where cable opens block: libdivecomputer's open talks to the computer, for up to the driver's timeout.
-    static let cableQueue = DispatchQueue(label: "com.libdcswift.cable")
+    /// Where cable opens block: libdivecomputer's open talks to the computer, for up to the driver's timeout. Concurrent, so an
+    /// open(2) stuck on a CDC-ACM node after wake (Apple FB6153687) holds only its own open; the lease still allows one session.
+    static let cableQueue = DispatchQueue(label: "com.libdcswift.cable", attributes: .concurrent)
 
     /// Opens `model` on a serial endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
     public static func open(
@@ -19,20 +20,31 @@ extension DiveComputerSession {
         let cancellation = CableOpenCancellation()
         let request = SerialOpenRequest(endpoint: endpoint, model: model, discovery: discovery, recorder: recorder,
                                         deviceStorage: deviceStorage, lease: lease, cancellation: cancellation)
-        let session = try await withTaskCancellationHandler {
+        let session = try await runCableOpen(cancellation: cancellation) {
+            try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
+                           recorder: request.recorder, deviceStorage: request.deviceStorage,
+                           lease: request.lease, cancellation: request.cancellation)
+        }
+        return try handOver(session, cancellation: cancellation)
+    }
+
+    /// Runs `open` on the cable queue. A cancel throws `CableError.cancelled` at once, even while `open` is blocked (in open(2), say);
+    /// `open` then finishes on its own and a session it returns is closed. Until then it holds the lease, so another open is `sessionInProgress`.
+    static func runCableOpen(cancellation: CableOpenCancellation,
+                             _ open: @escaping @Sendable () throws -> DiveComputerSession) async throws -> DiveComputerSession {
+        let gate = CableOpenGate()
+        return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<DiveComputerSession, Error>) in
+                guard gate.install(continuation) else { return }
                 cableQueue.async {
-                    continuation.resume(with: Result {
-                        try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
-                                       recorder: request.recorder, deviceStorage: request.deviceStorage,
-                                       lease: request.lease, cancellation: request.cancellation)
-                    })
+                    let result = Result { try open() }
+                    if !gate.finish(result), case .success(let late) = result { late.close() }
                 }
             }
         } onCancel: {
             cancellation.cancel()
+            gate.finish(.failure(CableError.cancelled))
         }
-        return try handOver(session, cancellation: cancellation)
     }
 
     /// A cancel that landed after the open's last check has already poisoned the session's tap, so it is closed, not returned.
@@ -57,7 +69,7 @@ extension DiveComputerSession {
             throw CableError.driverMissing
         }
         guard model.transports.contains(.serial) else { throw CableError.unsupportedTransport(.serial) }
-        // Checked before the pre-flight, since opening the port raises DTR.
+        // Checked before the port opens, since opening it raises DTR.
         guard DeviceConfiguration.hasDescriptor(family: model.dcFamily, model: model.model) else {
             throw CableError.unsupportedTransport(.serial)
         }
@@ -65,8 +77,6 @@ extension DiveComputerSession {
         guard lease.tryAcquire() else { throw CableError.sessionInProgress }
         var leaseHeld = true
         defer { if leaseHeld { lease.release() } }
-
-        if let refused = SerialPortPreflight.check(path) { throw refused }
 
         var context: OpaquePointer?
         guard dc_context_new(&context) == DC_STATUS_SUCCESS, let context else { throw CableError.protocolError(DC_STATUS_NOMEMORY) }
@@ -81,7 +91,7 @@ extension DiveComputerSession {
         guard status == DC_STATUS_SUCCESS else {
             data.deinitialize(count: 1)
             data.deallocate()
-            guard factory.wrapCalled else { throw CableError.portOpenFailed(status) }
+            guard factory.wrapCalled else { throw SerialPortPreflight.explain(status, path: path) }
             throw CableError.deviceFailed(status, family: model.family, portPresent: access(path, F_OK) == 0)
         }
 
@@ -113,6 +123,39 @@ struct SerialOpenRequest: @unchecked Sendable {
     let deviceStorage: DeviceStorage
     let lease: DiveComputerSessionLease
     let cancellation: CableOpenCancellation
+}
+
+/// Resumes an open's continuation once: with the open's result, or with `cancelled` when the task is cancelled first.
+final class CableOpenGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<DiveComputerSession, Error>?
+    private var finished = false
+
+    /// False when a cancel already finished the gate; the continuation has then been resumed with `cancelled`.
+    func install(_ continuation: CheckedContinuation<DiveComputerSession, Error>) -> Bool {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            continuation.resume(throwing: CableError.cancelled)
+            return false
+        }
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    /// False when the gate was already finished, so `result` reached no one.
+    @discardableResult
+    func finish(_ result: Result<DiveComputerSession, Error>) -> Bool {
+        lock.lock()
+        guard !finished else { lock.unlock(); return false }
+        finished = true
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+        return true
+    }
 }
 
 /// Set from the opening task's cancellation handler, read on the cable queue.
@@ -157,21 +200,31 @@ final class SerialTapFactory {
         return stream
     }
 
-    /// From here the tap also gives up once the session is cancelled, closing (an owned cable session cancels itself first) or released.
+    /// From here the tap also gives up once the session is cancelled or released, and switches to its closing limits as the session closes.
     func attach(_ session: DiveComputerSession) {
         let cancellation = cancellation
         tap?.setCancellation { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
+        if let tap { session.onClosing { tap.beginClosing() } }
     }
 }
 
-/// Opens and closes the port as serial_posix will, since dc_serial_open reports busy and not permitted alike (NOACCESS).
+/// Opens and closes the port as serial_posix does, for the errno behind a failed `dc_serial_open`, which reports busy and not permitted alike.
 enum SerialPortPreflight {
     static func check(_ path: String) -> CableError? {
         let fd = Darwin.open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
         guard fd >= 0 else { return CableError(openErrno: errno) }
-        defer { Darwin.close(fd) }
-        if ioctl(fd, TIOCEXCL) != 0, errno == EBUSY { return .busy }
+        Darwin.close(fd)
         return nil
+    }
+
+    /// Only after `dc_serial_open` failed, so a port that opens is touched once, as upstream does.
+    static func explain(_ status: dc_status_t, path: String) -> CableError {
+        switch status {
+        case DC_STATUS_NOACCESS, DC_STATUS_NODEVICE, DC_STATUS_IO:
+            return check(path) ?? CableError.portOpenFailed(status)
+        default:
+            return CableError.portOpenFailed(status)
+        }
     }
 }
 #endif

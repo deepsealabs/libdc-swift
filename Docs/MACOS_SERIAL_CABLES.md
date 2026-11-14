@@ -38,9 +38,10 @@ What is listed:
   tree). A search would hand a chip with no serial number of its own (a CH340, many PL2303s) the serial of a
   hub or dock above it. The walk also decides whether a port is USB at all, because on Intel Macs the
   Bluetooth controller is itself a USB device.
-- **Known cables with no port**, as `driverMissing`. This is the Oceanic/Pelagic cable (0403:F460) until FTDI's
-  driver is installed.
-- **Paired classic-Bluetooth ports**, as `.classicBTSerial`. They are listed but can't be opened yet.
+- **Known cables with no port**, as `driverMissing`. On a stock Mac these are the Oceanic/Pelagic cable
+  (0403:F460) until FTDI's driver is installed, the Prolific cables with Epson's VID (04B8:0521 for Mares and
+  Cressi, 04B8:0522 for Zeagle) until the cable maker's driver is installed, and a CP2108 (10C4:EA71).
+- **Paired classic-Bluetooth ports** are not listed, because a session can't open them yet.
 - Built-in ports (`debug-console`) and macOS's own `Bluetooth-Incoming-Port` are left out.
 
 An arrival is read again after a short settle (500 ms by default), because a USB device appears before its
@@ -59,7 +60,12 @@ to publish its port. Cables already plugged in at `start()` are listed at once. 
 | 0403:87D0 | Cressi USB cable | Cressi Leonardo, Goa and Edy families only |
 | 0403:F460 | Oceanic/Pelagic USB cable (needs FTDI's driver) | Oceanic Atom 2, Veo 250 and VT Pro families only |
 | 0403:6015, 0403:6001 | FTDI FT-X, FT232R | every serial model, OSTC first |
+| 0403:6010, 0403:6011 | FTDI FT2232, FT4232 | every serial model, OSTC and Suunto first |
+| 04B8:0521 | Mares/Cressi USB cable, Prolific with Epson's VID (needs the cable maker's driver) | every serial model, Mares and Cressi first |
+| 04B8:0522 | Zeagle USB cable, Prolific with Epson's VID (needs the cable maker's driver) | every serial model, Zeagle first |
+| FFFF:0005 | Mares USB interface (USB-CDC) | every serial model, Icon HD first |
 | 10C4:EA60, 10C4:EA70 | Silicon Labs CP210x, CP2105 | every serial model |
+| 10C4:EA71 | Silicon Labs CP2108 (needs Silicon Labs' driver) | every serial model |
 | 067B:2303, 067B:2304 | Prolific PL2303 | every serial model |
 | 1A86:7523, 1A86:55D4 | WCH CH340, CH9102 | every serial model |
 
@@ -67,8 +73,9 @@ Any other USB serial port is listed with no hint, offering every serial model. S
 USB filter, so the flow is model first: the user picks the model.
 
 Which cables macOS drives itself was read from macOS 26.4's built-in driver personalities (AppleUSBFTDI,
-AppleUSBSLCOM, AppleUSBPLCOM, AppleUSBCHCOM). Only 0403:F460 is missing there. Older macOS versions may lack
-other PIDs, so every FTDI hint carries FTDI's driver page as a fallback `driverURL`.
+AppleUSBSLCOM, AppleUSBPLCOM, AppleUSBCHCOM). 0403:F460, 04B8:0521, 04B8:0522 and 10C4:EA71 are missing there.
+Older macOS versions may lack other PIDs, so every FTDI hint carries FTDI's driver page as a fallback
+`driverURL`. A hint with no `driverURL` still says that a driver is missing, and that the cable's maker supplies it.
 
 ## When a cable isn't listed, or has no port
 
@@ -94,34 +101,40 @@ DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel) { resu
 }
 ```
 
-`open` runs on its own queue and does this:
+`open` runs off the caller's thread and does this:
 
 1. It refuses a non-serial endpoint or model, or a model libdivecomputer has no descriptor for
    (`unsupportedTransport`), and a cable with no port (`driverMissing`), all before the port is touched, since
    opening it raises DTR. It takes the session lease, or throws `sessionInProgress`.
-2. A pre-flight `open(O_RDWR | O_NOCTTY | O_NONBLOCK)` plus `TIOCEXCL` captures errno. `dc_serial_open`
-   reports busy and not-permitted the same way (`DC_STATUS_NOACCESS`); errno tells them apart.
-3. `open_serial_device` (LibDCBridge) resolves the descriptor before it touches the port, opens the port, hands
-   it to the `TapStream`, and opens the device with one `dc_device_open` attempt. A serial computer that didn't
-   answer once won't answer a retry on the same port.
+2. `open_serial_device` (LibDCBridge) resolves the descriptor before it touches the port, opens the port once,
+   as libdivecomputer does, hands it to the `TapStream`, and opens the device with one `dc_device_open` attempt.
+   A serial computer that didn't answer once won't answer a retry on the same port.
+3. Only if `dc_serial_open` failed does a second `open(O_RDWR | O_NOCTTY | O_NONBLOCK)` read errno, because
+   `dc_serial_open` reports busy and not permitted the same way (`DC_STATUS_NOACCESS`).
 
-Cancelling the opening task, or calling `session.cancel()`, ends a blocked read, poll or sleep within 100 ms.
+Cancelling the opening task throws `cancelled` at once, even when `open(2)` itself is stuck (a CDC-ACM
+`cu.usbmodem` node can block after the Mac wakes, Apple FB6153687). The stuck open finishes on its own and
+closes what it opened; until then it holds the session lease, so another open throws `sessionInProgress`.
+Opens don't queue behind each other. `session.cancel()` ends a blocked read, poll or sleep within 100 ms.
 Writes can't be interrupted. A cancel that lands just as the open finishes closes the session and throws
 `cancelled`, rather than returning a session whose port gives up on every read. With a started `discovery`,
 pulling the cable cancels the session and sets `wasUnplugged`.
 
-`session.close()` never waits on the computer. An owned cable session cancels itself before
-`dc_device_close`, so a driver's quit or exit command still goes out, but its acknowledgement isn't waited for.
-Closing on the main thread after a failed download, as above, returns at once even when the computer has
-stopped answering (Pelagic, OSTC 3 and Cressi closes would otherwise wait 1 to 9 s).
+`session.close()` runs the driver's close as upstream does: its quit or exit command goes out after the
+driver's own sleeps (Cressi Goa needs 100 ms before every command, or the computer stays in PC Link). The tap
+caps each read at `TapStream.closingReadLimitMilliseconds` (500 ms), so a computer that has stopped answering
+holds a close for about half a second per acknowledgement instead of the driver's 1 to 9 s.
 
 The session's `storageKey` is the endpoint's `locatorKey`. It is never the computer's identity, which DEVINFO
 gives during the download. Fingerprints are keyed by identity (see `DEVICE_IDENTITY.md`). For a computer that
-reports no serial, the adapter's USB serial number stands in for the unit.
+reports no serial, the adapter's USB serial number stands in for the unit. The `StoredDevice` a cable download
+updates is keyed by that locator too, so it describes the last computer reached through this cable, not one
+computer: two computers on one cable share it, and a CH340 with no USB serial is keyed by its port path, which
+changes with the USB port. Key per-computer records on `DiveDownloadResult.identity` (`deviceKey`) instead.
 
 | `CableError` | From |
 |---|---|
-| `unsupportedTransport` | A paired Bluetooth endpoint, a model with no serial transport, or one with no descriptor |
+| `unsupportedTransport` | A non-serial endpoint, a model with no serial transport, or one with no descriptor |
 | `driverMissing` | An endpoint with no port; see `endpoint.driverMissingMessage` |
 | `permissionDenied` | EPERM, EACCES: usually a sandbox without `device.serial` |
 | `busy` | EBUSY: another app (often the computer maker's) has the port |
@@ -132,8 +145,8 @@ reports no serial, the adapter's USB serial number stands in for the unit.
 
 ## Fixtures
 
-`.dcrec` files record what a driver did on the port. `DCStreamRecorder`'s scrubber rewrites serial numbers,
-dates and positions before a recording is saved, and a recording never holds a port path or an adapter serial.
+`.dcrec` files record what a driver did on the port. `DCStreamRecorder`'s scrubber rewrites the computer's
+serial number before a recording is saved, and a recording never holds a port path or an adapter serial.
 `Tests/LibDCSwiftTests/Fixtures/hw_ostc_mk2_synthetic.dcrec` is a classic OSTC download recorded over a pty
 through `DiveComputerSession.open`, from an emulator built from `hw_ostc.c`. Its values are synthetic, and its
 serial is scrubbed to a stand-in. Run the tests with `LIBDC_REGENERATE_DCREC=1` to record it again.

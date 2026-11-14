@@ -46,11 +46,11 @@ public enum CableHints {
     private static let ftdiDriver = URL(string: "https://ftdichip.com/drivers/vcp-drivers/")
 
     private static let ostcFamilies: [DeviceConfiguration.DeviceFamily] = [.hwOstc, .hwOstc3, .hwFrog]
+    private static let suuntoFamilies: [DeviceConfiguration.DeviceFamily] = [.suuntoD9, .suuntoVyper2, .suuntoVyper, .suuntoEon, .suuntoSolution]
 
     public static let all: [CableHint] = [
         CableHint(vendorID: 0x0403, productID: 0xF680, name: "Suunto USB cable", brand: "Suunto",
-                  families: [.suuntoD9, .suuntoVyper2, .suuntoVyper, .suuntoEon, .suuntoSolution], exclusive: true,
-                  driverURL: ftdiDriver),
+                  families: suuntoFamilies, exclusive: true, driverURL: ftdiDriver),
         CableHint(vendorID: 0x0403, productID: 0x87D0, name: "Cressi USB cable", brand: "Cressi",
                   families: [.cressiLeonardo, .cressiGoa, .cressiEdy], exclusive: true, driverURL: ftdiDriver),
         CableHint(vendorID: 0x0403, productID: 0xF460, name: "Oceanic/Pelagic USB cable", brand: "Pelagic",
@@ -60,8 +60,22 @@ public enum CableHints {
                   families: ostcFamilies, driverURL: ftdiDriver),
         CableHint(vendorID: 0x0403, productID: 0x6001, name: "FTDI FT232R USB-serial", brand: "Heinrichs Weikamp",
                   families: ostcFamilies, driverURL: ftdiDriver),
+        // Subsurface's table lists the multi-channel FTDI chips for Suunto and OSTC interfaces too; ranking only.
+        CableHint(vendorID: 0x0403, productID: 0x6010, name: "FTDI FT2232 USB-serial",
+                  families: ostcFamilies + suuntoFamilies, driverURL: ftdiDriver),
+        CableHint(vendorID: 0x0403, productID: 0x6011, name: "FTDI FT4232 USB-serial",
+                  families: ostcFamilies + suuntoFamilies, driverURL: ftdiDriver),
+        // Prolific chips with Epson's VID, which macOS 26.4 has no driver for; the cable maker supplies one.
+        CableHint(vendorID: 0x04B8, productID: 0x0521, name: "Mares/Cressi USB cable (Prolific)", brand: "Mares",
+                  families: [.maresNemo, .maresPuck, .maresDarwin, .cressiEdy, .cressiLeonardo], needsVendorDriver: true),
+        CableHint(vendorID: 0x04B8, productID: 0x0522, name: "Zeagle USB cable (Prolific)", brand: "Zeagle",
+                  families: [.zeagleN2ition3], needsVendorDriver: true),
+        // The Icon HD family's own USB-CDC interface; macOS's CDC driver gives it a port.
+        CableHint(vendorID: 0xFFFF, productID: 0x0005, name: "Mares USB interface", brand: "Mares", families: [.maresIconHD]),
         CableHint(vendorID: 0x10C4, productID: 0xEA60, name: "Silicon Labs CP210x"),
         CableHint(vendorID: 0x10C4, productID: 0xEA70, name: "Silicon Labs CP2105"),
+        CableHint(vendorID: 0x10C4, productID: 0xEA71, name: "Silicon Labs CP2108", needsVendorDriver: true,
+                  driverURL: URL(string: "https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers")),
         CableHint(vendorID: 0x067B, productID: 0x2303, name: "Prolific PL2303"),
         CableHint(vendorID: 0x067B, productID: 0x2304, name: "Prolific PL2303"),
         CableHint(vendorID: 0x1A86, productID: 0x7523, name: "WCH CH340"),
@@ -150,7 +164,8 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
         guard status == .driverMissing else { return nil }
         let source = hint?.driverURL.map { " from \($0.absoluteString)" } ?? ""
         if hint?.needsVendorDriver == true {
-            return "macOS has no driver for the \(displayName). Install the chip maker's driver\(source), "
+            let driver = hint?.driverURL == nil ? "the macOS driver its maker supplies" : "the chip maker's driver\(source)"
+            return "macOS has no driver for the \(displayName), so it has no serial port. Install \(driver), "
                 + "then unplug the cable and plug it in again."
         }
         return "macOS made no serial port for the \(displayName). Unplug it and plug it in again. "
@@ -207,8 +222,10 @@ public struct RegistrySnapshot: Hashable, Sendable {
     }
 
     static let bluetoothIncomingBaseName = "Bluetooth-Incoming-Port"
+    /// Paired Bluetooth ports stay unlisted until a session can open them.
+    static let listsPairedBluetoothPorts = false
 
-    /// USB ports, known cables first; then known cables with no port; then paired Bluetooth ports. Built-in ports and macOS's own Bluetooth listening port are left out.
+    /// USB ports, known cables first; then known cables with no port; then paired Bluetooth ports, once they can be opened. Built-in ports and macOS's own Bluetooth listening port are left out.
     public var endpoints: [CableEndpoint] {
         var usb: [CableEndpoint] = []
         var bluetooth: [CableEndpoint] = []
@@ -220,6 +237,7 @@ public struct RegistrySnapshot: Hashable, Sendable {
                 usb.append(.serialPort(path: port.calloutPath, vendorID: device.vendorID, productID: device.productID,
                                        usbSerialNumber: device.serialNumber, productName: device.productName))
             case .bluetooth:
+                guard Self.listsPairedBluetoothPorts else { continue }
                 let incoming = port.baseName == Self.bluetoothIncomingBaseName
                     || port.calloutPath.hasSuffix("." + Self.bluetoothIncomingBaseName)
                 guard !incoming else { continue }

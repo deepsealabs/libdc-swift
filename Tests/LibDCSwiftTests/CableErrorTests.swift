@@ -24,9 +24,22 @@ final class CableErrorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0]))
         defer { try? FileManager.default.removeItem(at: url) }
         XCTAssertEqual(SerialPortPreflight.check(url.path), .permissionDenied)
-        // A file that opens isn't a tty, and TIOCEXCL's ENOTTY is left for dc_serial_open to report.
+        // A path that opens has nothing to add to dc_serial_open's own status.
         XCTAssertEqual(chmod(url.path, 0o600), 0)
         XCTAssertNil(SerialPortPreflight.check(url.path))
+    }
+
+    func testTheErrnoProbeRunsOnlyForAFailedPortOpen() throws {
+        let missing = "/dev/cu.libdcswift-no-such-port"
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NODEVICE, path: missing), .notFound)
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_IO, path: missing), .notFound, "serial_posix maps EPERM, among others, to IO")
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NOACCESS, path: "/dev/null"), .busy, "it opens now: the race went the other way")
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NOMEMORY, path: missing), .protocolError(DC_STATUS_NOMEMORY))
+        try XCTSkipIf(getuid() == 0, "root opens anything")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("libdcswift-probe-\(UUID().uuidString)")
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0]))
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NOACCESS, path: url.path), .permissionDenied)
     }
 
     func testAPortOpenFailureAfterThePreflight() {
@@ -79,6 +92,14 @@ final class CableErrorTests: XCTestCase {
 
         let gone = try session(path: "/dev/cu.libdcswift-no-such-port")
         XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_IO), dives: 1), session: gone), .unplugged)
+    }
+
+    func testAClosedSessionStillNamesItsFamily() throws {
+        let session = try session(path: "/dev/null")
+        session.close()
+        XCTAssertTrue(session.isClosed)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: session), .noResponse(.reefnetSensus),
+                       "read from the session, not the freed descriptor")
     }
 
     func testAnUnpluggedSessionReadsAsUnplugged() throws {

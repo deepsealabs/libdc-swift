@@ -36,7 +36,7 @@ public enum CableError: Error, Equatable {
         }
     }
 
-    /// `dc_serial_open` failing after the pre-flight open succeeded, which leaves a race with another app or an unplug.
+    /// `dc_serial_open` failing when the errno probe found nothing to say: a race with another app or an unplug.
     static func portOpenFailed(_ status: dc_status_t) -> CableError {
         switch status {
         case DC_STATUS_NOACCESS: return .busy
@@ -63,8 +63,8 @@ public enum CableError: Error, Equatable {
             self = .unplugged
             return
         }
-        let family = session.devicePtr.pointee.descriptor
-            .flatMap { DeviceConfiguration.DeviceFamily(dcFamily: dc_descriptor_get_type($0)) }
+        // Not the descriptor: a closed session has freed it.
+        let family = session.openedFamily
         let portPresent = session.locator?.portPath.map { access($0, F_OK) == 0 } ?? true
         switch result.outcome {
         case .cancelled:

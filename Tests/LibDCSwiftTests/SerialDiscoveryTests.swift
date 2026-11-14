@@ -92,6 +92,35 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertNil(CableEndpoint.serialPort(path: "/dev/cu.usbserial-A", vendorID: 0x0403, productID: 0x6001).driverMissingMessage)
     }
 
+    func testDiveCablesMacOSHasNoDriverForAreListedAndExplained() throws {
+        let epson = USB(registryID: 0x55, vendorID: 0x04B8, productID: 0x0521)
+        let zeagle = USB(registryID: 0x66, vendorID: 0x04B8, productID: 0x0522)
+        let cp2108 = USB(registryID: 0x77, vendorID: 0x10C4, productID: 0xEA71)
+        let endpoints = RegistrySnapshot(cableDevices: [epson, zeagle, cp2108]).endpoints
+        XCTAssertEqual(endpoints.map(\.id), ["usb:55", "usb:66", "usb:77"])
+        XCTAssertTrue(endpoints.allSatisfy { $0.status == .driverMissing && $0.hint?.needsVendorDriver == true })
+        let mares = try XCTUnwrap(endpoints.first)
+        XCTAssertEqual(mares.candidates.first?.family, .maresNemo)
+        XCTAssertEqual(mares.candidates.count, serialCount, "the PID is shared, so every model stays on offer")
+        let message = try XCTUnwrap(mares.driverMissingMessage)
+        XCTAssertTrue(message.contains("macOS has no driver for the Mares/Cressi USB cable"), message)
+        XCTAssertTrue(message.contains("its maker supplies"), message)
+        XCTAssertEqual(endpoints[1].candidates.first?.family, .zeagleN2ition3)
+        XCTAssertTrue(try XCTUnwrap(endpoints[2].driverMissingMessage).contains("silabs.com"))
+    }
+
+    func testRankingHintsPutTheirFamiliesFirst() throws {
+        let icon = CableEndpoint.serialPort(path: "/dev/cu.usbmodem1", vendorID: 0xFFFF, productID: 0x0005)
+        XCTAssertEqual(icon.candidates.first?.family, .maresIconHD)
+        XCTAssertEqual(icon.candidates.count, serialCount)
+        for pid: UInt16 in [0x6010, 0x6011] {
+            let ftdi = CableEndpoint.serialPort(path: "/dev/cu.usbserial-B", vendorID: 0x0403, productID: pid)
+            XCTAssertEqual(ftdi.candidates.first?.family, .hwOstc)
+            XCTAssertEqual(ftdi.candidates.count, serialCount)
+            XCTAssertEqual(ftdi.status, .ready)
+        }
+    }
+
     func testAKnownCableWithAPortIsReady() throws {
         // The same Pelagic cable once the chip maker's driver has made its port.
         let snapshot = RegistrySnapshot(ports: [Port(calloutPath: "/dev/cu.usbserial-PELAGIC1", parent: .usb(Self.pelagic))],
@@ -124,7 +153,16 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertEqual(Set(ftdi.candidates.map(\.id)).count, serialCount, "no model is offered twice")
     }
 
+    func testPairedBluetoothPortsAreNotListedUntilTheyCanOpen() {
+        XCTAssertFalse(RegistrySnapshot.listsPairedBluetoothPorts)
+        let snapshot = RegistrySnapshot(ports: Self.macPorts + [
+            Port(calloutPath: "/dev/cu.Petrel-SerialPort", baseName: "Petrel-SerialPort", parent: .bluetooth),
+        ])
+        XCTAssertEqual(snapshot.endpoints, [])
+    }
+
     func testAPairedBluetoothPortIsClassicBluetoothSerial() throws {
+        try XCTSkipUnless(RegistrySnapshot.listsPairedBluetoothPorts)
         let snapshot = RegistrySnapshot(ports: Self.macPorts + [
             Port(calloutPath: "/dev/cu.Petrel-SerialPort", baseName: "Petrel-SerialPort", parent: .bluetooth),
         ])
@@ -148,8 +186,7 @@ final class SerialDiscoveryTests: XCTestCase {
             "/dev/cu.SLAB_USBtoUART", "/dev/cu.usbserial-SUUNTO01", // hinted ports, by path
             "/dev/cu.usbmodem1101",                                 // other USB ports
             "usb:22",                                               // known cables with no port
-            "/dev/cu.Petrel-SerialPort",                            // paired Bluetooth
-        ])
+        ] + (RegistrySnapshot.listsPairedBluetoothPorts ? ["/dev/cu.Petrel-SerialPort"] : []))
     }
 
     func testAnUnhintedUSBDeviceWithNoPortIsNotListed() {
@@ -196,8 +233,12 @@ final class SerialDiscoveryTests: XCTestCase {
             XCTAssertFalse(chip.needsVendorDriver)
             XCTAssertNil(chip.driverURL)
         }
-        XCTAssertNil(CableHints.hint(vendorID: 0x0403, productID: 0x6010), "multi-channel FTDI chips are JTAG adapters, not dive cables")
-        XCTAssertEqual(CableHints.vendorIDs, [0x0403, 0x10C4, 0x067B, 0x1A86])
+        XCTAssertFalse(try hint(0x0403, 0x6010).exclusive, "multi-channel FTDI chips also sit in JTAG adapters")
+        XCTAssertTrue(try hint(0x04B8, 0x0521).needsVendorDriver)
+        XCTAssertTrue(try hint(0x04B8, 0x0522).needsVendorDriver)
+        XCTAssertTrue(try hint(0x10C4, 0xEA71).needsVendorDriver)
+        XCTAssertFalse(try hint(0xFFFF, 0x0005).needsVendorDriver, "macOS's CDC driver makes its port")
+        XCTAssertEqual(CableHints.vendorIDs, [0x0403, 0x10C4, 0x067B, 0x1A86, 0x04B8, 0xFFFF])
         XCTAssertEqual(Set(CableHints.all.map { "\($0.vendorID):\($0.productID)" }).count, CableHints.all.count)
     }
 

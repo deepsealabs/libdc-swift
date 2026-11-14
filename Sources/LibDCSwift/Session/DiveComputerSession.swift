@@ -100,7 +100,10 @@ public final class DiveComputerSession {
     private var currentIdentity: DiveComputerIdentity?
 #if os(macOS)
     private var unplugged = false
+    private var closingActions: [() -> Void] = []
     private var teardownActions: [() -> Void] = []
+    /// The family the device opened as, read while the descriptor is valid; `CableError(download:)` reads it after a close too.
+    let openedFamily: DeviceConfiguration.DeviceFamily?
 #endif
 
     private init(devicePtr: UnsafeMutablePointer<device_data_t>, displayName: String, storageKey: String,
@@ -115,6 +118,9 @@ public final class DiveComputerSession {
         self.closeCoordinator = closeCoordinator
         self.ownsDevice = ownsDevice
         self.lease = lease
+#if os(macOS)
+        openedFamily = devicePtr.pointee.descriptor.flatMap { DeviceConfiguration.DeviceFamily(dcFamily: dc_descriptor_get_type($0)) }
+#endif
     }
 
     deinit { close() }
@@ -260,7 +266,7 @@ public final class DiveComputerSession {
         cancelled = true
     }
 
-    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends. On macOS an owned cable session is cancelled first, so its close never waits on a silent computer.
+    /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends. On macOS an owned cable session's close runs the driver's quit with its sleeps, but each read waits at most `TapStream.closingReadLimitMilliseconds`, so a silent computer can't hold it for the driver's timeout.
     public func close() {
         lock.lock()
         guard !closed else { lock.unlock(); return }
@@ -350,26 +356,21 @@ public final class DiveComputerSession {
     }
 
     private func teardown() {
-#if os(macOS)
-        // The close's quit command still goes out; a silent computer would otherwise hold each ack read for the driver's timeout.
-        if ownsDevice, transport != DC_TRANSPORT_BLE {
-            lock.lock()
-            cancelled = true
-            lock.unlock()
-        }
-#endif
         if cancelInstalled {
             libdc_set_cancel(devicePtr, nil, nil)
             cancelInstalled = false
         }
         releaseLookupContext()
         if ownsDevice {
+#if os(macOS)
+            runActions(\.closingActions)
+#endif
             libdc_close_device_data(devicePtr)
             devicePtr.deinitialize(count: 1)
             devicePtr.deallocate()
         }
 #if os(macOS)
-        runTeardownActions()
+        runActions(\.teardownActions)
 #endif
         lease.release()
     }
@@ -401,6 +402,14 @@ extension DiveComputerSession {
         cancelled = true
     }
 
+    /// Runs just before an owned device's close, while its iostream is still open (a tap switching to its closing limits).
+    func onClosing(_ action: @escaping () -> Void) {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
+        closingActions.append(action)
+        lock.unlock()
+    }
+
     /// Runs once the device is closed, or at once if the session already is.
     func onTeardown(_ action: @escaping () -> Void) {
         lock.lock()
@@ -413,10 +422,10 @@ extension DiveComputerSession {
         lock.unlock()
     }
 
-    private func runTeardownActions() {
+    private func runActions(_ list: ReferenceWritableKeyPath<DiveComputerSession, [() -> Void]>) {
         lock.lock()
-        let actions = teardownActions
-        teardownActions.removeAll()
+        let actions = self[keyPath: list]
+        self[keyPath: list] = []
         lock.unlock()
         actions.forEach { $0() }
     }

@@ -163,7 +163,7 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertEqual(discovery.endpoints, [])
     }
 
-    func testClosingASessionOnAComputerThatStoppedAnsweringReturnsAtOnce() throws {
+    func testClosingASessionOnAComputerThatStoppedAnsweringWaitsOnlyTheClosingLimit() throws {
         let ostc3 = FakeOSTC3()
         let link = try link(ostc3)
         let session = try openCable(CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC 3"))
@@ -173,8 +173,10 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertFalse(session.isCancelled)
         let start = DispatchTime.now()
         session.close()
-        // hw_ostc3's close sends EXIT and would wait 3000 ms for its echo.
-        XCTAssertLessThan(milliseconds(since: start), 200)
+        // hw_ostc3's close sends EXIT and would wait 3000 ms for its echo; the read is capped instead of cancelled.
+        let elapsed = milliseconds(since: start)
+        XCTAssertGreaterThanOrEqual(elapsed, Double(TapStream.closingReadLimitMilliseconds) - 50)
+        XCTAssertLessThan(elapsed, Double(TapStream.closingReadLimitMilliseconds) + 1000)
         XCTAssertTrue(session.isClosed)
         XCTAssertTrue(waitFor { ostc3.received.last == FakeOSTC3.exitCommand }, "EXIT still goes out")
     }
@@ -242,7 +244,7 @@ final class SerialCableSessionTests: XCTestCase {
     func testFailedOpensLeaveTheLeaseFreeAndThePortUnclaimed() throws {
         let link = try link(SilentDevice())
         let lease = DiveComputerSessionLease()
-        // Unknown to the descriptor table, so the open stops before the pre-flight touches the port.
+        // Unknown to the descriptor table, so the open stops before the port is touched.
         let ghost = DCModel(vendor: "Test", product: "Ghost", family: .hwOstc, model: 99, transports: [.serial], canonicalName: "Test Ghost")
         XCTAssertEqual(cableOpenError(CableFixtures.endpoint(link), model: ghost, lease: lease), .unsupportedTransport(.serial))
         let gone = CableEndpoint.serialPort(path: "/dev/cu.libdcswift-no-such-port", vendorID: 0x0403, productID: 0x6001)
@@ -271,7 +273,8 @@ final class SerialCableSessionTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
-        XCTAssertFalse(lease.isHeld)
+        // The cancel returns at once; the open itself lets go of the lease as it ends.
+        XCTAssertTrue(waitFor { !lease.isHeld })
         XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
     }
 
@@ -298,8 +301,62 @@ final class SerialCableSessionTests: XCTestCase {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
         XCTAssertLessThan(milliseconds(since: cancelled), 150)
-        XCTAssertFalse(lease.isHeld)
+        XCTAssertTrue(waitFor { !lease.isHeld })
         XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+    }
+
+    /// Stands in for an open(2) on a CDC-ACM node that never returns after wake.
+    private final class StuckOpen: @unchecked Sendable {
+        let release = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var made: DiveComputerSession?
+        var session: DiveComputerSession? { lock.lock(); defer { lock.unlock() }; return made }
+
+        func open(lease: DiveComputerSessionLease, storage: DeviceStorage) throws -> DiveComputerSession {
+            release.wait()
+            return try opened(lease: lease, storage: storage)
+        }
+
+        func opened(lease: DiveComputerSessionLease, storage: DeviceStorage) throws -> DiveComputerSession {
+            var context: OpaquePointer?
+            guard dc_context_new(&context) == DC_STATUS_SUCCESS, let context else { throw CableError.protocolError(DC_STATUS_NOMEMORY) }
+            let stream = try DCCustomStream.open(backend: ProbeBackend(), transport: DC_TRANSPORT_SERIAL, context: context)
+            let session = try DiveComputerSession.open(
+                iostream: stream, context: context, family: DC_FAMILY_REEFNET_SENSUS, model: 1, displayName: "Reefnet Sensus",
+                storageKey: "serial:stuck", deviceStorage: storage, lease: lease)
+            lock.lock(); made = session; lock.unlock()
+            return session
+        }
+    }
+
+    func testCancellingAnOpenStuckInTheSystemThrowsAtOnceAndClosesTheSessionItLaterMakes() async throws {
+        let stuck = StuckOpen()
+        let lease = DiveComputerSessionLease()
+        let storage = DeviceStorage(userDefaults: isolatedDefaults("dev"))
+        let cancellation = CableOpenCancellation()
+        let task = Task { try await DiveComputerSession.runCableOpen(cancellation: cancellation) { try stuck.open(lease: lease, storage: storage) } }
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Another open isn't queued behind the stuck one.
+        let other = DiveComputerSessionLease()
+        let quick = try await DiveComputerSession.runCableOpen(cancellation: CableOpenCancellation()) {
+            try StuckOpen().opened(lease: other, storage: storage)
+        }
+        quick.close()
+
+        let cancelled = DispatchTime.now()
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("the open succeeded")
+        } catch {
+            XCTAssertEqual(error as? CableError, .cancelled)
+        }
+        XCTAssertLessThan(milliseconds(since: cancelled), 150)
+        XCTAssertTrue(cancellation.isCancelled)
+        stuck.release.signal()
+        XCTAssertTrue(waitFor { stuck.session?.isClosed == true }, "the late session is closed, not leaked")
+        XCTAssertFalse(lease.isHeld)
     }
 
     func testACancelLandingAfterTheOpenClosesTheSessionInsteadOfReturningIt() throws {
