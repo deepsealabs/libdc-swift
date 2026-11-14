@@ -21,6 +21,7 @@
 #include "libdivecomputer/parser.h"
 #include "configuredc.h"
 #include "CoreBluetoothManagerProtocol.h"
+#include "USBBridge.h"
 
 // Array helper functions
 static inline uint16_t array_uint16_le(const unsigned char array[]) {

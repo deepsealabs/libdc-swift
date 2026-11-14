@@ -140,9 +140,10 @@ public final class TapStream: DCIOStreamBackend {
         let status: dc_status_t
         if inner == nil {
             status = DC_STATUS_IO
-        } else if cancelled {
+        } else if cancelled, transport != DC_TRANSPORT_USB {
             status = DC_STATUS_CANCELLED
         } else {
+            // A raw USB stream takes its own cancel, after the rest of a dive it is mid-way through.
             status = cancellableRead(buffer, &actual)
         }
         if wantsBytes {

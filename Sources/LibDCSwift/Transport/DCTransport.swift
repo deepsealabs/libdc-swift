@@ -36,7 +36,7 @@ public enum DCTransport: String, Codable, CaseIterable, Hashable, Sendable {
 
 /// Cable transports this platform can download over.
 public enum CableSupport {
-    /// Serial and USB HID on macOS; empty on iOS, which reaches computers over BLE only.
+    /// Serial, USB HID and raw USB on macOS; empty on iOS, which reaches computers over BLE only.
     public static var transports: Set<DCTransport> {
         let mask = libdc_cable_transports()
         return Set([DCTransport.serial, .usbHID, .usb].filter { mask & $0.dcValue.rawValue != 0 })
