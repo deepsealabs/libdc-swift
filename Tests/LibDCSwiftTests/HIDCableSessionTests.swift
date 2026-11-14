@@ -56,7 +56,7 @@ final class HIDCableSessionTests: XCTestCase {
             XCTAssertEqual(report.bytes.count, 64)
             XCTAssertEqual(report.bytes.first, 0x3f, "a non-zero report ID goes out as the report's first byte")
         }
-        session.close()
+        closeAndWait(session)
         XCTAssertEqual(Array(device.calls.prefix(6)), [.open(seize: true), .registerInputReport(length: 64), .registerRemoval,
                                                        .setDispatchQueue, .setCancelHandler, .activate])
         XCTAssertEqual(Array(device.calls.suffix(3)), [.cancel, .cancelHandlerRan, .close(seize: true)])
@@ -100,14 +100,14 @@ final class HIDCableSessionTests: XCTestCase {
         let g2 = FakeG2(model: 0x32)
         let asTEK = try openCable(endpoint, model: HIDFixtures.model("Scubapro G2 TEK"), hidDevice: factory(g2).factory)
         let first = try XCTUnwrap(downloadToEnd(asTEK).result?.identity)
-        asTEK.close()
+        closeAndWait(asTEK)
         XCTAssertEqual(first.model, 0x32)
         XCTAssertEqual(first.canonicalName, "Scubapro G2")
 
         let tek = FakeG2(model: 0x31)
         let asG2 = try openCable(endpoint, model: HIDFixtures.model("Scubapro G2"), hidDevice: factory(tek).factory)
         let second = try XCTUnwrap(downloadToEnd(asG2).result?.identity)
-        asG2.close()
+        closeAndWait(asG2)
         XCTAssertEqual(second.model, 0x31)
         XCTAssertEqual(second.canonicalName, "Scubapro G2 TEK")
     }
@@ -159,7 +159,7 @@ final class HIDCableSessionTests: XCTestCase {
         let model = try HIDFixtures.model("Scubapro G2")
         let session = try openCable(HIDFixtures.g2, model: model, recorder: recorder, hidDevice: factory(computer).factory)
         let live = try XCTUnwrap(downloadToEnd(session).result)
-        session.close()
+        closeAndWait(session)
         let recording = recorder.recording(family: model.dcFamily, model: model.model)
         XCTAssertEqual(recording.transport, DC_TRANSPORT_USBHID)
         XCTAssertTrue(recording.exchanges.contains { $0.operation == .write }, "writes are recorded with the report-ID byte")
@@ -239,7 +239,7 @@ final class HIDCableSessionTests: XCTestCase {
         XCTAssertLessThan(milliseconds(since: start), 1_500, "well inside the driver's 5 s timeout")
         XCTAssertTrue(session.wasUnplugged, "the device's own removal callback says so, with no discovery")
         XCTAssertEqual(CableError(download: download, session: session), .unplugged)
-        session.close()
+        closeAndWait(session)
         XCTAssertEqual(Array(device.calls.suffix(2)), [.cancelHandlerRan, .close(seize: true)], "closed after an unplug too, as hidapi does")
     }
 
@@ -250,7 +250,7 @@ final class HIDCableSessionTests: XCTestCase {
                                   viewModel: DiveDataViewModel) throws {
         let first = try openCable(endpoint, model: HIDFixtures.model(model), hidDevice: devices.factory)
         let identity = try XCTUnwrap(downloadToEnd(first, viewModel: viewModel).result?.identity)
-        first.close()
+        closeAndWait(first)
         XCTAssertTrue(viewModel.seedFingerprint(identity: identity, data: Data([0x01, 0x02, 0x03, 0x04])))
     }
 
@@ -266,7 +266,7 @@ final class HIDCableSessionTests: XCTestCase {
         XCTAssertNil(download.fingerprintCommit)
         XCTAssertEqual(CableError(download: download, session: session), .noResponse(.suuntoEonSteel))
         XCTAssertEqual(computer.commands.last, Wire.cmdDirOpen)
-        session.close()
+        closeAndWait(session)
     }
 
     func testAG2SilentAfterDEVINFOIsNoResponseNotUpToDate() throws {
@@ -280,7 +280,7 @@ final class HIDCableSessionTests: XCTestCase {
         XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT))
         XCTAssertNotNil(download.identity, "DEVINFO arrived before the silence")
         XCTAssertEqual(CableError(download: download, session: session), .noResponse(.uwatecSmart))
-        session.close()
+        closeAndWait(session)
     }
 
     func testAClosedSessionsEndpointIsReadyAgain() throws {
@@ -289,7 +289,7 @@ final class HIDCableSessionTests: XCTestCase {
         let session = try openCable(HIDFixtures.eonSteel, model: HIDFixtures.model("Suunto EON Steel"),
                                     discovery: discovery, hidDevice: factory(computer).factory)
         XCTAssertEqual(discovery.endpoints.map(\.status), [.busy])
-        session.close()
+        closeAndWait(session)
         XCTAssertEqual(discovery.endpoints.map(\.status), [.ready], "the claim goes with the session's teardown")
     }
 
@@ -331,7 +331,7 @@ final class HIDCableSessionTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
-        XCTAssertLessThan(milliseconds(since: cancelled), 150)
+        XCTAssertLessThan(milliseconds(since: cancelled), wallClockBound(150))
         // The cancel throws at once; the open lets go of the lease and the device as its read sees the cancel.
         XCTAssertTrue(waitFor { !lease.isHeld })
         XCTAssertTrue(waitFor { devices.devices.first?.calls.last == .close(seize: true) })
@@ -348,7 +348,7 @@ final class HIDCableSessionTests: XCTestCase {
         discovery.remove(id: endpoint.id)
         XCTAssertTrue(session.wasUnplugged)
         XCTAssertTrue(session.isCancelled)
-        session.close()
+        closeAndWait(session)
         XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(endpoint.id))
     }
 
@@ -387,7 +387,7 @@ final class HIDCableSessionTests: XCTestCase {
         for _ in 0..<2 {
             let session = try openCable(HIDFixtures.eonSteel, model: model, lease: lease, hidDevice: devices.factory)
             XCTAssertEqual(downloadToEnd(session).result?.outcome, .completed)
-            session.close()
+            closeAndWait(session)
             XCTAssertFalse(lease.isHeld)
         }
         XCTAssertEqual(devices.devices.count, 2, "a cancelled IOHIDDevice can't be scheduled again")

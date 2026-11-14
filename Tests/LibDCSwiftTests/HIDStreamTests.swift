@@ -162,7 +162,7 @@ final class HIDStreamTests: XCTestCase {
         XCTAssertEqual(stream.setTimeout(0), DC_STATUS_SUCCESS)
         let poll = DispatchTime.now()
         XCTAssertEqual(read(stream).status, DC_STATUS_SUCCESS)
-        XCTAssertLessThan(milliseconds(since: poll), 50, "a 0 timeout doesn't wait")
+        XCTAssertLessThan(milliseconds(since: poll), wallClockBound(50), "a 0 timeout doesn't wait")
     }
 
     func testABlockingReadWaitsForTheReport() {
@@ -188,7 +188,7 @@ final class HIDStreamTests: XCTestCase {
         XCTAssertEqual(read(stream).bytes, Self.report(0x3f), "hidapi hands back what arrived before the unplug")
         let start = DispatchTime.now()
         XCTAssertEqual(read(stream).status, DC_STATUS_IO)
-        XCTAssertLessThan(milliseconds(since: start), 100, "no wait for the timeout")
+        XCTAssertLessThan(milliseconds(since: start), wallClockBound(100), "no wait for the timeout")
         XCTAssertEqual(write(stream, [0x3f, 1]).status, DC_STATUS_IO)
         XCTAssertFalse(device.calls.contains { if case .setReport = $0 { return true } else { return false } })
 
@@ -256,7 +256,7 @@ final class HIDStreamTests: XCTestCase {
             cancelled.value = true
         }
         XCTAssertEqual(read(stream).status, DC_STATUS_CANCELLED)
-        XCTAssertLessThan(try XCTUnwrap(cancelledAt.millisecondsSince), 100, "within a cancel check of the cancel")
+        XCTAssertLessThan(try XCTUnwrap(cancelledAt.millisecondsSince), wallClockBound(100), "within a cancel check of the cancel")
         XCTAssertEqual(read(stream).status, DC_STATUS_CANCELLED)
         XCTAssertEqual(write(stream, [0x00, 0x01]).actual, 2, "writes still go out after a cancel, so a quit command does")
     }
@@ -350,7 +350,7 @@ final class HIDStreamTests: XCTestCase {
         XCTAssertEqual(dc_iostream_get_transport(iostream), DC_TRANSPORT_USBHID)
         let start = DispatchTime.now()
         let results = StreamOps.runAll(iostream, timeout: 0, readSize: 64, sleep: 500)
-        XCTAssertLessThan(milliseconds(since: start), 300, "usbhid.c has no sleep, so a 500 ms sleep returns at once")
+        XCTAssertLessThan(milliseconds(since: start), wallClockBound(300), "usbhid.c has no sleep, so a 500 ms sleep returns at once")
         let expected: [DCIOStreamOperation: dc_status_t] = [
             .setTimeout: DC_STATUS_SUCCESS, .setBreak: DC_STATUS_SUCCESS, .setDTR: DC_STATUS_SUCCESS,
             .setRTS: DC_STATUS_SUCCESS, .getLines: DC_STATUS_SUCCESS, .getAvailable: DC_STATUS_SUCCESS,
