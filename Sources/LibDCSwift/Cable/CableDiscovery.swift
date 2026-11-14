@@ -43,7 +43,7 @@ public final class StaticCableDiscovery: CableDiscovering {
     }
 }
 
-/// A discovery's published endpoints: ports this process has open overlaid as `.busy`, and the sessions to cancel when their endpoint goes.
+/// A discovery's published endpoints: ports and devices this process has open overlaid as `.busy`, and the sessions to cancel when their endpoint goes.
 final class CableEndpointFeed {
     private final class WeakSession {
         weak var session: DiveComputerSession?
@@ -55,9 +55,9 @@ final class CableEndpointFeed {
     private var published: [CableEndpoint] = []
     private var continuations: [UUID: AsyncStream<[CableEndpoint]>.Continuation] = [:]
     private var watchers: [CableEndpoint.ID: [WeakSession]] = [:]
-    private let claims: SerialPortClaims
+    private let claims: EndpointClaims
 
-    init(claims: SerialPortClaims = .shared) {
+    init(claims: EndpointClaims = .shared) {
         self.claims = claims
         claims.observe(self)
     }
@@ -116,9 +116,9 @@ final class CableEndpointFeed {
     func republish() {
         lock.lock()
         defer { lock.unlock() }
-        let claimed = claims.claimedPaths
+        let claimed = claims.claimedKeys
         let next = base.map { endpoint -> CableEndpoint in
-            guard endpoint.status == .ready, let path = endpoint.calloutPath, claimed.contains(path) else { return endpoint }
+            guard endpoint.status == .ready, let key = endpoint.claimKey, claimed.contains(key) else { return endpoint }
             var busy = endpoint
             busy.status = .busy
             return busy
@@ -141,9 +141,9 @@ final class CableEndpointFeed {
     }
 }
 
-/// The serial ports this process's sessions have open, so every discovery shows them `.busy`.
-final class SerialPortClaims {
-    static let shared = SerialPortClaims()
+/// The serial ports and USB HID devices this process's sessions have open (by `CableEndpoint.claimKey`), so every discovery shows them `.busy`.
+final class EndpointClaims {
+    static let shared = EndpointClaims()
 
     private final class WeakFeed {
         weak var feed: CableEndpointFeed?
@@ -154,22 +154,22 @@ final class SerialPortClaims {
     private var counts: [String: Int] = [:]
     private var feeds: [WeakFeed] = []
 
-    var claimedPaths: Set<String> {
+    var claimedKeys: Set<String> {
         lock.lock(); defer { lock.unlock() }
         return Set(counts.keys)
     }
 
-    func claim(_ path: String) {
+    func claim(_ key: String) {
         lock.lock()
-        counts[path, default: 0] += 1
+        counts[key, default: 0] += 1
         lock.unlock()
         notify()
     }
 
-    func release(_ path: String) {
+    func release(_ key: String) {
         lock.lock()
-        if let count = counts[path] {
-            counts[path] = count > 1 ? count - 1 : nil
+        if let count = counts[key] {
+            counts[key] = count > 1 ? count - 1 : nil
         }
         lock.unlock()
         notify()

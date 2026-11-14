@@ -313,7 +313,7 @@ final class SerialCableSessionTests: XCTestCase {
         let gone = CableEndpoint.serialPort(path: "/dev/cu.libdcswift-no-such-port", vendorID: 0x0403, productID: 0x6001)
         XCTAssertEqual(cableOpenError(gone, model: ghost, lease: lease), .unsupportedTransport(.serial), "refused before notFound")
         XCTAssertFalse(lease.isHeld)
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
         // And the next open on the same lease goes through.
         let session = try openCable(CableFixtures.endpoint(link), model: CableFixtures.model("Heinrichs Weikamp OSTC Mk2"), lease: lease)
         XCTAssertTrue(lease.isHeld)
@@ -338,7 +338,7 @@ final class SerialCableSessionTests: XCTestCase {
         }
         // The cancel returns at once; the open itself lets go of the lease as it ends.
         XCTAssertTrue(waitFor { !lease.isHeld })
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
     }
 
     func testCancellingAnOpenBlockedInAHandshakeReadThrowsCancelledPromptly() async throws {
@@ -365,7 +365,7 @@ final class SerialCableSessionTests: XCTestCase {
         }
         XCTAssertLessThan(milliseconds(since: cancelled), wallClockBound(150))
         XCTAssertTrue(waitFor { !lease.isHeld })
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
     }
 
     /// Stands in for an open(2) on a CDC-ACM node that never returns after wake.
@@ -436,7 +436,7 @@ final class SerialCableSessionTests: XCTestCase {
         }
         XCTAssertTrue(session.isClosed)
         XCTAssertTrue(waitFor { !lease.isHeld })
-        XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
+        XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(link.path))
     }
 
     // MARK: - open_serial_device
