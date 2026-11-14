@@ -7,8 +7,10 @@ in LibDCBridge (`USBBridge.m`) on IOUSBLib, opened through `dc_custom_open` as `
 libdivecomputer's own Cobalt driver (`atomics_cobalt.c`) runs unchanged. iOS builds contain none of this:
 `USBBridge.m` and `USBBridge.h` are `TARGET_OS_OSX` only, and every Swift type on this page is `#if os(macOS)`.
 
-**Beta.** No real Cobalt has been downloaded through this path yet. The library ships it on, and marks the two
-models beta: `DCModel.isBeta(on: .usb)` and `CableEndpoint.isBeta` are true for them, from
+**Beta.** Beta marks a path with no upstream-proven transport behind it: upstream reaches the Cobalt through
+libusb, and `USBStream` is new code in its place. No real Cobalt has been downloaded through it yet (nor has any
+computer through the serial or USB HID paths, which aren't Beta because they run upstream's own `serial_posix.c`
+or follow hidapi's IOHIDDevice backend). The library ships it on, and marks the two models beta: `DCModel.isBeta(on: .usb)` and `CableEndpoint.isBeta` are true for them, from
 `DeviceCatalog.betaFamilies`. Hosts should label them "Beta". A host that wants to turn the transport off can
 leave `.usb` endpoints out of what it shows.
 
@@ -63,9 +65,10 @@ Cobalt has no quit command, so closing a session only releases the interface and
 Cancelling the opening task throws `cancelled` at once; the open itself ends with its read. `session.cancel()`
 works as upstream's cooperative cancel does: a cancel between dives is taken at once, and one that lands while
 a dive is arriving lets that dive finish (a short packet, a zero-length packet, or the driver's 2 s timeout)
-before the read returns `CANCELLED`, reading and dropping whatever of the dive is left. The Cobalt has no quit
-command, so cutting a dive short would leave the rest of it on the IN pipe, to arrive in place of the next
-session's version block. Only a transfer with no timeout, which nothing else would end, or one on a device the
+before the read returns `CANCELLED`, reading and dropping whatever of the dive is left. A cancel that lands
+while a request is on the wire (between the driver's own cancel check and its first read) is taken the same
+way: a request that went out has its reply read before `CANCELLED`. The Cobalt has no quit command, so cutting
+a dive short would leave the rest of it on the IN pipe, to arrive in place of the next session's version block. Only a transfer with no timeout, which nothing else would end, or one on a device the
 registry has seen go (`abortCheck`), is aborted within 50 ms (`USBStream.cancelCheckMilliseconds`). A transfer that fails with the device gone from the registry marks the
 session unplugged, so `CableError(download:session:)` is `.unplugged` even without a discovery. With one, the
 endpoint also disappears.
@@ -120,9 +123,11 @@ Where this differs from `usb.c`, and why:
 - **A control transfer that moved its data stage is `SUCCESS`.** `usb.c` takes `libusb_control_transfer`'s byte
   count for an error, so its libusb build would report `IO` for one. No driver sends a data stage today (the
   Cobalt's requests have `wLength` 0).
-- **Cancel never cuts a dive short.** See above. A transfer with no timeout (writes, or a read before the driver
-  sets one) is still aborted: a timer checks the cancel check every 50 ms and, once it's true, calls `AbortPipe`
-  on both pipes and `USBDeviceAbortPipeZero`. Writes and control transfers are refused after a cancel too.
+- **Cancel never cuts a dive short.** See above. A transfer with no timeout (a write, a read or a control
+  request before the driver sets one) is still aborted: a timer checks the cancel check every 50 ms and, once
+  it's true, calls `AbortPipe` on both pipes and `USBDeviceAbortPipeZero`. A control request with a timeout runs
+  to its end, since an aborted request may still have reached the computer. Writes and control transfers are
+  refused after a cancel too, before anything goes out.
   `TapStream` passes raw USB reads through after a cancel, so the stream can finish the dive.
 
 `USBDeviceIO` (the Objective-C protocol `LibDCUSBDevice`) is the seam: `IOKitUSBDevice` is the live device, and
