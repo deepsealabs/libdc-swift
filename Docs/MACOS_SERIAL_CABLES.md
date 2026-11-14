@@ -86,7 +86,9 @@ Older macOS versions may lack other PIDs, so every FTDI hint carries FTDI's driv
   Security.
 - **Listed as `driverMissing`.** `endpoint.driverMissingMessage` says what to do in English: install the chip
   maker's driver for a cable macOS has no driver for (with `hint.driverURL`), or replug, then install the
-  driver, for one macOS should drive itself.
+  driver, for one macOS should drive itself. An App Store build may not send people to download or install a
+  driver (Guideline 2.4.5), so it shows `endpoint.driverMissingStoreMessage` instead, which has no link and no
+  install step, and doesn't show `driverURL`. `CableError.driverMissing.message` has neither either.
 - **Listed as `busy`.** A session in this process has the port. Another app holding it is only found at open,
   as `CableError.busy`.
 
@@ -97,7 +99,7 @@ let session = try await DiveComputerSession.open(endpoint, model: model, discove
 DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel) { result in
     if let error = CableError(download: result, session: session) { /* show error.message */ }
     result.fingerprintCommit?.acknowledge()   // once the host has stored the dives
-    session.close()
+    session.close()   // returns at once on the main thread; the port closes on a background queue
 }
 ```
 
@@ -105,16 +107,20 @@ DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel) { resu
 
 1. It refuses a non-serial endpoint or model, or a model libdivecomputer has no descriptor for
    (`unsupportedTransport`), and a cable with no port (`driverMissing`), all before the port is touched, since
-   opening it raises DTR. It takes the session lease, or throws `sessionInProgress`.
+   opening it raises DTR. It throws `sessionInProgress` while another session holds the lease or another open
+   is in progress on the same port.
 2. `open_serial_device` (LibDCBridge) resolves the descriptor before it touches the port, opens the port once,
    as libdivecomputer does, hands it to the `TapStream`, and opens the device with one `dc_device_open` attempt.
-   A serial computer that didn't answer once won't answer a retry on the same port.
+   The session lease is taken as the port is handed over, before anything is sent; if another session took it
+   in between, the port is closed again and the open throws `sessionInProgress`. A serial computer that didn't
+   answer once won't answer a retry on the same port.
 3. Only if `dc_serial_open` failed does a second `open(O_RDWR | O_NOCTTY | O_NONBLOCK)` read errno, because
    `dc_serial_open` reports busy and not permitted the same way (`DC_STATUS_NOACCESS`).
 
 Cancelling the opening task throws `cancelled` at once, even when `open(2)` itself is stuck (a CDC-ACM
 `cu.usbmodem` node can block after the Mac wakes, Apple FB6153687). The stuck open finishes on its own and
-closes what it opened; until then it holds the session lease, so another open throws `sessionInProgress`.
+closes what it opened. It doesn't hold the session lease while it is stuck, so other cables and Bluetooth
+sessions still open; another open of the same port throws `sessionInProgress` until it returns.
 Opens don't queue behind each other. `session.cancel()` ends a blocked read, poll or sleep within 100 ms.
 Writes can't be interrupted. A cancel that lands just as the open finishes closes the session and throws
 `cancelled`, rather than returning a session whose port gives up on every read. With a started `discovery`,
@@ -123,7 +129,16 @@ pulling the cable cancels the session and sets `wasUnplugged`.
 `session.close()` runs the driver's close as upstream does: its quit or exit command goes out after the
 driver's own sleeps (Cressi Goa needs 100 ms before every command, or the computer stays in PC Link). The tap
 caps each read at `TapStream.closingReadLimitMilliseconds` (500 ms), so a computer that has stopped answering
-holds a close for about half a second per acknowledgement instead of the driver's 1 to 9 s.
+holds a close for about half a second per acknowledgement instead of the driver's 1 to 9 s. That is still up
+to about 1.7 s (Oceanic Atom 2's retries), and a write to a stalled link can block longer, so a close that
+reaches the main thread (a `close()` call there, the end of a download a close was waiting for, or the last
+release of the session) runs on a background queue instead. `isClosed` is true at once, but the session keeps
+the lease, and the endpoint stays `busy`, until the port is really closed, so an open in the meantime throws
+`sessionInProgress`. `close(completion:)` calls back on the main queue once it is. A close called off the main
+thread returns once the port is closed.
+
+None of this has run against a real computer yet: the sessions are tested over a pseudo-terminal against
+emulators built from libdivecomputer's protocol code, and through recorded exchanges.
 
 The session's `storageKey` is the endpoint's `locatorKey`. It is never the computer's identity, which DEVINFO
 gives during the download. Fingerprints are keyed by identity (see `DEVICE_IDENTITY.md`). For a computer that
@@ -138,6 +153,7 @@ changes with the USB port. Key per-computer records on `DiveDownloadResult.ident
 | `driverMissing` | An endpoint with no port; see `endpoint.driverMissingMessage` |
 | `permissionDenied` | EPERM, EACCES: usually a sandbox without `device.serial` |
 | `busy` | EBUSY: another app (often the computer maker's) has the port |
+| `sessionInProgress` | Another session is open or still closing, or another open is in progress on the port |
 | `notFound` | ENOENT, ENXIO, ENODEV: the cable came out before the open |
 | `noResponse(family)` | `DC_STATUS_TIMEOUT` before any dive: the wrong model, not seated, or not in PC mode. `message` adds the family's `DeviceCatalog.cableConnectInstructions(for:)` |
 | `unplugged` | The discovery saw the port go, or the link failed with the port gone |
