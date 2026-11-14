@@ -8,6 +8,9 @@ public final class TapStream: DCIOStreamBackend {
     public static let cancelCheckMilliseconds: Int32 = 50
     /// While closing, the longest one read or poll waits, so a silent computer can't hold a driver's close for its full timeout.
     public static let closingReadLimitMilliseconds: Int32 = 500
+    /// A paired classic-Bluetooth link's floor for a driver's positive read timeout: Subsurface's libdivecomputer gives Shearwater
+    /// 12 s where upstream gives 3 s, and the RFCOMM link can still be settling when the first request goes out.
+    public static let bluetoothReadTimeoutFloorMilliseconds: Int32 = 12_000
 
     /// The inner stream's transport, to open the tap's own stream with.
     public let transport: dc_transport_t
@@ -19,14 +22,18 @@ public final class TapStream: DCIOStreamBackend {
     private let cancelLock = NSLock()
     private var cancelCheck: (() -> Bool)?
     private var closingLimit: Int32?
+    private let readTimeoutFloor: Int32?
+    private var received = 0
     private var timeout: Int32?
     private var innerTimeout: Int32?
     private var slicedReads = true
 
-    /// Takes ownership of `inner`: `close()` closes it, and so does deinit if `close()` never ran.
+    /// Takes ownership of `inner`: `close()` closes it, and so does deinit if `close()` never ran. A positive timeout the driver
+    /// sets is raised to `readTimeoutFloor` on the inner stream; recordings keep the driver's own value.
     public init(inner: OpaquePointer, channel: String? = nil, recorder: DCStreamRecorder? = nil,
-                isCancelled: (() -> Bool)? = nil) {
+                isCancelled: (() -> Bool)? = nil, readTimeoutFloor: Int32? = nil) {
         self.inner = inner
+        self.readTimeoutFloor = readTimeoutFloor
         transport = dc_iostream_get_transport(inner)
         self.channel = channel ?? DCRecording.name(of: transport)
         self.recorder = recorder
@@ -56,6 +63,12 @@ public final class TapStream: DCIOStreamBackend {
         closingLimit = max(readLimit, 1)
     }
 
+    /// Bytes the inner stream has handed back so far: a link that never answered reads 0.
+    public var bytesRead: Int {
+        cancelLock.lock(); defer { cancelLock.unlock() }
+        return received
+    }
+
     private var cancelled: Bool {
         cancelLock.lock()
         let check = closingLimit == nil ? cancelCheck : nil
@@ -77,10 +90,11 @@ public final class TapStream: DCIOStreamBackend {
     // MARK: - DCIOStreamBackend
 
     public func setTimeout(_ timeout: Int32) -> dc_status_t {
-        let status = inner.map { dc_iostream_set_timeout($0, timeout) } ?? DC_STATUS_IO
+        let effective = readTimeoutFloor.map { timeout > 0 ? max(timeout, $0) : timeout } ?? timeout
+        let status = inner.map { dc_iostream_set_timeout($0, effective) } ?? DC_STATUS_IO
         if status == DC_STATUS_SUCCESS {
-            self.timeout = timeout
-            innerTimeout = timeout
+            self.timeout = effective
+            innerTimeout = effective
         }
         recorder?.append(.setTimeout(timeout, status: status))
         return status
@@ -145,6 +159,11 @@ public final class TapStream: DCIOStreamBackend {
         } else {
             // A raw USB stream takes its own cancel, after the rest of a dive it is mid-way through.
             status = cancellableRead(buffer, &actual)
+        }
+        if actual > 0 {
+            cancelLock.lock()
+            received += actual
+            cancelLock.unlock()
         }
         if wantsBytes {
             let bytes = Array(UnsafeRawBufferPointer(rebasing: buffer[0..<actual]))

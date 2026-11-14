@@ -46,7 +46,8 @@ What is listed:
   (0403:F460) until FTDI's driver is installed, the Prolific cables with Epson's VID (04B8:0521 for Mares and
   Cressi, 04B8:0522 for Zeagle) until the cable maker's driver is installed, and a CP2108 (10C4:EA71).
 - **Paired classic-Bluetooth ports**, as `.classicBTSerial`: the Shearwater Predator, Petrel, Petrel 2, Nerd
-  and Perdix, over the `/dev/cu.*` port their Serial Port Profile pairing makes. Beta; see below.
+  and Perdix, over the `/dev/cu.*` port their Serial Port Profile pairing makes, offering the models the port's
+  name matches. Beta; see below.
 - Built-in ports (`debug-console`) and macOS's own `Bluetooth-Incoming-Port` are left out.
 
 An arrival is read again after a short settle (500 ms by default), because a USB device appears before its
@@ -158,7 +159,8 @@ changes with the USB port. Key per-computer records on `DiveDownloadResult.ident
 |---|---|
 | `unsupportedTransport` | A model with no `.serial` or `.classicBTSerial` descriptor on this endpoint's transport |
 | `driverMissing` | An endpoint with no port; see `endpoint.driverMissingMessage` |
-| `bluetoothNotConnected` | ENOTCONN on a `.classicBTSerial` port: start Upload Log on the computer and keep it near the Mac |
+| `bluetoothNotConnected` | A `.classicBTSerial` session that timed out (or failed with `IO`) before the computer sent a byte, or ENOTCONN on its port: start Upload Log on the computer and keep it near the Mac |
+| `bluetoothLinkLost` | A `.classicBTSerial` link that answered, then timed out or failed: the computer moved out of range, say |
 | `permissionDenied` | EPERM, EACCES: usually a sandbox without `device.serial` |
 | `busy` | EBUSY: another app (often the computer maker's) has the port |
 | `sessionInProgress` | Another session is open or still closing, or another open is in progress on the port |
@@ -181,14 +183,32 @@ Petrel and Nerd, which don't. No real computer has confirmed a download over thi
 (`DeviceCatalog.betaFamilies[.classicBTSerial]`), and `CableEndpoint.isBeta` follows. Hosts should label them
 "Beta".
 
-A port that exists from an earlier pairing but whose computer isn't connected now (off, out of range, or not
-in Upload Log) fails the pre-flight `open` with `ENOTCONN`, read as `CableError.bluetoothNotConnected`. That
-errno mapping hasn't been confirmed against real hardware. A computer that is paired, in range and in Upload
-Log but silent still reads as `noResponse`, as any serial computer does.
+The paired port is an `IOUserPseudoSerial` that bluetoothd connects on its own after the open: on macOS 26.4
+it opens in milliseconds and takes writes whether or not a computer is connected, with DTR, RTS, CTS and DSR
+up and carrier (DCD) down. Both references bring the link up before any byte goes out: libdivecomputer with a
+blocking RFCOMM `connect()`, Subsurface by waiting up to 25 s for Qt's socket to connect. Shearwater's open
+only configures the line, then its first request goes out 300 ms later and is never resent, with 3 s for the
+reply. So for a `.classicBTSerial` endpoint:
 
-Every paired Serial Port Profile port is offered all 5 Shearwater models regardless of its name, so a
-non-Shearwater SPP device (a GPS, a phone, an OBD adapter) also shows up here once it's paired. Narrowing
-candidates by the port's own name is a follow-up, once HIL shows what Shearwater's ports are actually called.
+- Between `dc_serial_open` and `dc_device_open`, the open polls the port's lines every 50 ms for carrier, for
+  up to 20 s (Qt's RFCOMM open timer), and goes on as soon as carrier rises. If it never rises, the open goes
+  ahead anyway and logs the line changes, so the first hardware run can settle which line tracks the link.
+  A cancel ends the wait.
+- The tap raises any positive read timeout the driver sets to 12 s (`TapStream.bluetoothReadTimeoutFloorMilliseconds`,
+  Subsurface's libdivecomputer value for Shearwater). Reads still poll in 50 ms slices, so a cancel lands as
+  fast as before. Recordings keep the driver's own 3 s.
+- The port is opened once. A failed `dc_serial_open` is explained by a second open only after the fact, so no
+  extra open and close cycles the RFCOMM link right before the real one.
+
+A computer that never sends a byte (off, out of range, not in Upload Log) reads as
+`CableError.bluetoothNotConnected`, and one that answered and then went silent or failed as `bluetoothLinkLost`.
+ENOTCONN on the port means `bluetoothNotConnected` too, but the probe above suggests the port never reports it.
+
+A paired port is offered the Shearwater models its name starts with, case-insensitively (Perdix, Petrel,
+Nerd, Predator; a "Petrel" offers the Petrel 2 first, since both call themselves that). A port whose name
+matches none (a GPS, a phone) is offered all five, with the Petrel family first and the Predator, which has
+another driver, last. Other families libdivecomputer flags for Bluetooth (OSTC, Ratio, McLean) aren't offered
+on paired ports yet.
 
 ## Fixtures
 

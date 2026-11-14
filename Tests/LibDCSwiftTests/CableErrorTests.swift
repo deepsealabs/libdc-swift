@@ -14,7 +14,8 @@ final class CableErrorTests: XCTestCase {
         XCTAssertEqual(CableError(openErrno: ENOENT), .notFound)
         XCTAssertEqual(CableError(openErrno: ENXIO), .notFound)
         XCTAssertEqual(CableError(openErrno: ENODEV), .notFound)
-        XCTAssertEqual(CableError(openErrno: ENOTCONN), .bluetoothNotConnected, "a classic-Bluetooth port left over from an earlier pairing")
+        XCTAssertEqual(CableError(openErrno: ENOTCONN, transport: .classicBTSerial), .bluetoothNotConnected)
+        XCTAssertEqual(CableError(openErrno: ENOTCONN), .portError(errno: ENOTCONN), "a USB-serial port says nothing about Bluetooth")
         XCTAssertEqual(CableError(openErrno: EIO), .portError(errno: EIO))
     }
 
@@ -113,11 +114,35 @@ final class CableErrorTests: XCTestCase {
         XCTAssertNil(CableError(download: result(.completed, dives: 1), session: session), "it finished first")
     }
 
+    private func pairedSession(receivedBytes: Bool) throws -> DiveComputerSession {
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let stream = try DCCustomStream.open(backend: ProbeBackend(), transport: DC_TRANSPORT_SERIAL, context: context)
+        let session = try DiveComputerSession.open(
+            iostream: stream, context: try XCTUnwrap(context), family: DC_FAMILY_SHEARWATER_PETREL, model: 3,
+            displayName: "Shearwater Petrel", storageKey: "btserial:test", locator: .classicBTSerial(path: "/dev/null"),
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
+        session.setBytesProbe { receivedBytes }
+        addTeardownBlock { session.close() }
+        return session
+    }
+
+    func testAClassicBluetoothLinkThatNeverAnsweredOrDroppedSaysSo() throws {
+        let silent = try pairedSession(receivedBytes: false)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: silent), .bluetoothNotConnected)
+        let dropped = try pairedSession(receivedBytes: true)
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 2), session: dropped), .bluetoothLinkLost)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_IO)), session: dropped), .bluetoothLinkLost,
+                       "the paired port stays, so it never reads as an unplug")
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_PROTOCOL)), session: dropped), .protocolError(DC_STATUS_PROTOCOL))
+        XCTAssertNil(CableError(download: result(.parseRejected(count: 1, status: DC_STATUS_DATAFORMAT)), session: dropped))
+    }
+
     // MARK: - Messages
 
     func testEveryErrorSaysSomething() {
         let all: [CableError] = [
-            .unsupportedTransport(.classicBTSerial), .driverMissing, .bluetoothNotConnected, .permissionDenied, .busy, .sessionInProgress,
+            .unsupportedTransport(.classicBTSerial), .driverMissing, .bluetoothNotConnected, .bluetoothLinkLost, .permissionDenied, .busy, .sessionInProgress,
             .notFound, .unplugged, .noResponse(.suuntoVyper), .cancelled, .portError(errno: EIO), .protocolError(DC_STATUS_PROTOCOL),
         ]
         for error in all {

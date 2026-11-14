@@ -36,9 +36,10 @@ public enum DCTransport: String, Codable, CaseIterable, Hashable, Sendable {
 
 /// Cable transports this platform can download over.
 public enum CableSupport {
-    /// Serial, USB HID and raw USB on macOS; empty on iOS, which reaches computers over BLE only.
+    /// Serial, paired classic-Bluetooth serial, USB HID and raw USB on macOS; empty on iOS, which reaches computers over BLE only.
     public static var transports: Set<DCTransport> {
         let mask = libdc_cable_transports()
-        return Set([DCTransport.serial, .usbHID, .usb].filter { mask & $0.dcValue.rawValue != 0 })
+        // A paired classic-Bluetooth port is a serial port, so it comes with serial.
+        return Set([DCTransport.serial, .classicBTSerial, .usbHID, .usb].filter { mask & $0.dcValue.rawValue != 0 })
     }
 }

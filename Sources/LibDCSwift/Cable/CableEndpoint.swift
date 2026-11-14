@@ -167,6 +167,13 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
                              candidates: candidates, registryID: registryID)
     }
 
+    /// A paired classic-Bluetooth port, offering the models its name matches (`DeviceCatalog.pairedBluetoothCandidates`).
+    public static func pairedBluetoothPort(path: String, baseName: String? = nil) -> CableEndpoint {
+        let name = baseName ?? (path as NSString).lastPathComponent.replacingOccurrences(of: "cu.", with: "")
+        return CableEndpoint(id: path, transport: .classicBTSerial, calloutPath: path, productName: baseName,
+                             candidates: DeviceCatalog.pairedBluetoothCandidates(portName: name))
+    }
+
     /// Where a session on this endpoint reached the computer; nil when there is no port or device to open.
     public var locator: DiveComputerLocator? {
         if transport == .usbHID || transport == .usb {
@@ -320,8 +327,8 @@ public struct RegistrySnapshot: Hashable, Sendable {
     }
 
     static let bluetoothIncomingBaseName = "Bluetooth-Incoming-Port"
-    /// Paired Bluetooth ports stay unlisted until a session can open them.
-    static let listsPairedBluetoothPorts = false
+    /// Paired Bluetooth ports are listed now that a session can open them.
+    static let listsPairedBluetoothPorts = true
 
     /// USB HID computers; then raw USB computers; then USB ports, known cables first; then known cables with no port; then paired Bluetooth ports, once they can be opened. Built-in ports, macOS's own Bluetooth listening port, keyboards and mice beside a computer's own interface, and HID devices that are no known model are left out.
     public var endpoints: [CableEndpoint] {
@@ -339,9 +346,7 @@ public struct RegistrySnapshot: Hashable, Sendable {
                 let incoming = port.baseName == Self.bluetoothIncomingBaseName
                     || port.calloutPath.hasSuffix("." + Self.bluetoothIncomingBaseName)
                 guard !incoming else { continue }
-                bluetooth.append(CableEndpoint(id: port.calloutPath, transport: .classicBTSerial, calloutPath: port.calloutPath,
-                                               productName: port.baseName,
-                                               candidates: DeviceCatalog.models(for: .classicBTSerial)))
+                bluetooth.append(.pairedBluetoothPort(path: port.calloutPath, baseName: port.baseName))
             case .none:
                 continue
             }

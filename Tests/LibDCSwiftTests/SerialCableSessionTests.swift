@@ -295,6 +295,40 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertEqual(link.termios.c_cflag & tcflag_t(PARENB), 0)
     }
 
+    func testTheBluetoothLinkWaitGoesOnOnceCarrierRises() {
+        final class Lines: @unchecked Sendable { var reads = 0 }
+        let lines = Lines()
+        let up = BluetoothLinkWait.wait(limit: 2000, poll: 5, isCancelled: { false }) {
+            lines.reads += 1
+            // DTR, RTS, CTS and DSR as the probe on an unconnected port saw; carrier from the fourth read.
+            return lines.reads >= 4 ? 0x126 | UInt32(DC_LINE_DCD.rawValue) : 0x126 & ~UInt32(DC_LINE_DCD.rawValue)
+        }
+        guard case .up = up else { return XCTFail("\(up)") }
+        XCTAssertEqual(lines.reads, 4)
+        XCTAssertEqual(BluetoothLinkWait.limitMilliseconds, 20_000, "Qt's RFCOMM open timer, and Subsurface's wait")
+    }
+
+    func testTheBluetoothLinkWaitGivesUpWithoutFailingTheOpen() {
+        let start = DispatchTime.now()
+        XCTAssertEqual(BluetoothLinkWait.wait(limit: 60, poll: 5, isCancelled: { false }) { 0 }, .timedOut)
+        XCTAssertLessThan(milliseconds(since: start), 1000)
+        XCTAssertEqual(BluetoothLinkWait.wait(isCancelled: { false }) { nil }, .noLineStatus, "a pty has no modem lines")
+        XCTAssertEqual(BluetoothLinkWait.wait(isCancelled: { true }) { 0 }, .cancelled)
+    }
+
+    func testAPairedPortThatNeverAnswersIsBluetoothNotConnected() throws {
+        let link = try link(SilentDevice())
+        let paired = CableEndpoint.pairedBluetoothPort(path: link.path, baseName: "Petrel-SerialPort")
+        let session = try openCable(paired, model: try XCTUnwrap(paired.candidates.first))
+        // A positive timeout on the paired port is at least 12 s, so the silent first request takes that long.
+        let start = DispatchTime.now()
+        let download = try XCTUnwrap(downloadToEnd(session, timeout: 30).result)
+        XCTAssertGreaterThanOrEqual(milliseconds(since: start), Double(TapStream.bluetoothReadTimeoutFloorMilliseconds) - 100)
+        XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT))
+        XCTAssertEqual(CableError(download: download, session: session), .bluetoothNotConnected)
+        session.close()
+    }
+
     func testASecondSessionIsRefusedBeforeThePortOpens() throws {
         let link = try link()
         let initial = link.termios
