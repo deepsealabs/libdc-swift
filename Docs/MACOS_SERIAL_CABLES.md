@@ -177,6 +177,10 @@ Serial Port Profile port once the computer is paired in System Settings > Blueto
 `DC_TRANSPORT_SERIAL` to libdivecomputer, so `DiveComputerSession.open` opens a `.classicBTSerial` endpoint
 exactly as it opens a USB-serial one, through the same `open_serial_device` and `TapStream`.
 
+A sandboxed app opens the paired port under `com.apple.security.device.serial`, as any serial port: this path makes
+no IOBluetooth or CoreBluetooth call. Whether the sandbox also wants `com.apple.security.device.bluetooth` for a
+Bluetooth-backed port hasn't been checked, so a host that carries it for BLE should keep it.
+
 Petrel 2 and Perdix also have BLE, which needs no pairing; `.classicBTSerial` matters mainly for the Predator,
 Petrel and Nerd, which don't. Upstream and Subsurface reach these computers through an RFCOMM socket, not
 macOS's pseudo-serial port, so this path has no upstream-proven transport behind it, and no real computer has
