@@ -321,6 +321,20 @@ final class TapStreamTests: XCTestCase {
         XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT, "0 still takes what is there")
     }
 
+    func testABluetoothFloorRaisesPositiveTimeoutsOnlyAndRecordsTheDriversValue() throws {
+        let probe = ProbeBackend()
+        let recorder = DCStreamRecorder()
+        let tap = TapStream(inner: try probeStream(probe), recorder: recorder, readTimeoutFloor: 12_000)
+        XCTAssertEqual(tap.setTimeout(3000), DC_STATUS_SUCCESS)
+        XCTAssertEqual(tap.setTimeout(-1), DC_STATUS_SUCCESS)
+        XCTAssertEqual(tap.setTimeout(0), DC_STATUS_SUCCESS)
+        XCTAssertEqual(tap.setTimeout(20_000), DC_STATUS_SUCCESS)
+        XCTAssertEqual(probe.log.compactMap { if case .setTimeout(let value, _) = $0 { return value } else { return nil } },
+                       [12_000, -1, 0, 20_000] as [Int32])
+        XCTAssertEqual(recorder.recording().exchanges.compactMap { if case .setTimeout(let value, _) = $0 { return value } else { return nil } },
+                       [3000, -1, 0, 20_000] as [Int32], "a replay sees what the driver asked for")
+    }
+
     func testSetCancellationReplacesTheCheck() throws {
         let probe = ProbeBackend()
         let tap = TapStream(inner: try probeStream(probe))

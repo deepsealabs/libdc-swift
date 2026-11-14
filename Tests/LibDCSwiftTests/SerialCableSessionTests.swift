@@ -263,16 +263,71 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertEqual(cableOpenError(endpoint, model: try CableFixtures.model("Oceanic Atom 2.0")), .driverMissing)
     }
 
-    func testOnlySerialEndpointsAndSerialModelsOpen() throws {
+    func testOnlySerialAndClassicBTEndpointsAndTheirOwnModelsOpen() throws {
         let link = try link()
         let initial = link.termios
-        let paired = CableEndpoint(id: link.path, transport: .classicBTSerial, calloutPath: link.path,
-                                   candidates: DeviceCatalog.models(for: .classicBTSerial))
-        let petrel = try XCTUnwrap(DeviceCatalog.models(for: .classicBTSerial).first)
-        XCTAssertEqual(cableOpenError(paired, model: petrel), .unsupportedTransport(.classicBTSerial))
         let bleOnly = try XCTUnwrap(DeviceCatalog.models(for: .ble).first { !$0.transports.contains(.serial) })
         XCTAssertEqual(cableOpenError(CableFixtures.endpoint(link), model: bleOnly), .unsupportedTransport(.serial))
+        let serialOnly = try CableFixtures.model("Reefnet Sensus")
+        let paired = CableEndpoint(id: link.path, transport: .classicBTSerial, calloutPath: link.path,
+                                   candidates: DeviceCatalog.models(for: .classicBTSerial))
+        XCTAssertEqual(cableOpenError(paired, model: serialOnly), .unsupportedTransport(.classicBTSerial),
+                       "a Reefnet Sensus has no classicBTSerial descriptor")
+        // openCable's default case hands openSerial every other transport too; a BLE endpoint is still refused.
+        XCTAssertEqual(cableOpenError(CableEndpoint(id: link.path, transport: .ble, calloutPath: link.path, candidates: []),
+                                      model: serialOnly), .unsupportedTransport(.ble))
         XCTAssertEqual(link.termios.c_cflag, initial.c_cflag, "the port was never configured")
+    }
+
+    func testAPairedClassicBluetoothPortOpensAPetrelLikeAUSBSerialOne() throws {
+        // close() writes EXIT, so the pty needs a reader or tcdrain blocks.
+        let link = try link(SilentDevice())
+        let paired = CableEndpoint(id: link.path, transport: .classicBTSerial, calloutPath: link.path,
+                                   candidates: DeviceCatalog.models(for: .classicBTSerial))
+        let petrel = try XCTUnwrap(DeviceCatalog.models(for: .classicBTSerial).first { $0.name == "Shearwater Petrel" })
+        let session = try openCable(paired, model: petrel)
+        XCTAssertEqual(session.transport, DC_TRANSPORT_SERIAL)
+        XCTAssertEqual(session.locator, .classicBTSerial(path: link.path))
+        XCTAssertEqual(session.storageKey, "btserial:" + link.path)
+        // shearwater_common_setup: 115200 8N1, no handshake needed to open.
+        XCTAssertEqual(link.termios.outputSpeed, speed_t(B115200))
+        XCTAssertEqual(link.termios.c_cflag & tcflag_t(CSIZE), tcflag_t(CS8))
+        XCTAssertEqual(link.termios.c_cflag & tcflag_t(PARENB), 0)
+    }
+
+    func testTheBluetoothLinkWaitGoesOnOnceCarrierRises() {
+        final class Lines: @unchecked Sendable { var reads = 0 }
+        let lines = Lines()
+        let up = BluetoothLinkWait.wait(limit: 2000, poll: 5, isCancelled: { false }) {
+            lines.reads += 1
+            // DTR, RTS, CTS and DSR as the probe on an unconnected port saw; carrier from the fourth read.
+            return lines.reads >= 4 ? 0x126 | UInt32(DC_LINE_DCD.rawValue) : 0x126 & ~UInt32(DC_LINE_DCD.rawValue)
+        }
+        guard case .up = up else { return XCTFail("\(up)") }
+        XCTAssertEqual(lines.reads, 4)
+        XCTAssertEqual(BluetoothLinkWait.limitMilliseconds, 20_000, "Qt's RFCOMM open timer, and Subsurface's wait")
+    }
+
+    func testTheBluetoothLinkWaitGivesUpWithoutFailingTheOpen() {
+        let start = DispatchTime.now()
+        XCTAssertEqual(BluetoothLinkWait.wait(limit: 60, poll: 5, isCancelled: { false }) { 0 }, .timedOut)
+        XCTAssertLessThan(milliseconds(since: start), 1000)
+        XCTAssertEqual(BluetoothLinkWait.wait(isCancelled: { false }) { nil }, .noLineStatus, "a pty has no modem lines")
+        XCTAssertEqual(BluetoothLinkWait.wait(isCancelled: { true }) { 0 }, .cancelled)
+    }
+
+    func testAPairedPortThatNeverAnswersIsBluetoothNotConnected() throws {
+        let link = try link(SilentDevice())
+        let paired = CableEndpoint.pairedBluetoothPort(path: link.path, baseName: "Petrel-SerialPort")
+        let session = try openCable(paired, model: try XCTUnwrap(paired.candidates.first))
+        // A positive timeout on the paired port is at least 12 s, so the silent first request takes that long.
+        let start = DispatchTime.now()
+        let download = try XCTUnwrap(downloadToEnd(session, timeout: 30).result)
+        XCTAssertGreaterThanOrEqual(milliseconds(since: start), Double(TapStream.bluetoothReadTimeoutFloorMilliseconds) - 100)
+        XCTAssertEqual(download.outcome, .failed(DC_STATUS_TIMEOUT))
+        XCTAssertEqual(CableError(download: download, session: session), .bluetoothNotConnected)
+        closeAndWait(session)
+        XCTAssertEqual(CableError(download: download, session: session), .bluetoothNotConnected, "the same after the close")
     }
 
     func testASecondSessionIsRefusedBeforeThePortOpens() throws {

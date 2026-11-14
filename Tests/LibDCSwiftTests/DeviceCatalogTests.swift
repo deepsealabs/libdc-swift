@@ -197,7 +197,7 @@ final class DeviceCatalogTests: XCTestCase {
 
     func testCableSupportFollowsThePlatform() {
         #if os(macOS)
-        XCTAssertEqual(CableSupport.transports, [.serial, .usbHID, .usb])
+        XCTAssertEqual(CableSupport.transports, [.serial, .classicBTSerial, .usbHID, .usb], "a paired Bluetooth port is a serial port")
         #else
         XCTAssertEqual(CableSupport.transports, [])
         #endif

@@ -14,6 +14,8 @@ final class CableErrorTests: XCTestCase {
         XCTAssertEqual(CableError(openErrno: ENOENT), .notFound)
         XCTAssertEqual(CableError(openErrno: ENXIO), .notFound)
         XCTAssertEqual(CableError(openErrno: ENODEV), .notFound)
+        XCTAssertEqual(CableError(openErrno: ENOTCONN, transport: .classicBTSerial), .bluetoothNotConnected)
+        XCTAssertEqual(CableError(openErrno: ENOTCONN), .portError(errno: ENOTCONN), "a USB-serial port says nothing about Bluetooth")
         XCTAssertEqual(CableError(openErrno: EIO), .portError(errno: EIO))
     }
 
@@ -112,12 +114,55 @@ final class CableErrorTests: XCTestCase {
         XCTAssertNil(CableError(download: result(.completed, dives: 1), session: session), "it finished first")
     }
 
+    private func pairedSession(receivedBytes: Bool) throws -> DiveComputerSession {
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let stream = try DCCustomStream.open(backend: ProbeBackend(), transport: DC_TRANSPORT_SERIAL, context: context)
+        let session = try DiveComputerSession.open(
+            iostream: stream, context: try XCTUnwrap(context), family: DC_FAMILY_SHEARWATER_PETREL, model: 3,
+            displayName: "Shearwater Petrel", storageKey: "btserial:test", locator: .classicBTSerial(path: "/dev/null"),
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
+        session.setBytesProbe { receivedBytes }
+        addTeardownBlock { session.close() }
+        return session
+    }
+
+    func testAClassicBluetoothLinkThatNeverAnsweredOrDroppedSaysSo() throws {
+        let silent = try pairedSession(receivedBytes: false)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: silent), .bluetoothNotConnected)
+        let dropped = try pairedSession(receivedBytes: true)
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 2), session: dropped), .bluetoothLinkLost)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_IO)), session: dropped), .bluetoothLinkLost,
+                       "the paired port stays, so it never reads as an unplug")
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_PROTOCOL)), session: dropped), .protocolError(DC_STATUS_PROTOCOL))
+        XCTAssertNil(CableError(download: result(.parseRejected(count: 1, status: DC_STATUS_DATAFORMAT)), session: dropped))
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 1), session: silent), .bluetoothLinkLost,
+                       "a dive arrived, so the computer answered")
+    }
+
+    func testTheLinkLostVerdictOutlivesTheClose() throws {
+        final class Tap { var bytesRead = 0 }
+        let session = try pairedSession(receivedBytes: false)
+        var tap: Tap? = Tap()
+        weak var released = tap
+        tap?.bytesRead = 12
+        // Wired as SerialTapFactory.attach does: the probe reads a tap that only the device's close holds.
+        session.onClosing { [tap] in _ = tap }
+        session.setBytesProbe { (released?.bytesRead ?? 0) > 0 }
+        tap = nil
+        XCTAssertTrue(session.cableReceivedBytes)
+        session.close()
+        XCTAssertNil(released, "the close let go of the tap")
+        XCTAssertTrue(session.cableReceivedBytes)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: session), .bluetoothLinkLost)
+    }
+
     // MARK: - Messages
 
     func testEveryErrorSaysSomething() {
         let all: [CableError] = [
-            .unsupportedTransport(.classicBTSerial), .driverMissing, .permissionDenied, .busy, .sessionInProgress, .notFound,
-            .unplugged, .noResponse(.suuntoVyper), .cancelled, .portError(errno: EIO), .protocolError(DC_STATUS_PROTOCOL),
+            .unsupportedTransport(.classicBTSerial), .driverMissing, .bluetoothNotConnected, .bluetoothLinkLost, .permissionDenied, .busy, .sessionInProgress,
+            .notFound, .unplugged, .noResponse(.suuntoVyper), .cancelled, .portError(errno: EIO), .protocolError(DC_STATUS_PROTOCOL),
         ]
         for error in all {
             XCTAssertFalse(error.message.isEmpty, "\(error)")
@@ -138,6 +183,16 @@ final class CableErrorTests: XCTestCase {
             XCTAssertNotEqual(DeviceCatalog.cableConnectInstructions(for: family), fallback, "\(family) has its own")
         }
         XCTAssertTrue(DeviceCatalog.cableConnectInstructions(for: .suuntoVyper).contains("Suunto"))
+    }
+
+    func testShearwaterClassicBTHasItsOwnConnectInstructionsWithNoCable() {
+        for family: DeviceConfiguration.DeviceFamily in [.shearwaterPredator, .shearwaterPetrel] {
+            let message = DeviceCatalog.cableConnectInstructions(for: family)
+            XCTAssertTrue(message.contains("Bluetooth"), family.rawValue)
+            XCTAssertTrue(message.contains("Upload Log"), family.rawValue)
+            XCTAssertFalse(message.contains("cable"), family.rawValue)
+            XCTAssertFalse(CableError.noResponse(family).message.contains("cable"), family.rawValue)
+        }
     }
 }
 #endif

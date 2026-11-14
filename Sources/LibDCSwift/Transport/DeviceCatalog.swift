@@ -39,6 +39,24 @@ public enum DeviceCatalog {
         all.filter { $0.transports.contains(transport) }
     }
 
+    /// Shearwater's classic-Bluetooth names, most specific first, and the products each can be. Both the Petrel and the
+    /// Petrel 2 call themselves "Petrel", so the newer goes first (Subsurface's btdiscovery does the same).
+    static let bluetoothNamePrefixes: [(prefix: String, products: [String])] = [
+        ("Perdix", ["Perdix"]), ("Petrel", ["Petrel 2", "Petrel"]), ("Nerd", ["Nerd"]), ("Predator", ["Predator"]),
+    ]
+
+    /// The `.classicBTSerial` models for a paired port named `portName`: the ones its name starts with, case-insensitively,
+    /// else all of them with the Petrel family first and the Predator, a different driver, last.
+    public static func pairedBluetoothCandidates(portName: String) -> [DCModel] {
+        let paired = models(for: .classicBTSerial)
+        let name = portName.lowercased()
+        if let match = bluetoothNamePrefixes.first(where: { name.hasPrefix($0.prefix.lowercased()) }) {
+            let named = match.products.compactMap { product in paired.first { $0.product.caseInsensitiveCompare(product) == .orderedSame } }
+            if !named.isEmpty { return named }
+        }
+        return paired.filter { $0.family != .shearwaterPredator } + paired.filter { $0.family == .shearwaterPredator }
+    }
+
     /// First `supportedModels` match, else first descriptor, else "<family> model <n>", since family and model don't name one product (see Docs/DEVICE_IDENTITY.md).
     public static func canonicalName(family: DeviceConfiguration.DeviceFamily, model: UInt32) -> String {
         canonicalName(family: family, model: model, descriptors: all.lazy.map { (Optional($0.family), $0.model, $0.name) })
@@ -171,9 +189,11 @@ extension DCModel {
 #if os(macOS)
 extension DeviceCatalog {
     /// The families a cable transport reaches through a stream with no upstream-proven transport behind it (the Cobalt's
-    /// IOUSBLib stream in place of libusb); hosts label them "Beta" there. No cable path has run on a real computer yet.
+    /// IOUSBLib stream in place of libusb, a paired port's RFCOMM pseudo-serial link in place of a socket); hosts label them
+    /// "Beta" there. No cable path has run on a real computer yet.
     public static let betaFamilies: [DCTransport: Set<DeviceConfiguration.DeviceFamily>] = [
         .usb: [.atomicsCobalt],
+        .classicBTSerial: [.shearwaterPetrel, .shearwaterPredator],
     ]
 }
 

@@ -45,7 +45,9 @@ What is listed:
 - **Known cables with no port**, as `driverMissing`. On a stock Mac these are the Oceanic/Pelagic cable
   (0403:F460) until FTDI's driver is installed, the Prolific cables with Epson's VID (04B8:0521 for Mares and
   Cressi, 04B8:0522 for Zeagle) until the cable maker's driver is installed, and a CP2108 (10C4:EA71).
-- **Paired classic-Bluetooth ports** are not listed, because a session can't open them yet.
+- **Paired classic-Bluetooth ports**, as `.classicBTSerial`: the Shearwater Predator, Petrel, Petrel 2, Nerd
+  and Perdix, over the `/dev/cu.*` port their Serial Port Profile pairing makes, offering the models the port's
+  name matches. Beta; see below.
 - Built-in ports (`debug-console`) and macOS's own `Bluetooth-Incoming-Port` are left out.
 
 An arrival is read again after a short settle (500 ms by default), because a USB device appears before its
@@ -109,15 +111,16 @@ DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel) { resu
 
 `open` runs off the caller's thread and does this:
 
-1. It refuses a non-serial endpoint or model, or a model libdivecomputer has no descriptor for
-   (`unsupportedTransport`), and a cable with no port (`driverMissing`), all before the port is touched, since
-   opening it raises DTR. It throws `sessionInProgress` while another session holds the lease or another open
-   is in progress on the same port.
+1. It refuses an endpoint that is neither `.serial` nor `.classicBTSerial`, a model with no descriptor for that
+   transport, or a cable with no port (`unsupportedTransport`, `driverMissing`), all before the port is
+   touched, since opening it raises DTR. It throws `sessionInProgress` while another session holds the lease or
+   another open is in progress on the same port.
 2. `open_serial_device` (LibDCBridge) resolves the descriptor before it touches the port, opens the port once,
    as libdivecomputer does, hands it to the `TapStream`, and opens the device with one `dc_device_open` attempt.
    The session lease is taken as the port is handed over, before anything is sent; if another session took it
    in between, the port is closed again and the open throws `sessionInProgress`. A serial computer that didn't
-   answer once won't answer a retry on the same port.
+   answer once won't answer a retry on the same port. A paired classic-Bluetooth port opens the same way:
+   Shearwater's open (`shearwater_common_setup`) only configures the line.
 3. Only if `dc_serial_open` failed does a second `open(O_RDWR | O_NOCTTY | O_NONBLOCK)` read errno, because
    `dc_serial_open` reports busy and not permitted the same way (`DC_STATUS_NOACCESS`).
 
@@ -134,7 +137,8 @@ pulling the cable cancels the session and sets `wasUnplugged`.
 driver's own sleeps (Cressi Goa needs 100 ms before every command, or the computer stays in PC Link). The tap
 caps each read at `TapStream.closingReadLimitMilliseconds` (500 ms), so a computer that has stopped answering
 holds a close for about half a second per acknowledgement instead of the driver's 1 to 9 s. That is still up
-to about 1.7 s (Oceanic Atom 2's retries), and a write to a stalled link can block longer, so a close that
+to about 1.7 s (Oceanic Atom 2's retries), and a close-time *write* can't be cut short, so a stalled link (a
+classic-Bluetooth connection whose computer went out of range, say) can block it longer. So a close that
 reaches the main thread (a `close()` call there, the end of a download a close was waiting for, or the last
 release of the session) runs on a background queue instead. `isClosed` is true at once, but the session keeps
 the lease, and the endpoint stays `busy`, until the port is really closed, so an open in the meantime throws
@@ -153,8 +157,10 @@ changes with the USB port. Key per-computer records on `DiveDownloadResult.ident
 
 | `CableError` | From |
 |---|---|
-| `unsupportedTransport` | A non-serial endpoint, a model with no serial transport, or one with no descriptor |
+| `unsupportedTransport` | A model with no `.serial` or `.classicBTSerial` descriptor on this endpoint's transport |
 | `driverMissing` | An endpoint with no port; see `endpoint.driverMissingMessage` |
+| `bluetoothNotConnected` | A `.classicBTSerial` session that timed out (or failed with `IO`) before the computer sent a byte, or ENOTCONN on its port: start Upload Log on the computer and keep it near the Mac |
+| `bluetoothLinkLost` | A `.classicBTSerial` link that answered, then timed out or failed: the computer moved out of range, say |
 | `permissionDenied` | EPERM, EACCES: usually a sandbox without `device.serial` |
 | `busy` | EBUSY: another app (often the computer maker's) has the port |
 | `sessionInProgress` | Another session is open or still closing, or another open is in progress on the port |
@@ -163,6 +169,52 @@ changes with the USB port. Key per-computer records on `DiveDownloadResult.ident
 | `unplugged` | The discovery saw the port go, or the link failed with the port gone |
 | `protocolError(status)` | Anything else libdivecomputer reports once the port is open |
 
+## Classic Bluetooth (Shearwater), Beta
+
+Shearwater has no download cable. The Predator, Petrel, Petrel 2, Nerd and Perdix instead carry a classic
+Bluetooth (not BLE) radio, which macOS's built-in `IOUserBluetoothSerialDriver` turns into a `/dev/cu.*`
+Serial Port Profile port once the computer is paired in System Settings > Bluetooth. That port is
+`DC_TRANSPORT_SERIAL` to libdivecomputer, so `DiveComputerSession.open` opens a `.classicBTSerial` endpoint
+exactly as it opens a USB-serial one, through the same `open_serial_device` and `TapStream`.
+
+A sandboxed app opens the paired port under `com.apple.security.device.serial`, as any serial port: this path makes
+no IOBluetooth or CoreBluetooth call. Whether the sandbox also wants `com.apple.security.device.bluetooth` for a
+Bluetooth-backed port hasn't been checked, so a host that carries it for BLE should keep it.
+
+Petrel 2 and Perdix also have BLE, which needs no pairing; `.classicBTSerial` matters mainly for the Predator,
+Petrel and Nerd, which don't. Upstream and Subsurface reach these computers through an RFCOMM socket, not
+macOS's pseudo-serial port, so this path has no upstream-proven transport behind it, and no real computer has
+confirmed a download over it yet. That is what Beta marks: every model `DeviceCatalog.models(for: .classicBTSerial)`
+offers is `isBeta(on: .classicBTSerial)` (`DeviceCatalog.betaFamilies[.classicBTSerial]`), and
+`CableEndpoint.isBeta` follows. Hosts should label them "Beta".
+
+The paired port is an `IOUserPseudoSerial` that bluetoothd connects on its own after the open: on macOS 26.4
+it opens in milliseconds and takes writes whether or not a computer is connected, with DTR, RTS, CTS and DSR
+up and carrier (DCD) down. Both references bring the link up before any byte goes out: libdivecomputer with a
+blocking RFCOMM `connect()`, Subsurface by waiting up to 25 s for Qt's socket to connect. Shearwater's open
+only configures the line, then its first request goes out 300 ms later and is never resent, with 3 s for the
+reply. So for a `.classicBTSerial` endpoint:
+
+- Between `dc_serial_open` and `dc_device_open`, the open polls the port's lines every 50 ms for carrier, for
+  up to 20 s (Qt's RFCOMM open timer), and goes on as soon as carrier rises. If it never rises, the open goes
+  ahead anyway and logs the line changes, so the first hardware run can settle which line tracks the link.
+  A cancel ends the wait.
+- The tap raises any positive read timeout the driver sets to 12 s (`TapStream.bluetoothReadTimeoutFloorMilliseconds`,
+  Subsurface's libdivecomputer value for Shearwater). Reads still poll in 50 ms slices, so a cancel lands as
+  fast as before. Recordings keep the driver's own 3 s.
+- The port is opened once. A failed `dc_serial_open` is explained by a second open only after the fact, so no
+  extra open and close cycles the RFCOMM link right before the real one.
+
+A computer that never sends a byte (off, out of range, not in Upload Log) reads as
+`CableError.bluetoothNotConnected`, and one that answered and then went silent or failed as `bluetoothLinkLost`.
+ENOTCONN on the port means `bluetoothNotConnected` too, but the probe above suggests the port never reports it.
+
+A paired port is offered the Shearwater models its name starts with, case-insensitively (Perdix, Petrel,
+Nerd, Predator; a "Petrel" offers the Petrel 2 first, since both call themselves that). A port whose name
+matches none (a GPS, a phone) is offered all five, with the Petrel family first and the Predator, which has
+another driver, last. Other families libdivecomputer flags for Bluetooth (OSTC, Ratio, McLean) aren't offered
+on paired ports yet.
+
 ## Fixtures
 
 `.dcrec` files record what a driver did on the port. `DCStreamRecorder`'s scrubber rewrites the computer's
@@ -170,6 +222,9 @@ serial number before a recording is saved, and a recording never holds a port pa
 `Tests/LibDCSwiftTests/Fixtures/hw_ostc_mk2_synthetic.dcrec` is a classic OSTC download recorded over a pty
 through `DiveComputerSession.open`, from an emulator built from `hw_ostc.c`. Its values are synthetic, and its
 serial is scrubbed to a stand-in. Run the tests with `LIBDC_REGENERATE_DCREC=1` to record it again.
+`shearwater_petrel_serial_synthetic.dcrec` is the same, over a `.classicBTSerial` endpoint, from an emulator
+built from `shearwater_common.c`'s SLIP framing: RDBI DEVINFO, then a one-page manifest with no dive header,
+so the walk ends with none. `ShearwaterSerialReplayTests` regenerates it the same way.
 
 ### Recording a real computer
 

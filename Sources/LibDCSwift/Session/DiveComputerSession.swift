@@ -104,6 +104,7 @@ public final class DiveComputerSession {
     /// A cable session's close reached on the main thread runs on `cableQueue`: the driver's close sleeps and reads.
     private var closesOffMain = false
     private var closingActions: [() -> Void] = []
+    private var bytesProbe: (() -> Bool)?
     private var teardownActions: [() -> Void] = []
     /// The family the device opened as, read while the descriptor is valid; `CableError(download:)` reads it after a close too.
     let openedFamily: DeviceConfiguration.DeviceFamily?
@@ -271,8 +272,9 @@ public final class DiveComputerSession {
 
     /// Releases the owned device, the lookup's view model and the lease; mid-download it cancels and closes when the download ends.
     /// On macOS an owned cable session's close runs the driver's quit with its sleeps, each read capped at
-    /// `TapStream.closingReadLimitMilliseconds`; reached on the main thread (this call, the end of a download, or the last release)
-    /// it runs on a background queue, so `isClosed` is true at once but the lease stays held until the port is closed.
+    /// `TapStream.closingReadLimitMilliseconds`, and a write to a stalled link (classic Bluetooth out of range) can block;
+    /// reached on the main thread (this call, the end of a download, or the last release) it runs on a background queue,
+    /// so `isClosed` is true at once but the lease stays held until the port is closed.
     public func close() {
         lock.lock()
         guard !closed else { lock.unlock(); return }
@@ -376,6 +378,7 @@ public final class DiveComputerSession {
         releaseLookupContext()
         let devicePtr = devicePtr, ownsDevice = ownsDevice, lease = lease, waiters = closeWaiters
 #if os(macOS)
+        latchBytesProbe()
         let beforeClose = takeActions(\.closingActions), afterClose = takeActions(\.teardownActions)
 #endif
         let closeDevice = {
@@ -455,6 +458,31 @@ extension DiveComputerSession {
         lock.lock(); defer { lock.unlock() }
         unplugged = true
         cancelled = true
+    }
+
+    /// Whether the cable's computer has sent anything this session, kept past the close; false when no tap reports it.
+    var cableReceivedBytes: Bool {
+        lock.lock()
+        let probe = bytesProbe
+        lock.unlock()
+        return probe?() ?? false
+    }
+
+    func setBytesProbe(_ probe: @escaping () -> Bool) {
+        lock.lock(); defer { lock.unlock() }
+        bytesProbe = probe
+    }
+
+    /// The tap goes with the device's close, so its answer is kept for `CableError(download:session:)` after it.
+    private func latchBytesProbe() {
+        lock.lock()
+        let probe = bytesProbe
+        lock.unlock()
+        guard let probe else { return }
+        let received = probe()
+        lock.lock()
+        bytesProbe = { received }
+        lock.unlock()
     }
 
     /// Runs just before an owned device's close, while its iostream is still open (a tap switching to its closing limits).

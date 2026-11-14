@@ -8,7 +8,7 @@ extension DiveComputerSession {
     /// open(2) stuck on a CDC-ACM node after wake (Apple FB6153687) holds only its own open; the lease still allows one session.
     static let cableQueue = DispatchQueue(label: "com.libdcswift.cable", attributes: .concurrent)
 
-    /// Opens `model` on a serial, USB HID or raw USB endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
+    /// Opens `model` on a serial, paired classic-Bluetooth, USB HID or raw USB endpoint through a `TapStream`, throwing `CableError`; with `discovery`, an unplug cancels the session.
     public static func open(
         _ endpoint: CableEndpoint,
         model: DCModel,
@@ -71,6 +71,7 @@ extension DiveComputerSession {
                                deviceStorage: request.deviceStorage, lease: request.lease,
                                cancellation: request.cancellation, makeDevice: request.usbDevice)
         default:
+            // A paired classic-Bluetooth port is DC_TRANSPORT_SERIAL too, and opens the same way as a USB-serial one.
             return try openSerial(request.endpoint, model: request.model, discovery: request.discovery,
                                   recorder: request.recorder, deviceStorage: request.deviceStorage,
                                   lease: request.lease, cancellation: request.cancellation)
@@ -95,14 +96,16 @@ extension DiveComputerSession {
         claims: EndpointClaims = .shared,
         opening: SerialOpensInFlight = .shared
     ) throws -> DiveComputerSession {
-        guard endpoint.transport == .serial else { throw CableError.unsupportedTransport(endpoint.transport) }
+        guard endpoint.transport == .serial || endpoint.transport == .classicBTSerial else {
+            throw CableError.unsupportedTransport(endpoint.transport)
+        }
         guard endpoint.status != .driverMissing, let path = endpoint.calloutPath, let locator = endpoint.locator else {
             throw CableError.driverMissing
         }
-        guard model.transports.contains(.serial) else { throw CableError.unsupportedTransport(.serial) }
+        guard model.transports.contains(endpoint.transport) else { throw CableError.unsupportedTransport(endpoint.transport) }
         // Checked before the port opens, since opening it raises DTR.
         guard DeviceConfiguration.hasDescriptor(family: model.dcFamily, model: model.model) else {
-            throw CableError.unsupportedTransport(.serial)
+            throw CableError.unsupportedTransport(endpoint.transport)
         }
         guard !cancellation.isCancelled else { throw CableError.cancelled }
         // Refused here while another session is open; the open itself takes the lease in the wrap, once the port is open.
@@ -114,7 +117,8 @@ extension DiveComputerSession {
         let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
         data.initialize(to: device_data_t())
         data.pointee.context = context
-        let factory = SerialTapFactory(recorder: recorder, cancellation: cancellation, lease: lease)
+        let factory = SerialTapFactory(recorder: recorder, cancellation: cancellation, lease: lease,
+                                       classicBluetooth: endpoint.transport == .classicBTSerial)
         let status = withExtendedLifetime(factory) {
             open_serial_device(data, path, model.dcFamily, model.model, SerialTapFactory.wrap,
                                Unmanaged.passUnretained(factory).toOpaque())
@@ -123,8 +127,11 @@ extension DiveComputerSession {
             data.deinitialize(count: 1)
             data.deallocate()
             if factory.leaseTaken { lease.release() }
-            guard factory.wrapCalled else { throw SerialPortPreflight.explain(status, path: path) }
+            guard factory.wrapCalled else { throw SerialPortPreflight.explain(status, path: path, transport: endpoint.transport) }
             guard factory.leaseTaken else { throw CableError.sessionInProgress }
+            if endpoint.transport == .classicBTSerial, status == DC_STATUS_TIMEOUT || status == DC_STATUS_IO {
+                throw (factory.tap?.bytesRead ?? 0) > 0 ? CableError.bluetoothLinkLost : CableError.bluetoothNotConnected
+            }
             throw CableError.deviceFailed(status, family: model.family, portPresent: access(path, F_OK) == 0)
         }
 
@@ -234,15 +241,19 @@ final class SerialTapFactory {
     let recorder: DCStreamRecorder?
     let cancellation: CableOpenCancellation
     let lease: DiveComputerSessionLease
+    let classicBluetooth: Bool
     private(set) var wrapCalled = false
     /// False after a wrap only when another session took the lease first; the wrap then closed the port.
     private(set) var leaseTaken = false
     private(set) var tap: TapStream?
+    private(set) var linkWait: BluetoothLinkWait.Outcome?
 
-    init(recorder: DCStreamRecorder?, cancellation: CableOpenCancellation, lease: DiveComputerSessionLease) {
+    init(recorder: DCStreamRecorder?, cancellation: CableOpenCancellation, lease: DiveComputerSessionLease,
+         classicBluetooth: Bool = false) {
         self.recorder = recorder
         self.cancellation = cancellation
         self.lease = lease
+        self.classicBluetooth = classicBluetooth
     }
 
     static let wrap: libdc_iostream_wrap_t = { context, inner, userdata in
@@ -255,7 +266,15 @@ final class SerialTapFactory {
         }
         factory.leaseTaken = true
         let cancellation = factory.cancellation
-        let tap = TapStream(inner: inner, recorder: factory.recorder, isCancelled: { cancellation.isCancelled })
+        if factory.classicBluetooth {
+            // Before dc_device_open: Shearwater's first request follows its open by 300 ms and is never resent.
+            factory.linkWait = BluetoothLinkWait.wait(isCancelled: { cancellation.isCancelled }) {
+                var lines: UInt32 = 0
+                return dc_iostream_get_lines(inner, &lines) == DC_STATUS_SUCCESS ? lines : nil
+            }
+        }
+        let tap = TapStream(inner: inner, recorder: factory.recorder, isCancelled: { cancellation.isCancelled },
+                            readTimeoutFloor: factory.classicBluetooth ? TapStream.bluetoothReadTimeoutFloorMilliseconds : nil)
         guard let stream = try? DCCustomStream.open(backend: tap, transport: tap.transport, context: context) else {
             // Dropping the tap closes inner.
             return nil
@@ -268,24 +287,66 @@ final class SerialTapFactory {
     func attach(_ session: DiveComputerSession) {
         let cancellation = cancellation
         tap?.setCancellation { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
-        if let tap { session.onClosing { tap.beginClosing() } }
+        if let tap {
+            session.onClosing { tap.beginClosing() }
+            session.setBytesProbe { [weak tap] in (tap?.bytesRead ?? 0) > 0 }
+        }
+    }
+}
+
+/// Waits for a paired classic-Bluetooth port's RFCOMM link. The port opens at once whether or not bluetoothd has connected it,
+/// and takes writes either way, so this polls carrier detect, which stays clear until the link is up.
+enum BluetoothLinkWait {
+    enum Outcome: Equatable {
+        case up(afterMilliseconds: Int)
+        /// Carrier never rose; the open goes ahead anyway, since which line tracks the link is unconfirmed on hardware.
+        case timedOut
+        /// The port has no modem lines to read.
+        case noLineStatus
+        case cancelled
+    }
+
+    /// Qt's RFCOMM open timer, and Subsurface's longest wait for a connection.
+    static let limitMilliseconds = 20_000
+    static let pollMilliseconds = 50
+
+    static func wait(limit: Int = limitMilliseconds, poll: Int = pollMilliseconds, isCancelled: () -> Bool,
+                     lines: () -> UInt32?) -> Outcome {
+        let start = DispatchTime.now().uptimeNanoseconds
+        func elapsed() -> Int { Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000) }
+        var last: UInt32?
+        while true {
+            if isCancelled() { return .cancelled }
+            guard let current = lines() else { return .noLineStatus }
+            if current != last {
+                logInfo(String(format: "Bluetooth serial port lines 0x%02x after %ld ms", current, elapsed()))
+                last = current
+            }
+            if current & UInt32(DC_LINE_DCD.rawValue) != 0 { return .up(afterMilliseconds: elapsed()) }
+            if elapsed() >= limit {
+                logWarning("Bluetooth serial port: no carrier after \(limit) ms; opening anyway")
+                return .timedOut
+            }
+            usleep(useconds_t(poll * 1000))
+        }
     }
 }
 
 /// Opens and closes the port as serial_posix does, for the errno behind a failed `dc_serial_open`, which reports busy and not permitted alike.
 enum SerialPortPreflight {
-    static func check(_ path: String) -> CableError? {
+    static func check(_ path: String, transport: DCTransport = .serial) -> CableError? {
         let fd = Darwin.open(path, O_RDWR | O_NOCTTY | O_NONBLOCK)
-        guard fd >= 0 else { return CableError(openErrno: errno) }
+        guard fd >= 0 else { return CableError(openErrno: errno, transport: transport) }
         Darwin.close(fd)
         return nil
     }
 
-    /// Only after `dc_serial_open` failed, so a port that opens is touched once, as upstream does.
-    static func explain(_ status: dc_status_t, path: String) -> CableError {
+    /// Only after `dc_serial_open` failed, so a port that opens is touched once, as upstream does; on a paired Bluetooth port
+    /// that also means no extra open and close cycles the RFCOMM link before the real open.
+    static func explain(_ status: dc_status_t, path: String, transport: DCTransport = .serial) -> CableError {
         switch status {
         case DC_STATUS_NOACCESS, DC_STATUS_NODEVICE, DC_STATUS_IO:
-            return check(path) ?? CableError.portOpenFailed(status)
+            return check(path, transport: transport) ?? CableError.portOpenFailed(status)
         default:
             return CableError.portOpenFailed(status)
         }
