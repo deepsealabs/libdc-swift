@@ -16,7 +16,7 @@ A Swift framework for communicating with dive computers via Bluetooth Low Energy
 - ⏱ **Progress Tracking & Background Support:** Integrated progress updates, and background execution for iOS.
 - 🔄 **Seamless SwiftUI Integration:** Designed to work naturally with SwiftUI for real-time UI updates.
 
-On macOS it also downloads over cables: USB-serial cables, USB HID computers (Suunto EON, Uwatec Smart), raw USB (Atomic Aquatics Cobalt, Beta) and paired classic-Bluetooth ports (Shearwater, Beta). None of these paths has been confirmed on hardware yet. A sandboxed app needs `com.apple.security.device.serial` and `com.apple.security.device.usb`. See [Docs/MACOS_SERIAL_CABLES.md](Docs/MACOS_SERIAL_CABLES.md), [Docs/MACOS_USB_HID.md](Docs/MACOS_USB_HID.md) and [Docs/MACOS_USB.md](Docs/MACOS_USB.md).
+On macOS it also downloads over cables: USB-serial cables, USB HID computers (Suunto EON, Uwatec Smart), raw USB (Atomic Aquatics Cobalt, Beta) and paired classic-Bluetooth ports (Shearwater, Beta). None of these paths has been confirmed on hardware yet. A sandboxed app needs `com.apple.security.device.serial` (USB-serial and paired classic-Bluetooth ports) and `com.apple.security.device.usb` (USB HID and raw USB), plus `com.apple.security.device.bluetooth` for BLE. See [Docs/MACOS_SERIAL_CABLES.md](Docs/MACOS_SERIAL_CABLES.md), [Docs/MACOS_USB_HID.md](Docs/MACOS_USB_HID.md) and [Docs/MACOS_USB.md](Docs/MACOS_USB.md).
 
 ## Requirements
 
