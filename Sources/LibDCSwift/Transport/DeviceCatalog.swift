@@ -189,7 +189,8 @@ extension DCModel {
 #if os(macOS)
 extension DeviceCatalog {
     /// The families a cable transport reaches through a stream with no upstream-proven transport behind it (the Cobalt's
-    /// IOUSBLib stream in place of libusb); hosts label them "Beta" there. No cable path has run on a real computer yet.
+    /// IOUSBLib stream in place of libusb, a paired port's RFCOMM pseudo-serial link in place of a socket); hosts label them
+    /// "Beta" there. No cable path has run on a real computer yet.
     public static let betaFamilies: [DCTransport: Set<DeviceConfiguration.DeviceFamily>] = [
         .usb: [.atomicsCobalt],
         .classicBTSerial: [.shearwaterPetrel, .shearwaterPredator],

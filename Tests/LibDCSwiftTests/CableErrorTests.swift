@@ -136,6 +136,25 @@ final class CableErrorTests: XCTestCase {
                        "the paired port stays, so it never reads as an unplug")
         XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_PROTOCOL)), session: dropped), .protocolError(DC_STATUS_PROTOCOL))
         XCTAssertNil(CableError(download: result(.parseRejected(count: 1, status: DC_STATUS_DATAFORMAT)), session: dropped))
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 1), session: silent), .bluetoothLinkLost,
+                       "a dive arrived, so the computer answered")
+    }
+
+    func testTheLinkLostVerdictOutlivesTheClose() throws {
+        final class Tap { var bytesRead = 0 }
+        let session = try pairedSession(receivedBytes: false)
+        var tap: Tap? = Tap()
+        weak var released = tap
+        tap?.bytesRead = 12
+        // Wired as SerialTapFactory.attach does: the probe reads a tap that only the device's close holds.
+        session.onClosing { [tap] in _ = tap }
+        session.setBytesProbe { (released?.bytesRead ?? 0) > 0 }
+        tap = nil
+        XCTAssertTrue(session.cableReceivedBytes)
+        session.close()
+        XCTAssertNil(released, "the close let go of the tap")
+        XCTAssertTrue(session.cableReceivedBytes)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: session), .bluetoothLinkLost)
     }
 
     // MARK: - Messages

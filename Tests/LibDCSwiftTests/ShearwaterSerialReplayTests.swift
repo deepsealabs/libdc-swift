@@ -159,7 +159,7 @@ final class ShearwaterSerialReplayTests: XCTestCase {
         let petrel = try model()
         let session = try openCable(paired, model: petrel, recorder: recorder)
         let (result, dives) = downloadToEnd(session)
-        session.close()
+        closeAndWait(session)
         return (try XCTUnwrap(result), dives, recorder.recording(family: DC_FAMILY_SHEARWATER_PETREL, model: petrel.model))
     }
 

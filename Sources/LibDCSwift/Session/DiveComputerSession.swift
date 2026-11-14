@@ -378,6 +378,7 @@ public final class DiveComputerSession {
         releaseLookupContext()
         let devicePtr = devicePtr, ownsDevice = ownsDevice, lease = lease, waiters = closeWaiters
 #if os(macOS)
+        latchBytesProbe()
         let beforeClose = takeActions(\.closingActions), afterClose = takeActions(\.teardownActions)
 #endif
         let closeDevice = {
@@ -459,7 +460,7 @@ extension DiveComputerSession {
         cancelled = true
     }
 
-    /// Whether the cable's computer has sent anything this session; false when no tap reports it.
+    /// Whether the cable's computer has sent anything this session, kept past the close; false when no tap reports it.
     var cableReceivedBytes: Bool {
         lock.lock()
         let probe = bytesProbe
@@ -470,6 +471,18 @@ extension DiveComputerSession {
     func setBytesProbe(_ probe: @escaping () -> Bool) {
         lock.lock(); defer { lock.unlock() }
         bytesProbe = probe
+    }
+
+    /// The tap goes with the device's close, so its answer is kept for `CableError(download:session:)` after it.
+    private func latchBytesProbe() {
+        lock.lock()
+        let probe = bytesProbe
+        lock.unlock()
+        guard let probe else { return }
+        let received = probe()
+        lock.lock()
+        bytesProbe = { received }
+        lock.unlock()
     }
 
     /// Runs just before an owned device's close, while its iostream is still open (a tap switching to its closing limits).
