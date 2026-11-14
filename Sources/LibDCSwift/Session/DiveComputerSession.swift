@@ -106,6 +106,7 @@ public final class DiveComputerSession {
     /// A cable session's close reached on the main thread runs on `cableQueue`: the driver's close sleeps and reads.
     private var closesOffMain = false
     private var closingActions: [(ClosingState) -> Void] = []
+    private var bytesProbe: (() -> Bool)?
     private var teardownActions: [() -> Void] = []
     /// The family the device opened as, read while the descriptor is valid; `CableError(download:)` reads it after a close too.
     let openedFamily: DeviceConfiguration.DeviceFamily?
@@ -473,6 +474,19 @@ extension DiveComputerSession {
         lock.lock(); defer { lock.unlock() }
         unplugged = true
         cancelled = true
+    }
+
+    /// Whether the cable's computer has sent anything this session; false when no tap reports it.
+    var cableReceivedBytes: Bool {
+        lock.lock()
+        let probe = bytesProbe
+        lock.unlock()
+        return probe?() ?? false
+    }
+
+    func setBytesProbe(_ probe: @escaping () -> Bool) {
+        lock.lock(); defer { lock.unlock() }
+        bytesProbe = probe
     }
 
     /// Whether a session was cancelled, and unplugged, as its close began.
