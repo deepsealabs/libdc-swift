@@ -178,10 +178,11 @@ Serial Port Profile port once the computer is paired in System Settings > Blueto
 exactly as it opens a USB-serial one, through the same `open_serial_device` and `TapStream`.
 
 Petrel 2 and Perdix also have BLE, which needs no pairing; `.classicBTSerial` matters mainly for the Predator,
-Petrel and Nerd, which don't. No real computer has confirmed a download over this path yet, so every model
-`DeviceCatalog.models(for: .classicBTSerial)` offers is `isBeta(on: .classicBTSerial)`
-(`DeviceCatalog.betaFamilies[.classicBTSerial]`), and `CableEndpoint.isBeta` follows. Hosts should label them
-"Beta".
+Petrel and Nerd, which don't. Upstream and Subsurface reach these computers through an RFCOMM socket, not
+macOS's pseudo-serial port, so this path has no upstream-proven transport behind it, and no real computer has
+confirmed a download over it yet. That is what Beta marks: every model `DeviceCatalog.models(for: .classicBTSerial)`
+offers is `isBeta(on: .classicBTSerial)` (`DeviceCatalog.betaFamilies[.classicBTSerial]`), and
+`CableEndpoint.isBeta` follows. Hosts should label them "Beta".
 
 The paired port is an `IOUserPseudoSerial` that bluetoothd connects on its own after the open: on macOS 26.4
 it opens in milliseconds and takes writes whether or not a computer is connected, with DTR, RTS, CTS and DSR
