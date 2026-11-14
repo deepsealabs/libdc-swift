@@ -60,8 +60,13 @@ version block. A download sends 0x09 for the newest dive and 0x0A for each next 
 reads until a short one, and stops at two 0xFF bytes. Every reply ends with a 16-bit additive checksum. The
 Cobalt has no quit command, so closing a session only releases the interface and device.
 
-Cancelling the opening task, or calling `session.cancel()`, aborts a blocked transfer within 50 ms
-(`USBStream.cancelCheckMilliseconds`). A transfer that fails with the device gone from the registry marks the
+Cancelling the opening task throws `cancelled` at once; the open itself ends with its read. `session.cancel()`
+works as upstream's cooperative cancel does: a cancel between dives is taken at once, and one that lands while
+a dive is arriving lets that dive finish (a short packet, a zero-length packet, or the driver's 2 s timeout)
+before the read returns `CANCELLED`, reading and dropping whatever of the dive is left. The Cobalt has no quit
+command, so cutting a dive short would leave the rest of it on the IN pipe, to arrive in place of the next
+session's version block. Only a transfer with no timeout, which nothing else would end, or one on a device the
+registry has seen go (`abortCheck`), is aborted within 50 ms (`USBStream.cancelCheckMilliseconds`). A transfer that fails with the device gone from the registry marks the
 session unplugged, so `CableError(download:session:)` is `.unplugged` even without a discovery. With one, the
 endpoint also disappears.
 
@@ -93,11 +98,11 @@ callbacks, because `dc_custom_open` turns a missing one into a silent `SUCCESS`.
 | `close` | Closes the interface and the device, once |
 
 IOReturns map as libusb's macOS backend and then `usb.c`'s `syserror` map them: success and
-`kIOReturnUnderrun` are `SUCCESS`; `kIOUSBTransactionTimeout` is `TIMEOUT`; `kIOReturnNoDevice`,
+`kIOReturnUnderrun` are `SUCCESS` (an underrun only when it shortened the count; one that left it unchanged is `IO`); `kIOUSBTransactionTimeout` is `TIMEOUT`; `kIOReturnNoDevice`,
 `kIOReturnNotOpen` and `kIOReturnNotAttached` are `NODEVICE`; exclusive access and permission errors are
 `NOACCESS`; a bad argument is `INVALIDARGS`; no memory is `NOMEMORY`; anything else (a stall, an overrun, an
 abort) is `IO`. A failure with the device gone from the registry is `NODEVICE`. Once the cancel check is true,
-transfers return `CANCELLED`.
+writes, control transfers and reads between dives return `CANCELLED`.
 
 Where this differs from `usb.c`, and why:
 
@@ -105,14 +110,20 @@ Where this differs from `usb.c`, and why:
   request for the whole size would lose whatever arrived before the timeout. Asking packet by packet, with the
   read's timeout as one deadline across them, gives the same result as libusb's single transfer: the same bytes,
   the same end on a short packet, and the partial count on a timeout. It costs a round trip per packet (64 bytes
-  at full speed).
-- **After a timed-out read, `ClearPipeStallBothEnds`** puts the data toggle back in step, as IOUSBLib asks.
+  at full speed): behind a USB 2 hub that is about 1 ms a packet, so a full Cobalt 2 (41 x 64 KiB, about
+  2.6 MB) takes around 40 s, where libusb's one asynchronous request takes seconds. A slow first download is
+  this, not a hang. Moving reads to `ReadPipeAsyncTO`, whose completion reports the count on a timeout too, is
+  a follow-up.
+- **A timed-out read clears nothing.** libusb's macOS backend calls `ClearPipeStallBothEnds` only on
+  IOUSBFamily 245 or older, and only on abort, and a timeout is how a dive whose size is a multiple of 64 bytes
+  ends. A real stall (`kIOUSBPipeStalled`) is cleared and is `IO`.
 - **A control transfer that moved its data stage is `SUCCESS`.** `usb.c` takes `libusb_control_transfer`'s byte
   count for an error, so its libusb build would report `IO` for one. No driver sends a data stage today (the
   Cobalt's requests have `wLength` 0).
-- **Cancel aborts.** While a transfer blocks, a timer checks the cancel check every 50 ms and, once it's true,
-  calls `AbortPipe` on both pipes and `USBDeviceAbortPipeZero`. Writes and control transfers are refused after a
-  cancel too: `usb.c`'s writes have no timeout, and the Cobalt sends nothing on close.
+- **Cancel never cuts a dive short.** See above. A transfer with no timeout (writes, or a read before the driver
+  sets one) is still aborted: a timer checks the cancel check every 50 ms and, once it's true, calls `AbortPipe`
+  on both pipes and `USBDeviceAbortPipeZero`. Writes and control transfers are refused after a cancel too.
+  `TapStream` passes raw USB reads through after a cancel, so the stream can finish the dive.
 
 `USBDeviceIO` (the Objective-C protocol `LibDCUSBDevice`) is the seam: `IOKitUSBDevice` is the live device, and
 the tests use a fake with USB's bulk rules.
@@ -121,14 +132,16 @@ the tests use a fake with USB's bulk rules.
 
 - `USBStreamTests` run `USBStream` against the fake: the 15 operations against `usb.c`'s table, the timeout
   rules, the control setup's layout and `wLength` bounds, packet-by-packet reads, a short packet, a zero-length
-  packet, a timeout keeping its partial count and clearing the stall, the timeout as one deadline, overrun, the
-  IOReturn mapping, removal, cancel within one check, and close.
+  packet, a timeout keeping its partial count without clearing anything, the timeout as one deadline, overrun,
+  the IOReturn mapping, removal, a cancel that lets a read end on its timeout, a cancel mid-dive that reads the
+  rest of the dive first, an abort for a read with no timeout, and close.
 - `USBCableSessionTests` run libdivecomputer's Cobalt driver through `DiveComputerSession.open` against
   `FakeCobalt`, an emulated computer built from `atomics_cobalt.c` that checks each control request. They cover
   the download and identity of both models, a dive that fills its last packet (so only the read's timeout ends
   it), a dive of exactly one 8 KiB read and one longer than a read, the fingerprint stop, a download recorded
-  through the tap and replayed, the refusals and IOReturn mapping, no answer, a bad checksum, unplug, cancel,
-  busy in discovery, and registry removal. All values are synthetic.
+  through the tap and replayed, the refusals and IOReturn mapping, no answer, a bad checksum, unplug, cancel, a
+  cancel mid-dive followed by a second session on the same device, busy in discovery, and registry removal. All
+  values are synthetic.
 - `USBReplayTests` play hand-written Cobalt conversations (0x01, 0x09, 0x0A) through `ScriptedStream`, which fails
   on anything unexpected: two dives, an empty logbook, a dive ended by a timeout, dives spanning reads, a bad
   checksum, and a failed control transfer.

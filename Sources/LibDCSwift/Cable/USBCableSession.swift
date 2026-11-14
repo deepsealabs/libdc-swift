@@ -75,7 +75,10 @@ extension DiveComputerSession {
         leaseHeld = false
         let isCancelled: () -> Bool = { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
         tap.setCancellation(isCancelled)
+        session.onClosing { tap.beginClosing() }
         usb.cancelCheck = isCancelled
+        // An unplug the registry saw aborts at once; there is no dive left to finish.
+        usb.abortCheck = { [weak session] in session?.wasUnplugged ?? true }
         claims.claim(claimKey)
         session.onTeardown { claims.release(claimKey) }
         // A transfer that finds the device gone says so, so an unplug is seen without a discovery too.

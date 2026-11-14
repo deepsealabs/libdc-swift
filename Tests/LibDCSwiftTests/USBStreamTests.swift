@@ -243,7 +243,7 @@ final class USBStreamTests: XCTestCase {
         let (status, bytes) = read(stream, 8192)
         XCTAssertEqual(status, DC_STATUS_TIMEOUT)
         XCTAssertEqual(bytes, payload, "the partial count atomics_cobalt.c appends")
-        XCTAssertEqual(device.calls.suffix(2), [.read(length: 64, timeout: device.reads.last!.timeout), .clearStall(endpoint: 0x82)])
+        XCTAssertFalse(device.calls.contains(.clearStall(endpoint: 0x82)), "libusb clears nothing after a timeout on IOUSBFamily > 245")
 
         let silent = read(stream, 16)
         XCTAssertEqual(silent.status, DC_STATUS_TIMEOUT)
@@ -367,22 +367,95 @@ final class USBStreamTests: XCTestCase {
         XCTAssertEqual(device.calls, [])
     }
 
-    func testACancelAbortsABlockedReadWithinACheck() throws {
+    func testACancelLetsABlockedReadEndOnItsTimeoutWithoutAnAbort() throws {
         let device = FakeUSBDevice()
         device.waitsOnSilence = true
         let cancelled = Flag()
         let (stream, _) = try open(device, cancel: { cancelled.value })
         defer { dc_iostream_close(stream) }
-        XCTAssertEqual(dc_iostream_set_timeout(stream, 5000), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_iostream_set_timeout(stream, 400), DC_STATUS_SUCCESS)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { cancelled.value = true }
+        let start = DispatchTime.now()
+        XCTAssertEqual(read(stream, 8192).status, DC_STATUS_CANCELLED)
+        XCTAssertGreaterThanOrEqual(milliseconds(since: start), 350, "the read ran to its timeout, as upstream's cooperative cancel does")
+        XCTAssertEqual(device.aborts, 0)
+        XCTAssertFalse(device.calls.contains(.clearStall(endpoint: 0x82)))
+    }
+
+    /// Hosted CI runners can overshoot a 50 ms check by 100 ms or more.
+    private var abortBound: Double { ProcessInfo.processInfo.environment["CI"] == "true" ? 500 : 150 }
+
+    func testACancelAbortsAReadThatWouldWaitForEver() throws {
+        let device = FakeUSBDevice()
+        device.waitsOnSilence = true
+        let cancelled = Flag()
+        let (stream, _) = try open(device, cancel: { cancelled.value })
+        defer { dc_iostream_close(stream) }
+        XCTAssertEqual(dc_iostream_set_timeout(stream, -1), DC_STATUS_SUCCESS)
         let flagged = Instant()
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
             flagged.mark()
             cancelled.value = true
         }
         XCTAssertEqual(read(stream, 8192).status, DC_STATUS_CANCELLED)
-        XCTAssertLessThan(milliseconds(since: flagged.value), 150, "within one 50 ms check, well inside the 5 s timeout")
+        XCTAssertLessThan(milliseconds(since: flagged.value), abortBound, "within one 50 ms check")
         XCTAssertEqual(device.aborts, 1)
-        XCTAssertFalse(device.calls.contains(.clearStall(endpoint: 0x82)))
+    }
+
+    func testAnUnplugTheRegistrySawAbortsABlockedReadAtOnce() throws {
+        let device = FakeUSBDevice()
+        device.waitsOnSilence = true
+        let gone = Flag()
+        let (stream, usb) = try open(device, cancel: { gone.value })
+        usb.abortCheck = { gone.value }
+        defer { dc_iostream_close(stream) }
+        XCTAssertEqual(dc_iostream_set_timeout(stream, 5000), DC_STATUS_SUCCESS)
+        let flagged = Instant()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
+            flagged.mark()
+            gone.value = true
+        }
+        XCTAssertEqual(read(stream, 8192).status, DC_STATUS_CANCELLED)
+        XCTAssertLessThan(milliseconds(since: flagged.value), abortBound, "no dive to finish on a device that is gone")
+        XCTAssertEqual(device.aborts, 1)
+    }
+
+    func testACancelMidDiveReadsTheRestOfTheDiveBeforeCancelled() throws {
+        let device = FakeUSBDevice()
+        let dive = Self.bytes(8192 + 8192 + 100)
+        device.queue(dive)
+        let cancelled = Flag()
+        device.onRead = { count in if count == 3 { cancelled.value = true } }
+        let (stream, _) = try open(device, cancel: { cancelled.value })
+        defer { dc_iostream_close(stream) }
+        XCTAssertEqual(dc_iostream_set_timeout(stream, 2000), DC_STATUS_SUCCESS)
+        let first = read(stream, 8192)
+        XCTAssertEqual(first.status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(first.bytes.count, 8192, "the read itself ran to its end")
+        XCTAssertEqual(device.pendingIn, 0, "the rest of the dive was read and dropped")
+        XCTAssertEqual(device.aborts, 0)
+        XCTAssertEqual(read(stream, 8192).status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(device.reads.count, 128 + 130, "a cancel between dives touches nothing")
+
+        // The next request finds the pipe clean.
+        cancelled.value = false
+        device.queue(Self.bytes(16, seed: 9))
+        XCTAssertEqual(read(stream, 16).bytes, Self.bytes(16, seed: 9))
+    }
+
+    func testACancelOnTheReadAfterAFullOneStillFinishesTheDive() throws {
+        let device = FakeUSBDevice()
+        device.queue(Self.bytes(8192 + 100))
+        let cancelled = Flag()
+        let (stream, _) = try open(device, cancel: { cancelled.value })
+        defer { dc_iostream_close(stream) }
+        XCTAssertEqual(dc_iostream_set_timeout(stream, 2000), DC_STATUS_SUCCESS)
+        XCTAssertEqual(read(stream, 8192).status, DC_STATUS_SUCCESS)
+        cancelled.value = true
+        let tail = read(stream, 8192)
+        XCTAssertEqual(tail.status, DC_STATUS_CANCELLED)
+        XCTAssertEqual(tail.bytes.count, 100, "the dive's tail was still read")
+        XCTAssertEqual(device.pendingIn, 0)
     }
 
     func testABlockedReadThatTimesOutIsNeverAborted() throws {

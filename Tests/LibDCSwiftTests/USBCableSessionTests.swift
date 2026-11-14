@@ -106,7 +106,7 @@ final class USBCableSessionTests: XCTestCase {
         XCTAssertEqual(dives.first?.profile.count, 8, "the trailer is no sample")
         XCTAssertEqual(result?.fingerprintCommit?.fingerprint, CobaltDive.fingerprint(aligned))
         let device = try XCTUnwrap(devices.devices.first)
-        XCTAssertTrue(device.calls.contains(.clearStall(endpoint: 0x82)), "the timed-out read put the data toggle back")
+        XCTAssertFalse(device.calls.contains(.clearStall(endpoint: 0x82)), "a timeout is the dive's end, not a stall: nothing is cleared")
     }
 
     func testADiveOfExactlyOneReadAndOneLongerThanOneReadArriveWhole() throws {
@@ -272,10 +272,35 @@ final class USBCableSessionTests: XCTestCase {
         }
         let download = try XCTUnwrap(downloadToEnd(session).result)
         XCTAssertEqual(download.outcome, .cancelled)
-        XCTAssertLessThan(milliseconds(since: cancelled.value), 200, "the blocked read was aborted, not waited out")
+        // As upstream: the read runs to the driver's 2 s timeout, so the computer is never left mid-dive.
+        XCTAssertLessThan(milliseconds(since: cancelled.value), 2_500)
         XCTAssertEqual(CableError(download: download, session: session), .cancelled)
         XCTAssertFalse(session.wasUnplugged)
-        XCTAssertGreaterThanOrEqual(devices.devices.first?.aborts ?? 0, 1)
+        XCTAssertEqual(devices.devices.first?.aborts, 0)
+    }
+
+    func testACancelMidDiveLeavesTheComputerReadyForTheNextSession() throws {
+        let long = CobaltDive.make(year: 2001, month: 2, day: 5, hour: 8, minute: 0,
+                                   depthsMbar: CobaltDive.profile(600, maxMbar: 2000))
+        XCTAssertGreaterThan(long.count, 8192, "longer than one 8 KiB read")
+        let computer = FakeCobalt(serialDigits: Self.serialDigits, dives: [long, Self.older])
+        // One device for both sessions, so anything left on its IN pipe would greet the second.
+        let device = FakeUSBDevice()
+        computer.attach(to: device)
+        let devices = FakeUSBFactory { device }
+        let first = try openCable(USBFixtures.cobalt, model: cobalt2(), usbDevice: devices.factory)
+        device.onRead = { [weak first] count in if count == 10 { first?.cancel() } }
+        let download = try XCTUnwrap(downloadToEnd(first).result)
+        device.onRead = nil
+        XCTAssertEqual(download.outcome, .cancelled)
+        XCTAssertEqual(device.pendingIn, 0, "the rest of the dive was read before the cancel")
+        XCTAssertEqual(device.aborts, 0)
+        first.close()
+
+        let second = try openCable(USBFixtures.cobalt, model: cobalt2(), usbDevice: devices.factory)
+        let identity = try XCTUnwrap(downloadToEnd(second).result?.identity)
+        XCTAssertEqual(identity.serial, try XCTUnwrap(download.identity?.serial), "the version block read clean")
+        second.close()
     }
 
     func testCancellingAnOpenBlockedInTheVersionReadThrowsCancelledPromptly() async throws {
@@ -305,8 +330,9 @@ final class USBCableSessionTests: XCTestCase {
             XCTAssertEqual(error as? CableError, .cancelled)
         }
         XCTAssertLessThan(milliseconds(since: cancelled), 150)
-        XCTAssertFalse(lease.isHeld)
-        XCTAssertEqual(devices.devices.first?.closeCount, 1)
+        // The open itself runs on until the version read's 2 s timeout, then lets go.
+        XCTAssertTrue(waitFor(4) { !lease.isHeld })
+        XCTAssertTrue(waitFor(4) { devices.devices.first?.closeCount == 1 })
         XCTAssertFalse(EndpointClaims.shared.claimedKeys.contains(endpoint.id))
     }
 
