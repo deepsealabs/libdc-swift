@@ -41,8 +41,10 @@ NS_SWIFT_NAME(USBStream)
 
 /** The longest a blocked transfer runs between cancel checks. */
 @property (class, readonly) uint32_t cancelCheckMilliseconds;
-/** While it returns YES, transfers return DC_STATUS_CANCELLED, and one in progress is aborted. */
+/** While it returns YES, transfers between dives return DC_STATUS_CANCELLED; a read mid-dive finishes the dive first, and only a transfer with no timeout is aborted. */
 @property (atomic, copy, nullable) BOOL (^cancelCheck)(void);
+/** While this returns YES, a blocked transfer is aborted within a check, mid-dive or not: the device is gone. */
+@property (atomic, copy, nullable) BOOL (^abortCheck)(void);
 /** Runs once, on the transferring thread, when a transfer fails because the device is gone. */
 @property (atomic, copy, nullable) void (^removalHandler)(void);
 @property (atomic, readonly, getter=isRemoved) BOOL removed;

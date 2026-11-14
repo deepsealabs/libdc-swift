@@ -59,6 +59,8 @@ final class FakeUSBDevice: NSObject, USBDeviceIO, @unchecked Sendable {
     /// Returned, in order, by the next IN transfers instead of any data.
     var readFailures: [IOReturn] = []
     var writeResult: IOReturn = kIOReturnSuccess
+    /// Called after each IN transfer with how many there have been, outside the device's lock.
+    var onRead: ((Int) -> Void)?
     /// What the device does with a control transfer: its result, the data stage it fills for a read request, and a response to queue on the IN endpoint.
     var onControl: ((Setup, [UInt8]) -> (result: IOReturn, dataStage: [UInt8], response: [UInt8]?))?
 
@@ -141,6 +143,18 @@ final class FakeUSBDevice: NSObject, USBDeviceIO, @unchecked Sendable {
             if writeResult == kIOReturnSuccess { actual.pointee = length }
             return writeResult
         }
+        let result = read(data, length: length, actual: actual, timeout: timeout)
+        if let onRead { onRead(reads.count) }
+        return result
+    }
+
+    /// Bytes still to send on the IN endpoint.
+    var pendingIn: Int {
+        condition.lock(); defer { condition.unlock() }
+        return current.count - currentOffset + responses.reduce(0) { $0 + $1.count }
+    }
+
+    private func read(_ data: UnsafeMutableRawPointer, length: UInt32, actual: UnsafeMutablePointer<UInt32>, timeout: UInt32) -> Int32 {
         condition.lock()
         defer { condition.unlock() }
         log.append(.read(length: length, timeout: timeout))
