@@ -51,7 +51,7 @@ let session = try await DiveComputerSession.open(endpoint, model: model, discove
 DiveLogRetriever.retrieveDiveLogs(session: session, viewModel: viewModel) { result in
     if let error = CableError(download: result, session: session) { /* show error.message */ }
     result.fingerprintCommit?.acknowledge()
-    session.close()
+    session.close()   // returns at once on the main thread; the device closes on a background queue
 }
 ```
 
@@ -69,7 +69,12 @@ This is the same call as for a serial endpoint. For a USB HID endpoint, `open` d
 Cancelling the opening task, or calling `session.cancel()`, ends a blocked read within 100 ms. Writes can't be
 interrupted, and they aren't refused after a cancel, so a driver's quit command still goes out on close. The
 device reports its own removal, so pulling it out ends the download and sets `wasUnplugged` even without a
-discovery. With one, the endpoint also disappears.
+discovery. With one, the endpoint also disappears. A close that reaches the main thread runs the driver's close
+on a background queue and keeps the lease until the device is closed, as for a serial endpoint;
+`close(completion:)` reports when it is.
+
+None of this has run against a real computer yet: the sessions are tested against emulators of the EON Steel and
+Uwatec Smart HID protocols, built from libdivecomputer's drivers.
 
 | `CableError` | From |
 |---|---|
