@@ -15,7 +15,9 @@ NS_SWIFT_NAME(USBDeviceIO)
 @protocol LibDCUSBDevice <NSObject>
 /** The max packet size of the bulk pipe at `endpoint`. */
 - (uint16_t)maxPacketSizeForEndpoint:(uint8_t)endpoint NS_SWIFT_NAME(maxPacketSize(endpoint:));
-/** ReadPipeTO for an IN endpoint, else WritePipeTO, `timeout` 0 waiting for ever; `*actual` is 0 unless it succeeded. */
+/** One bulk transfer, `timeout` 0 waiting for ever. IN reads up to `length` until a short packet, as libusb's ReadPipeAsyncTO
+    does, and `*actual` is the count delivered on a timeout, an underrun or an abort too; OUT is WritePipeTO, and `*actual` is 0
+    unless it succeeded. */
 - (int32_t)transferOnEndpoint:(uint8_t)endpoint data:(void *)data length:(uint32_t)length actual:(uint32_t *)actual
                       timeout:(uint32_t)timeout NS_SWIFT_NAME(transfer(endpoint:data:length:actual:timeout:));
 /** DeviceRequestTO on the default pipe, with `setup`'s wLength-byte data stage in `data` (NULL when wLength is 0). */
@@ -49,6 +51,10 @@ NS_SWIFT_NAME(USBStream)
 @property (atomic, copy, nullable) void (^removalHandler)(void);
 @property (atomic, readonly, getter=isRemoved) BOOL removed;
 @property (atomic, readonly, getter=isClosed) BOOL closed;
+
+/** Reads and drops what is already waiting on bulk IN (a dive tail a killed app left, say), until 150 ms pass with nothing, for
+    at most 2 s; for before a driver's first request. */
+- (void)drainStaleInput;
 
 /** Opens the iostream, which holds this stream until dc_iostream_close closes the device; a failed open closes it too, and a second call is DC_STATUS_INVALIDARGS. */
 - (dc_status_t)openIOStream:(dc_iostream_t * _Nullable * _Nonnull)iostream

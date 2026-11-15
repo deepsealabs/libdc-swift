@@ -56,8 +56,10 @@ final class USBCableSessionTests: XCTestCase {
         XCTAssertEqual(result?.fingerprintCommit?.fingerprint, CobaltDive.fingerprint(Self.newer))
 
         let device = try XCTUnwrap(devices.devices.first)
-        XCTAssertTrue(device.reads.allSatisfy { $0.length <= 64 }, "one packet per request")
-        XCTAssertTrue(device.reads.allSatisfy { $0.timeout > 0 && $0.timeout <= 2000 }, "inside the driver's 2 s")
+        XCTAssertTrue(device.reads.allSatisfy { $0.length <= 8192 }, "one transfer per driver read, as libusb submits it")
+        XCTAssertEqual(device.reads.first?.timeout, 150, "the stale-input drain before the driver's first request")
+        XCTAssertEqual(device.reads.dropFirst().first?.length, 16, "then the version block, in one transfer")
+        XCTAssertTrue(device.reads.dropFirst().allSatisfy { $0.timeout == 2000 }, "the driver's 2 s, whole")
         closeAndWait(session)
         XCTAssertEqual(device.closeCount, 1)
     }
@@ -289,7 +291,8 @@ final class USBCableSessionTests: XCTestCase {
         computer.attach(to: device)
         let devices = FakeUSBFactory { device }
         let first = try openCable(USBFixtures.cobalt, model: cobalt2(), usbDevice: devices.factory)
-        device.onRead = { [weak first] count in if count == 10 { first?.cancel() } }
+        // Reads 1 and 2 are the stale-input drain and the version block; read 3 is the long dive's first 8 KiB.
+        device.onRead = { [weak first] count in if count == 3 { first?.cancel() } }
         let download = try XCTUnwrap(downloadToEnd(first).result)
         device.onRead = nil
         XCTAssertEqual(download.outcome, .cancelled)

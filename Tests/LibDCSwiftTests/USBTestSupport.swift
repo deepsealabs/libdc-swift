@@ -9,10 +9,14 @@ import LibDCBridge
 /// IOUSBFamily codes Swift can't import: iokit_usb_err(0x4f) and iokit_usb_err(0x51).
 enum USBReturn {
     static let pipeStalled = IOReturn(bitPattern: 0xE000_404F)
+    /// IOUSBHostFamily's kUSBHostReturnPipeStalled, which current Macs return for a stall.
+    static let hostPipeStalled = IOReturn(bitPattern: 0xE000_5000)
     static let transactionTimeout = IOReturn(bitPattern: 0xE000_4051)
 }
 
-/// A claimed USB interface with bulk transfer rules (max-size packets, a short packet ends a transfer, a bigger one overruns it, silence waits out the timeout); it logs every call.
+/// A claimed USB interface with bulk transfer rules, as libusb's ReadPipeAsyncTO sees them: an IN transfer takes max-size packets
+/// until its length is filled or a short packet ends it, a packet bigger than what is left overruns it, and silence waits out the
+/// timeout, which returns what arrived first; it logs every call.
 final class FakeUSBDevice: NSObject, USBDeviceIO, @unchecked Sendable {
     struct Setup: Equatable, CustomStringConvertible {
         var bmRequestType: UInt8
@@ -162,18 +166,21 @@ final class FakeUSBDevice: NSObject, USBDeviceIO, @unchecked Sendable {
         if !readFailures.isEmpty { return readFailures.removeFirst() }
         let deadline = timeout > 0 ? Date().addingTimeInterval(Double(timeout) / 1000) : Date.distantFuture
         let aborted = abortCount
+        var got = 0
+        defer { actual.pointee = UInt32(got) }
         while true {
             if currentOffset < current.count {
                 let packet = min(current.count - currentOffset, Int(packetSize))
-                guard packet <= Int(length) else {
+                guard packet <= Int(length) - got else {
                     currentOffset += packet
                     return kIOReturnOverrun
                 }
-                current.withUnsafeBufferPointer { data.copyMemory(from: $0.baseAddress! + currentOffset, byteCount: packet) }
+                current.withUnsafeBufferPointer { data.advanced(by: got).copyMemory(from: $0.baseAddress! + currentOffset, byteCount: packet) }
                 currentOffset += packet
+                got += packet
                 if currentOffset == current.count, packet == Int(packetSize) { zeroLengthPacketOwed = sendsZeroLengthPacket }
-                actual.pointee = UInt32(packet)
-                return kIOReturnSuccess
+                if packet < Int(packetSize) || got == Int(length) { return kIOReturnSuccess }
+                continue
             }
             if zeroLengthPacketOwed {
                 zeroLengthPacketOwed = false

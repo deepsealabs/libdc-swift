@@ -204,7 +204,7 @@ final class USBStreamTests: XCTestCase {
 
     // MARK: - Bulk reads
 
-    func testAReadAsksForOnePacketAtATimeUntilTheSizeIsMet() throws {
+    func testAReadIsOneTransferForTheWholeSize() throws {
         let device = FakeUSBDevice()
         let payload = Self.bytes(200)
         let next = Self.bytes(30, seed: 9)
@@ -215,7 +215,7 @@ final class USBStreamTests: XCTestCase {
         let (status, bytes) = read(stream, 200)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(bytes, payload)
-        XCTAssertEqual(device.reads.map(\.length), [64, 64, 64, 8])
+        XCTAssertEqual(device.reads.map(\.length), [200], "as libusb submits a bulk read: one ReadPipeAsyncTO")
         XCTAssertEqual(read(stream, 64).bytes, next, "the next transfer starts where that one ended")
     }
 
@@ -229,7 +229,7 @@ final class USBStreamTests: XCTestCase {
         let (status, bytes) = read(stream, 8192)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(bytes, payload)
-        XCTAssertEqual(device.reads.map(\.length), [64, 64], "the second packet held 36 bytes")
+        XCTAssertEqual(device.reads.map(\.length), [8192], "the second packet held 36 bytes and ended the transfer")
     }
 
     func testATimeoutKeepsWhatArrivedBeforeIt() throws {
@@ -277,10 +277,7 @@ final class USBStreamTests: XCTestCase {
         XCTAssertEqual(bytes.count, 64)
         XCTAssertGreaterThanOrEqual(elapsed, 140)
         XCTAssertLessThan(elapsed, 600)
-        let waits = device.reads.map(\.timeout)
-        XCTAssertEqual(waits.count, 2)
-        XCTAssertLessThanOrEqual(waits[1], waits[0], "the second packet gets what is left of the 150 ms")
-        XCTAssertGreaterThan(waits[1], 0, "never 0, which would wait for ever")
+        XCTAssertEqual(device.reads.map(\.timeout), [150], "one transfer, with the whole timeout, keeps its count when it times out")
     }
 
     func testAPacketBiggerThanTheRequestOverrunsIt() throws {
@@ -293,7 +290,8 @@ final class USBStreamTests: XCTestCase {
 
     func testReadFailuresMapAsLibusbAndUSBCDo() throws {
         let cases: [(IOReturn, dc_status_t)] = [
-            (USBReturn.pipeStalled, DC_STATUS_IO), (kIOReturnNotResponding, DC_STATUS_IO), (kIOReturnAborted, DC_STATUS_IO),
+            (USBReturn.pipeStalled, DC_STATUS_IO), (USBReturn.hostPipeStalled, DC_STATUS_IO),
+            (kIOReturnNotResponding, DC_STATUS_IO), (kIOReturnAborted, DC_STATUS_IO),
             (kIOReturnExclusiveAccess, DC_STATUS_NOACCESS), (kIOReturnNotPermitted, DC_STATUS_NOACCESS),
             (kIOReturnNoDevice, DC_STATUS_NODEVICE), (kIOReturnNotOpen, DC_STATUS_NODEVICE),
             (kIOReturnBadArgument, DC_STATUS_INVALIDARGS), (kIOReturnNoResources, DC_STATUS_NOMEMORY),
@@ -306,6 +304,37 @@ final class USBStreamTests: XCTestCase {
             XCTAssertFalse(usb.isRemoved, "the device is still there")
             dc_iostream_close(stream)
         }
+    }
+
+    func testEitherStallCodeClearsTheBulkPipeItStalled() throws {
+        // IOUSBFamily's kIOUSBPipeStalled and IOUSBHostFamily's kUSBHostReturnPipeStalled, which current Macs return.
+        for stall in [USBReturn.pipeStalled, USBReturn.hostPipeStalled] {
+            let device = FakeUSBDevice()
+            device.readFailures = [stall]
+            let (stream, _) = try open(device)
+            XCTAssertEqual(read(stream, 16).status, DC_STATUS_IO, "as libusb's LIBUSB_ERROR_PIPE")
+            XCTAssertEqual(device.calls.filter { if case .clearStall = $0 { return true } else { return false } },
+                           [.clearStall(endpoint: FakeUSBDevice.endpointIn)], String(format: "0x%08x", stall))
+            dc_iostream_close(stream)
+        }
+    }
+
+    func testStaleInputIsDrainedBeforeTheDriversFirstRequest() throws {
+        let device = FakeUSBDevice()
+        let tail = Self.bytes(4096 + 4096 + 300, seed: 3)
+        device.queue(tail)
+        let usb = USBStream(device: device, endpointIn: FakeUSBDevice.endpointIn, endpointOut: FakeUSBDevice.endpointOut)
+        usb.drainStaleInput()
+        XCTAssertEqual(device.pendingIn, 0, "a dive tail a killed app left")
+        XCTAssertEqual(device.reads.map(\.timeout), [150, 150, 150], "until a short packet or 150 ms of quiet")
+
+        let quiet = FakeUSBDevice()
+        quiet.waitsOnSilence = true
+        let start = DispatchTime.now()
+        USBStream(device: quiet, endpointIn: FakeUSBDevice.endpointIn, endpointOut: FakeUSBDevice.endpointOut).drainStaleInput()
+        XCTAssertEqual(quiet.reads.count, 1)
+        XCTAssertLessThan(milliseconds(since: start), wallClockBound(400), "a clean pipe costs one 150 ms wait")
+        XCTAssertEqual(quiet.aborts, 0)
     }
 
     func testAFailureWithTheDeviceGoneIsNoDeviceAndRunsTheRemovalHandlerOnce() throws {
@@ -424,7 +453,7 @@ final class USBStreamTests: XCTestCase {
         let dive = Self.bytes(8192 + 8192 + 100)
         device.queue(dive)
         let cancelled = Flag()
-        device.onRead = { count in if count == 3 { cancelled.value = true } }
+        device.onRead = { count in if count == 1 { cancelled.value = true } }
         let (stream, _) = try open(device, cancel: { cancelled.value })
         defer { dc_iostream_close(stream) }
         XCTAssertEqual(dc_iostream_set_timeout(stream, 2000), DC_STATUS_SUCCESS)
@@ -434,7 +463,7 @@ final class USBStreamTests: XCTestCase {
         XCTAssertEqual(device.pendingIn, 0, "the rest of the dive was read and dropped")
         XCTAssertEqual(device.aborts, 0)
         XCTAssertEqual(read(stream, 8192).status, DC_STATUS_CANCELLED)
-        XCTAssertEqual(device.reads.count, 128 + 130, "a cancel between dives touches nothing")
+        XCTAssertEqual(device.reads.count, 1 + 3, "the read, the rest in 4 KiB transfers; a cancel between dives touches nothing")
 
         // The next request finds the pipe clean.
         cancelled.value = false

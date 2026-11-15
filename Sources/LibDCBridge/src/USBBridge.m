@@ -4,6 +4,8 @@
 #import <IOKit/IOKitLib.h>
 #import <IOKit/IOCFPlugIn.h>
 #import <IOKit/usb/IOUSBLib.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #include <time.h>
 #include <libdivecomputer/custom.h>
 #include <libdivecomputer/ioctl.h>
@@ -18,6 +20,11 @@ _Static_assert(sizeof(dc_usb_control_t) == 8, "dc_usb_control_t is the 8-byte se
 static const uint32_t LIBDC_USB_CANCEL_CHECK_MS = 50;
 // A cancel mid-dive reads the rest of the dive first; each packet waits at most the stream timeout, all of them this long.
 static const uint64_t LIBDC_USB_DRAIN_LIMIT_MS = 10000;
+// Before a session: what a killed app or the drain limit left on bulk IN, read until this much quiet, for at most the limit.
+static const uint32_t LIBDC_USB_STALE_QUIET_MS = 150;
+static const uint64_t LIBDC_USB_STALE_LIMIT_MS = 2000;
+// IOUSBHostFamily's kUSBHostReturnPipeStalled (IOUSBHostFamilyDefinitions.h), which current Macs return for a stall.
+#define LIBDC_USB_HOST_PIPE_STALLED ((IOReturn)0xe0005000)
 
 static uint64_t libdc_usb_now_ns(void)
 {
@@ -47,9 +54,17 @@ static dc_status_t libdc_usb_status(IOReturn result)
     case kIOReturnNoMemory:
     case kIOReturnNoResources:
         return DC_STATUS_NOMEMORY;
+    case kIOUSBPipeStalled:
+    case LIBDC_USB_HOST_PIPE_STALLED:
+        return DC_STATUS_IO;
     default:
         return DC_STATUS_IO;
     }
+}
+
+static BOOL libdc_usb_stalled(IOReturn result)
+{
+    return result == kIOUSBPipeStalled || result == LIBDC_USB_HOST_PIPE_STALLED;
 }
 
 static BOOL libdc_usb_succeeded(IOReturn result)
@@ -303,7 +318,7 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
     dc_status_t status = libdc_usb_status(result);
     // A timeout is how a Cobalt dive with no short packet ends; libusb clears nothing then on IOUSBFamily > 245, only a real stall.
     if (status == DC_STATUS_TIMEOUT) return status;
-    if (result == kIOUSBPipeStalled && endpoint != 0) {
+    if (libdc_usb_stalled(result) && endpoint != 0) {
         [_device clearStallOnEndpoint:endpoint];
         return DC_STATUS_IO;
     }
@@ -319,46 +334,25 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
     return status;
 }
 
-// One max-size packet per request: a timed-out ReadPipeTO reports no count, so a whole-size request would lose what came first.
-// A cancel mid-dive lets the dive finish before CANCELLED, as upstream's cooperative cancel does; only an infinite wait is aborted.
-// After a request went out (_inTail set by the write), a cancel still reads its reply, so none is left on the IN pipe.
+// One transfer for the whole request, as libusb submits it (ReadPipeAsyncTO on the live device), so a timeout and a short last
+// packet both come back with their count. A cancel mid-dive lets the dive finish before CANCELLED, as upstream's cooperative
+// cancel does; only an infinite wait is aborted. After a request went out (_inTail set by the write), a cancel still reads its
+// reply, so none is left on the IN pipe.
 - (dc_status_t)readInto:(unsigned char *)data size:(size_t)size actual:(size_t *)actual
 {
     if (actual) *actual = 0;
     if (!_inTail && [self cancelRequested]) return DC_STATUS_CANCELLED;
     if (size == 0) return DC_STATUS_SUCCESS;
+    if (size > UINT32_MAX) return DC_STATUS_INVALIDARGS;
     const size_t packet = _packetIn > 0 ? _packetIn : 64;
-    const uint64_t deadline = _timeout ? libdc_usb_now_ns() + (uint64_t)_timeout * NSEC_PER_MSEC : 0;
-    dc_status_t status = DC_STATUS_SUCCESS;
-    size_t done = 0;
-    BOOL ended = NO;
+    uint32_t got = 0;
     [self beginTransfer:_timeout == 0];
-    while (done < size) {
-        uint32_t wait = 0;
-        if (deadline) {
-            uint64_t now = libdc_usb_now_ns();
-            if (now >= deadline) {
-                status = DC_STATUS_TIMEOUT;
-                break;
-            }
-            // Rounded up: 0 would wait for ever.
-            wait = (uint32_t)MIN((deadline - now + NSEC_PER_MSEC - 1) / NSEC_PER_MSEC, (uint64_t)UINT32_MAX);
-        }
-        const uint32_t want = (uint32_t)MIN(size - done, packet);
-        uint32_t got = 0;
-        IOReturn result = [_device transferOnEndpoint:_endpointIn data:data + done length:want actual:&got timeout:wait];
-        if (!libdc_usb_succeeded(result)) {
-            status = [self failure:result endpoint:_endpointIn];
-            break;
-        }
-        done += MIN(got, want);
-        // A short packet ends a bulk transfer; one shorter than the endpoint's packet ends it even when it filled the request.
-        if (got < want || got < packet) {
-            ended = YES;
-            break;
-        }
-    }
+    IOReturn result = [_device transferOnEndpoint:_endpointIn data:data length:(uint32_t)size actual:&got timeout:_timeout];
     [self endTransfer];
+    const size_t done = MIN((size_t)got, size);
+    dc_status_t status = libdc_usb_succeeded(result) ? DC_STATUS_SUCCESS : [self failure:result endpoint:_endpointIn];
+    // A short packet ends a bulk transfer: one that left the request unfilled, or a last packet under the endpoint's size.
+    const BOOL ended = done < size || done % packet != 0;
     _inTail = status == DC_STATUS_SUCCESS && !ended;
     if (status == DC_STATUS_SUCCESS && [self cancelRequested]) {
         if (_inTail) [self drainIn:packet];
@@ -374,8 +368,8 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
 // Reads and drops the rest of a dive the computer is still sending, until a short packet, a timeout or the overall limit.
 - (void)drainIn:(size_t)packet
 {
-    unsigned char scratch[512];
-    const uint32_t length = (uint32_t)MIN(packet, sizeof(scratch));
+    unsigned char scratch[4096];
+    const uint32_t length = (uint32_t)MAX(sizeof(scratch) / packet * packet, MIN(packet, sizeof(scratch)));
     const uint32_t wait = _timeout ? MIN(_timeout, (unsigned int)2000) : 2000;
     const uint64_t limit = libdc_usb_now_ns() + LIBDC_USB_DRAIN_LIMIT_MS * NSEC_PER_MSEC;
     size_t drained = 0;
@@ -387,6 +381,24 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
         if (got < length) break;
     }
     NSLog(@"LibDCUSBStream: a cancel landed mid-dive; drained %zu bytes of it", drained);
+}
+
+- (void)drainStaleInput
+{
+    unsigned char scratch[4096];
+    const size_t packet = _packetIn > 0 ? _packetIn : 64;
+    const uint32_t length = (uint32_t)MAX(sizeof(scratch) / packet * packet, MIN(packet, sizeof(scratch)));
+    const uint64_t limit = libdc_usb_now_ns() + LIBDC_USB_STALE_LIMIT_MS * NSEC_PER_MSEC;
+    size_t dropped = 0;
+    while (libdc_usb_now_ns() < limit) {
+        uint32_t got = 0;
+        IOReturn result = [_device transferOnEndpoint:_endpointIn data:scratch length:length actual:&got
+                                              timeout:LIBDC_USB_STALE_QUIET_MS];
+        dropped += MIN(got, length);
+        // A timeout is the quiet that says nothing is left; a short or zero-length packet ended what was.
+        if (!libdc_usb_succeeded(result) || got < length) break;
+    }
+    if (dropped > 0) NSLog(@"LibDCUSBStream: dropped %zu stale bytes waiting on bulk IN before the session", dropped);
 }
 
 - (dc_status_t)writeFrom:(const unsigned char *)data size:(size_t)size actual:(size_t *)actual
@@ -441,6 +453,42 @@ static const dc_custom_cbs_t libdc_usb_callbacks = {
 
 // MARK: - IOUSBLib device
 
+// One bulk IN read in flight: the kernel fills `buffer`, which this owns, so a completion that comes late writes nothing freed.
+@interface LibDCUSBRead : NSObject
+@property (nonatomic, readonly) NSMutableData *buffer;
+@property (nonatomic, readonly) dispatch_semaphore_t done;
+@property (atomic) IOReturn result;
+@property (atomic) uint32_t count;
+@end
+
+@implementation LibDCUSBRead
+- (instancetype)initWithLength:(uint32_t)length
+{
+    if ((self = [super init])) {
+        _buffer = [NSMutableData dataWithLength:length];
+        _done = dispatch_semaphore_create(0);
+    }
+    return self;
+}
+@end
+
+// arg0 is the byte count for every result, a timeout and an underrun included (libusb's darwin_async_io_callback).
+static void libdc_usb_read_done(void *refcon, IOReturn result, void *arg0)
+{
+    LibDCUSBRead *read = (__bridge_transfer LibDCUSBRead *)refcon;
+    read.count = (uint32_t)(uintptr_t)arg0;
+    read.result = result;
+    dispatch_semaphore_signal(read.done);
+}
+
+static BOOL libdc_usb_trace(void)
+{
+    static BOOL trace;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ trace = getenv("LIBDC_USB_TRACE") != NULL; });
+    return trace;
+}
+
 static void *libdc_usb_plugin(io_service_t service, CFUUIDRef type, CFUUIDRef interfaceID, IOReturn *result)
 {
     IOCFPlugInInterface **plugin = NULL;
@@ -486,6 +534,12 @@ static BOOL libdc_usb_interface_number(io_service_t service, uint8_t *number)
     uint16_t _packetIn;
     uint16_t _packetOut;
     NSLock *_lock;
+    // Async completions run on this thread's run loop, as libusb's darwin backend does; the blocked reader waits on a semaphore.
+    CFRunLoopSourceRef _asyncSource;
+    CFRunLoopRef _asyncRunLoop;
+    dispatch_semaphore_t _asyncStopped;
+    // Heap, not an ivar: the run-loop thread may outlive a wait for it; it frees the flag as it ends.
+    atomic_bool *_asyncStop;
 }
 
 + (instancetype)openWithRegistryID:(uint64_t)registryID interfaceNumber:(uint8_t)interfaceNumber
@@ -555,7 +609,99 @@ static BOOL libdc_usb_interface_number(io_service_t service, uint8_t *number)
     kr = (*_interface)->USBInterfaceOpen(_interface);
     if (kr != kIOReturnSuccess) return kr;
     _interfaceOpen = YES;
-    return [self findPipes];
+    kr = [self findPipes];
+    if (kr != kIOReturnSuccess) return kr;
+    return [self startAsyncEvents];
+}
+
+- (IOReturn)startAsyncEvents
+{
+    CFRunLoopSourceRef source = NULL;
+    IOReturn kr = (*_interface)->CreateInterfaceAsyncEventSource(_interface, &source);
+    if (kr != kIOReturnSuccess || source == NULL) return kr != kIOReturnSuccess ? kr : kIOReturnNoResources;
+    _asyncSource = source;
+    atomic_bool *stop = malloc(sizeof(atomic_bool));
+    if (stop == NULL) return kIOReturnNoMemory;
+    atomic_init(stop, false);
+    dispatch_semaphore_t ready = dispatch_semaphore_create(0);
+    dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
+    __block CFRunLoopRef loop = NULL;
+    NSThread *thread = [[NSThread alloc] initWithBlock:^{
+        CFRunLoopRef current = CFRunLoopGetCurrent();
+        CFRetain(current);
+        loop = current;
+        CFRunLoopAddSource(current, source, kCFRunLoopDefaultMode);
+        dispatch_semaphore_signal(ready);
+        while (!atomic_load(stop)) {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0, false);
+        }
+        CFRunLoopRemoveSource(current, source, kCFRunLoopDefaultMode);
+        CFRelease(current);
+        free(stop);
+        dispatch_semaphore_signal(stopped);
+    }];
+    thread.name = @"com.libdcswift.usb.async";
+    [thread start];
+    dispatch_semaphore_wait(ready, DISPATCH_TIME_FOREVER);
+    _asyncRunLoop = loop;
+    _asyncStopped = stopped;
+    _asyncStop = stop;
+    return kIOReturnSuccess;
+}
+
+// After the interface closed, so a read still pending has had its completion delivered.
+- (void)stopAsyncEvents
+{
+    if (_asyncRunLoop != NULL) {
+        // Retained by the thread too, so the stop below can't reach a freed run loop.
+        CFRunLoopRef loop = _asyncRunLoop;
+        _asyncRunLoop = NULL;
+        CFRetain(loop);
+        atomic_store(_asyncStop, true);
+        _asyncStop = NULL;
+        CFRunLoopStop(loop);
+        CFRunLoopWakeUp(loop);
+        dispatch_semaphore_wait(_asyncStopped, dispatch_time(DISPATCH_TIME_NOW, 2 * (int64_t)NSEC_PER_SEC));
+        CFRelease(loop);
+    }
+    if (_asyncSource != NULL) {
+        CFRelease(_asyncSource);
+        _asyncSource = NULL;
+    }
+}
+
+// One ReadPipeAsyncTO for the whole length, noDataTimeout = completionTimeout as libusb sets them; ReadPipeAsync with no timeout.
+- (IOReturn)readPipe:(void *)data length:(uint32_t)length actual:(uint32_t *)actual timeout:(uint32_t)timeout
+{
+    LibDCUSBRead *read = [[LibDCUSBRead alloc] initWithLength:length];
+    void *refcon = (__bridge_retained void *)read;
+    const uint64_t started = libdc_usb_now_ns();
+    IOReturn kr = timeout
+        ? (*_interface)->ReadPipeAsyncTO(_interface, _pipeIn, read.buffer.mutableBytes, length, timeout, timeout,
+                                         libdc_usb_read_done, refcon)
+        : (*_interface)->ReadPipeAsync(_interface, _pipeIn, read.buffer.mutableBytes, length, libdc_usb_read_done, refcon);
+    if (kr != kIOReturnSuccess) {
+        (void)CFBridgingRelease(refcon);
+        return kr;
+    }
+    // The kernel ends a timed read itself; past that and a grace, the pipe is aborted, and a completion that never comes is let go.
+    dispatch_time_t grace = timeout ? dispatch_time(DISPATCH_TIME_NOW, ((int64_t)timeout + 2000) * (int64_t)NSEC_PER_MSEC)
+                                    : DISPATCH_TIME_FOREVER;
+    if (dispatch_semaphore_wait(read.done, grace) != 0) {
+        (*_interface)->AbortPipe(_interface, _pipeIn);
+        if (dispatch_semaphore_wait(read.done, dispatch_time(DISPATCH_TIME_NOW, 2 * (int64_t)NSEC_PER_SEC)) != 0) {
+            NSLog(@"LibDCIOUSBDevice: a bulk IN read never completed, even aborted");
+            return kIOReturnTimeout;
+        }
+    }
+    const uint32_t count = MIN(read.count, length);
+    if (count > 0) memcpy(data, read.buffer.bytes, count);
+    *actual = count;
+    if (libdc_usb_trace()) {
+        NSLog(@"LibDCIOUSBDevice: IN %u of %u bytes, IOReturn 0x%08x, %.1f ms (timeout %u)", count, length, read.result,
+              (double)(libdc_usb_now_ns() - started) / NSEC_PER_MSEC, timeout);
+    }
+    return read.result;
 }
 
 - (io_service_t)interfaceService:(uint8_t)interfaceNumber
@@ -621,12 +767,8 @@ static BOOL libdc_usb_interface_number(io_service_t service, uint8_t *number)
     IOReturn kr;
     if (endpoint & 0x80) {
         if (endpoint != _endpointIn) return kIOUSBEndpointNotFound;
-        UInt32 size = length;
-        kr = timeout ? (*_interface)->ReadPipeTO(_interface, _pipeIn, data, &size, timeout, timeout)
-                     : (*_interface)->ReadPipe(_interface, _pipeIn, data, &size);
-        // The synchronous API leaves size alone on an error, so an underrun that didn't shorten it carries no count.
-        if (kr == kIOReturnUnderrun && size >= length) return kIOReturnIOError;
-        if (libdc_usb_succeeded(kr)) *actual = MIN(size, length);
+        // The synchronous ReadPipeTO reports no count on a timeout or an underrun (IOUSBLib.h), which atomics_cobalt.c needs.
+        kr = [self readPipe:data length:length actual:actual timeout:timeout];
     } else {
         if (endpoint != _endpointOut) return kIOUSBEndpointNotFound;
         kr = timeout ? (*_interface)->WritePipeTO(_interface, _pipeOut, data, length, timeout, timeout)
@@ -693,6 +835,7 @@ static BOOL libdc_usb_interface_number(io_service_t service, uint8_t *number)
     _closed = YES;
     if (_interface != NULL) {
         if (_interfaceOpen) (*_interface)->USBInterfaceClose(_interface);
+        [self stopAsyncEvents];
         (*_interface)->Release(_interface);
         _interface = NULL;
         _interfaceOpen = NO;

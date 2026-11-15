@@ -54,6 +54,15 @@ USB HID endpoints. For a raw USB endpoint, on the cable queue, it:
      with no interfaces until then.
    - It finds interface 0, opens an `IOUSBInterfaceInterface500` on it with `USBInterfaceOpen`, and finds the
      bulk pipes at 0x82 and 0x02.
+   - It creates the interface's async event source (`CreateInterfaceAsyncEventSource`) on a thread of its own
+     that runs a run loop, as libusb's macOS backend does, so bulk IN completions arrive while the reading
+     thread waits.
+   - It reads and drops whatever is already waiting on bulk IN (`USBStream.drainStaleInput`), until 150 ms pass
+     with nothing, for at most 2 s. A dive tail that a killed app or the 10 s drain limit left there would
+     otherwise arrive in place of the version block: `atomics_cobalt.c` accepts a short version read, so its
+     model and serial, and with them the computer's identity, would be garbage. (Upstream's driver does the same
+     over libusb. Making it return `PROTOCOL` for a short version block is a change to the libdivecomputer fork,
+     left as a follow-up.)
 3. Wraps a `USBStream` on it in a `TapStream` (packet logging on the `"usb"` channel, optional `.dcrec`
    recording), and opens the device with one `dc_device_open` attempt.
 
@@ -92,7 +101,7 @@ callbacks, because `dc_custom_open` turns a missing one into a silent `SUCCESS`.
 | Operation | Behaviour |
 |---|---|
 | `set_timeout` | Negative waits for ever, 0 is `UNSUPPORTED` (libusb has no polling read), N is N ms. It starts waiting for ever, as `usb.c` does |
-| `read` | One bulk IN transfer of up to `size` bytes on 0x82, ended by a short packet, the full size, or the timeout. A timeout is `TIMEOUT` with the bytes that arrived before it, which `atomics_cobalt.c` takes as the end of a dive. A packet bigger than what's left of the request is an overrun (`IO`) |
+| `read` | One bulk IN transfer of up to `size` bytes on 0x82 (`ReadPipeAsyncTO`, `noDataTimeout` = `completionTimeout` = the timeout, as libusb sets them; `ReadPipeAsync` with no timeout), ended by a short packet, the full size, or the timeout. The completion's count is taken for success, an underrun and a timeout alike. A timeout is `TIMEOUT` with the bytes that arrived before it, which `atomics_cobalt.c` takes as the end of a dive. A packet bigger than what's left of the request is an overrun (`IO`) |
 | `write` | One bulk OUT transfer on 0x02, with no timeout, as `usb.c`'s write |
 | `ioctl` | `DC_IOCTL_USB_CONTROL_READ` and `_WRITE`: a `dc_usb_control_t` (8 bytes: `bmRequestType`, `bRequest`, `wValue`, `wIndex`, `wLength`) followed by its `wLength`-byte data stage, sent with `DeviceRequestTO` and the stream's timeout. A buffer shorter than the setup, or than the setup plus `wLength`, is `INVALIDARGS` and nothing is sent. Any other request is `UNSUPPORTED` |
 | `poll` | `UNSUPPORTED` |
@@ -101,25 +110,27 @@ callbacks, because `dc_custom_open` turns a missing one into a silent `SUCCESS`.
 | `close` | Closes the interface and the device, once |
 
 IOReturns map as libusb's macOS backend and then `usb.c`'s `syserror` map them: success and
-`kIOReturnUnderrun` are `SUCCESS` (an underrun only when it shortened the count; one that left it unchanged is `IO`); `kIOUSBTransactionTimeout` is `TIMEOUT`; `kIOReturnNoDevice`,
+`kIOReturnUnderrun` are `SUCCESS`, with the completion's count; `kIOUSBTransactionTimeout` is `TIMEOUT`; `kIOReturnNoDevice`,
 `kIOReturnNotOpen` and `kIOReturnNotAttached` are `NODEVICE`; exclusive access and permission errors are
-`NOACCESS`; a bad argument is `INVALIDARGS`; no memory is `NOMEMORY`; anything else (a stall, an overrun, an
-abort) is `IO`. A failure with the device gone from the registry is `NODEVICE`. Once the cancel check is true,
+`NOACCESS`; a bad argument is `INVALIDARGS`; no memory is `NOMEMORY`; anything else (a stall, IOUSBFamily's
+`kIOUSBPipeStalled` or IOUSBHostFamily's `kUSBHostReturnPipeStalled`, an overrun, an abort) is `IO`. A failure with the device gone from the registry is `NODEVICE`. Once the cancel check is true,
 writes, control transfers and reads between dives return `CANCELLED`.
 
 Where this differs from `usb.c`, and why:
 
-- **Reads ask for one max-size packet at a time.** A `ReadPipeTO` that times out reports no byte count, so one
-  request for the whole size would lose whatever arrived before the timeout. Asking packet by packet, with the
-  read's timeout as one deadline across them, gives the same result as libusb's single transfer: the same bytes,
-  the same end on a short packet, and the partial count on a timeout. It costs a round trip per packet (64 bytes
-  at full speed): behind a USB 2 hub that is about 1 ms a packet, so a full Cobalt 2 (41 x 64 KiB, about
-  2.6 MB) takes around 40 s, where libusb's one asynchronous request takes seconds. A slow first download is
-  this, not a hang. Moving reads to `ReadPipeAsyncTO`, whose completion reports the count on a timeout too, is
-  a follow-up.
+- **Reads are one asynchronous transfer, as libusb's.** The synchronous `ReadPipeTO` reports no byte count and no
+  data when it returns an error (`IOUSBLib.h`), so a timeout would lose what arrived before it and an underrun
+  its last short packet. `ReadPipeAsyncTO`'s completion carries the count for every result, which is what libusb
+  takes (`darwin_async_io_callback`, `darwin_transfer_status`). The kernel fills a buffer the read owns, so a
+  completion that comes late, after the pipe was aborted and the read given up, writes nothing freed. With
+  `LIBDC_USB_TRACE` set, every completion is logged with its IOReturn, count and time, for the first runs on a
+  real Cobalt.
 - **A timed-out read clears nothing.** libusb's macOS backend calls `ClearPipeStallBothEnds` only on
   IOUSBFamily 245 or older, and only on abort, and a timeout is how a dive whose size is a multiple of 64 bytes
-  ends. A real stall (`kIOUSBPipeStalled`) is cleared and is `IO`.
+  ends. A real stall (`kIOUSBPipeStalled`, or `kUSBHostReturnPipeStalled` on current Macs) is cleared and is
+  `IO`; libusb and `usb.c` clear nothing themselves, so this recovery step is the stream's own.
+- **Stale input is drained before a session.** `usb.c` reads nothing before the driver does. A cancel lets a dive
+  finish, but a killed app can't, and the version read would take the tail.
 - **A control transfer that moved its data stage is `SUCCESS`.** `usb.c` takes `libusb_control_transfer`'s byte
   count for an error, so its libusb build would report `IO` for one. No driver sends a data stage today (the
   Cobalt's requests have `wLength` 0).
@@ -136,8 +147,9 @@ the tests use a fake with USB's bulk rules.
 ## Testing
 
 - `USBStreamTests` run `USBStream` against the fake: the 15 operations against `usb.c`'s table, the timeout
-  rules, the control setup's layout and `wLength` bounds, packet-by-packet reads, a short packet, a zero-length
-  packet, a timeout keeping its partial count without clearing anything, the timeout as one deadline, overrun,
+  rules, the control setup's layout and `wLength` bounds, one transfer per read, a short packet, a zero-length
+  packet, a timeout keeping its partial count without clearing anything, the timeout whole, overrun, both stall
+  codes, the stale-input drain,
   the IOReturn mapping, removal, a cancel that lets a read end on its timeout, a cancel mid-dive that reads the
   rest of the dive first, an abort for a read with no timeout, and close.
 - `USBCableSessionTests` run libdivecomputer's Cobalt driver through `DiveComputerSession.open` against
@@ -162,7 +174,8 @@ LIBDC_USB_MODEL="Atomic Aquatics Cobalt 2" swift test --filter USBHardwareTests
 ```
 
 It finds the computer through `IOKitCableDiscovery`, downloads everything through a `DCStreamRecorder`, logs how
-long it took and how many reads ended on the timeout, and scrubs the serial from the recording. The serial's
+long it took and how many reads ended on the timeout, and scrubs the serial from the recording. Run it with
+`LIBDC_USB_TRACE=1` the first time, so every bulk IN completion's IOReturn, count and latency is in the log. The serial's
 digits sit under additive checksums, so the stand-in keeps their sum. If the scrubbed copy replays to the same
 dives, it writes the recording to `Tests/LibDCSwiftTests/Fixtures/Hardware/<family>_<model>_usb.dcrec`. Then it
 downloads again and expects `.noNewDives`. With `LIBDC_USB_EXPECT_BUSY=1`, it expects the open to fail with
