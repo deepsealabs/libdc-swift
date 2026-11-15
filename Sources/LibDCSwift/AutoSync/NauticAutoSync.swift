@@ -66,7 +66,7 @@ public final class NauticAutoSync {
 
     public struct DownloadedDive: Equatable {
         public let id: UInt32
-        /// Decompressed SBEM0103 profile with the /Summary appended, as `SuuntoNauticExplorer.download` returns it.
+        /// The dive as `SuuntoNauticExplorer.download` returns it: SUMMARY_SIZE(4), the /Summary, the decompressed profile.
         public let data: Data
         /// False when the bytes still don't match the listed size after every retry.
         public let isComplete: Bool
