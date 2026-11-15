@@ -266,6 +266,13 @@ With raw-data logging on, a paired port's inbound packet log has one line per SL
 or the next write or close, instead of one per byte (Shearwater reads 1 byte a call on anything but BLE). A recording still
 has every read, for replay.
 
+No test yet carries a dive through this stream. The emulated Petrel (`ShearwaterSerialReplayTests`) serves an
+empty manifest, so the pty download and the committed fixture push the RDBI reads and about 1.5 KB of manifest
+pages through `libdc_btserial_open`'s 1-byte SLIP reads, and end with no dives. The dive itself (LRE and XOR
+decompression, the PNF parser) is transport-independent code BLE downloads already run, but a fake that serves
+one manifest entry and its compressed dive block, parsed to its depth and time over the pty and in a re-recorded
+fixture, is the next test to add.
+
 ### Not the reference transport yet
 
 Subsurface on macOS doesn't use these `/dev/cu` nodes. It opens IOBluetooth RFCOMM itself: an SDP lookup by the

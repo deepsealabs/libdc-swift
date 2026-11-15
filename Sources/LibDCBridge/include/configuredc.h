@@ -301,7 +301,9 @@ dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_
  * Opens a paired classic-Bluetooth port (the /dev/cu.* node macOS's IOUserBluetoothSerialDriver makes) as a
  * DC_TRANSPORT_SERIAL iostream that answers as libdivecomputer's native RFCOMM transport does (macOS only)
  * @param write_limit_ms: The longest one write waits for room on the link (0 is 1 ms)
- * @return DC_STATUS_SUCCESS; or the open's errno mapped as serial_posix maps it
+ * @return DC_STATUS_SUCCESS; DC_STATUS_INVALIDARGS for a NULL iostream or path; DC_STATUS_NOMEMORY; the open's errno
+ *         mapped as serial_posix maps it; DC_STATUS_NOACCESS when TIOCEXCL finds the port taken (EBUSY); or
+ *         dc_custom_open's status
  * @note configure, set_dtr, set_rts, set_break, flush and purge answer SUCCESS even when the pseudo-serial refuses
  *       them, logging a WARNING, since an RFCOMM socket has no line and drivers fail their open on a refusal.
  *       Reads are full-or-TIMEOUT with one deadline per call. Writes never tcdrain: one that finds no room within
@@ -310,7 +312,7 @@ dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_
  */
 dc_status_t libdc_btserial_open(dc_iostream_t **iostream, dc_context_t *context, const char *path, unsigned int write_limit_ms);
 
-/** The write gate: carrier was seen up, and `lines` (DC_LINE_* bits) has it down */
+/** The write gate: carrier was seen up, and `lines` (DC_LINE_* bits) has it down. Exposed for tests */
 bool libdc_btserial_carrier_lost(bool carrier_seen, unsigned int lines);
 
 /**

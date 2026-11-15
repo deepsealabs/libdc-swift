@@ -5,7 +5,9 @@
  * DTR, RTS, break, flush and purge NULL, so they answer SUCCESS; Subsurface's Qt RFCOMM stream does the same. Opening
  * and reading follow serial_posix.c (O_NONBLOCK, TIOCEXCL, full-or-TIMEOUT reads with one deadline per call). Writes
  * differ from serial_posix.c on purpose: no tcdrain, and a bounded wait for room, so a link that dropped can't block.
- * This file is original code for LibDCSwift (LGPL-2.1, as libdivecomputer).
+ * The stream is new code for LibDCSwift. Its error mapping (libdc_btserial_status), raw-mode configure, line mapping
+ * (get_lines) and close sequence follow libdivecomputer's src/serial_posix.c, Copyright (C) 2008 Jef Driesen,
+ * LGPL-2.1-or-later. This file is LGPL-2.1, as libdivecomputer.
  */
 #include "configuredc.h"
 

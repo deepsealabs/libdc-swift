@@ -302,7 +302,7 @@ final class SerialTapFactory {
         let cancellation = cancellation
         tap?.setCancellation { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
         if let tap {
-            session.onClosing { tap.beginClosing() }
+            session.onClosing { state in tap.beginClosing(sessionCancelled: state.cancelled || cancellation.isCancelled) }
             session.setBytesProbe { [weak tap] in (tap?.bytesRead ?? 0) > 0 }
         }
     }
