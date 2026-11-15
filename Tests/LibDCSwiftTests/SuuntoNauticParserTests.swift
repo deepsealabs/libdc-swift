@@ -9,8 +9,8 @@ import Clibdivecomputer
 /// driver does: SUMMARY_SIZE(4), the /Summary, then the decompressed profile. The expected values below are cross-checked against the official
 /// Suunto app's JSON export of the same dive:
 ///   DiveTimeMax = 1922 s, MaxDepthAverage = 33.12 m, DepthAverage = 21.51 m.
-/// The event count (24) is the number of Alarm/Warning/Notify/State/GasSwitch
-/// edges the app logged for this dive.
+/// The app logged 24 Alarm/Warning/Notify/State edges for this dive; the parser
+/// emits the 8 begin edges that map to a libdivecomputer event.
 ///
 /// The Nautic driver has no family-specific decode layer any more: dives flow
 /// through the standard `GenericParser.parseDiveData` pipeline, and the
@@ -118,6 +118,7 @@ final class SuuntoNauticParserTests: XCTestCase {
         var time: TimeInterval = 0
         var events: [EventRecord] = []
         var deco: [DecoRecord] = []
+        var gasmixes: [UInt32] = []
     }
 
     /// The native Suunto event `value` (subgroup << 8 | type) and per-sample deco
@@ -148,6 +149,8 @@ final class SuuntoNauticParserTests: XCTestCase {
             case DC_SAMPLE_DECO:
                 c.deco.append(DecoRecord(isDecoStop: value.deco.type == DC_DECO_DECOSTOP.rawValue,
                                          ceiling: value.deco.depth, tts: TimeInterval(value.deco.tts), time: c.time))
+            case DC_SAMPLE_GASMIX:
+                c.gasmixes.append(value.gasmix)
             default:
                 break
             }
@@ -244,13 +247,14 @@ final class SuuntoNauticParserTests: XCTestCase {
 
     func testDecodeEvents() throws {
         let raw = try rawSamples(loadFixture())
-        // 8 Alarm + 3 Warning + 6 Notify + 6 State + 1 GasSwitch = 24 edges.
-        XCTAssertEqual(raw.events.count, 24)
+        // Round 4 emits mapped begin edges only: 4 Alarm (ascent speed), 1 Notify (user tank pressure),
+        // 3 State (2 at deco stop, 1 at safety stop), where the app logs 24 edges.
+        XCTAssertEqual(raw.events.count, 8)
         // Every event is stamped within the dive's elapsed time.
         XCTAssertTrue(raw.events.allSatisfy { $0.time >= 0 })
-        // Exactly one gas switch was logged on this dive.
-        let gasSwitches = raw.events.filter { $0.type == SAMPLE_EVENT_GASCHANGE.rawValue }
-        XCTAssertEqual(gasSwitches.count, 1)
+        // The dive's one gas switch is a DC_SAMPLE_GASMIX; round 4 drops SAMPLE_EVENT_GASCHANGE.
+        XCTAssertFalse(raw.events.contains { $0.type == SAMPLE_EVENT_GASCHANGE.rawValue })
+        XCTAssertEqual(raw.gasmixes, [0])
     }
 
     func testEventNativeCodesPreserved() throws {
@@ -321,7 +325,7 @@ final class SuuntoNauticParserTests: XCTestCase {
         // Every event edge lands on a profile point with its payload, and no
         // event adds a point of its own.
         let events = dive.profile.flatMap(\.rawEvents)
-        XCTAssertEqual(events.count, 24)
+        XCTAssertEqual(events.count, 8)
         XCTAssertEqual(events.map(\.value).sorted(), raw.events.map(\.value).sorted())
         XCTAssertTrue(events.contains { $0.type == .safetyStop && $0.value == UInt32(0x1B << 8 | 37) })
         // Round 4 emits the begin edge only, as the Suunto app lists them.

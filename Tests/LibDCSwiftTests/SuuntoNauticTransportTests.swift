@@ -20,16 +20,30 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// Whether the entry flags its size as present, as every real one does.
         var hasSize = true
 
+        /// A dive the parser reads: a /Summary of `summaryBytes` (at least its dive header) and a profile of
+        /// `profileBytes`, the timeline base (the dive starts at `id`, UTC) and then chunks no parser decodes.
+        /// A profile of 8 bytes is the SBEM0103 header alone, a dive without samples.
         init(id: UInt32, profileBytes: Int, summaryBytes: Int = 2036) {
             self.id = id
             var profile = Array("SBEM0103".utf8)
+            if profileBytes >= profile.count + 10 {
+                profile += [0x01, 8] + Array(withUnsafeBytes(of: (UInt64(id) * 1000).littleEndian, Array.init).prefix(7)) + [0x00]
+            }
             let seed = Int(id % 251)
-            profile += (0..<max(0, profileBytes - profile.count)).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7 &+ seed) }
+            var remaining = profileBytes - profile.count
+            while remaining >= 4 {
+                let length = remaining > 259 ? 254 : remaining > 256 ? 100 : remaining - 2
+                profile += [0x40, UInt8(length), 0x10, 0x00]
+                let base = profile.count
+                profile += (0..<(length - 2)).map { UInt8(truncatingIfNeeded: (base + $0) &* 31 &+ 7 &+ seed) }
+                remaining = profileBytes - profile.count
+            }
             decompressed = profile
             compressed = FakeDive.heatshrinkLiterals(profile)
-            var s = Array("SBEM0103".utf8)
-            s += (0..<max(0, summaryBytes - s.count)).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 1) }
-            summary = s
+            // The dive header (id 0x20, five gas records, air in the first) fills the /Summary.
+            var header = [UInt8](repeating: 0, count: max(410, summaryBytes - 14))
+            header[185 + 1] = 21
+            summary = Array("SBEM0103".utf8) + [0x20, 0xFF] + withUnsafeBytes(of: UInt32(header.count).littleEndian, Array.init) + header
             listedSize = UInt32(compressed.count + summary.count)
         }
 
