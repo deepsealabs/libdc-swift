@@ -21,19 +21,22 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var hasSize = true
 
         /// A dive the parser reads: a /Summary of `summaryBytes` (at least its dive header) and a profile of
-        /// `profileBytes`, the timeline base (the dive starts at `id`, UTC) and then chunks no parser decodes.
-        /// A profile of 8 bytes is the SBEM0103 header alone, a dive without samples.
+        /// `profileBytes`: the timeline base (the dive starts at `id`, UTC), a 1 m depth sample, then chunks
+        /// no parser decodes, a second apart. A profile of 8 bytes is the SBEM0103 header alone, an empty read.
         init(id: UInt32, profileBytes: Int, summaryBytes: Int = 2036) {
             self.id = id
             var profile = Array("SBEM0103".utf8)
-            if profileBytes >= profile.count + 10 {
+            if profileBytes >= profile.count + 10 + 143 {
                 profile += [0x01, 8] + Array(withUnsafeBytes(of: (UInt64(id) * 1000).littleEndian, Array.init).prefix(7)) + [0x00]
+                var status = [UInt8](repeating: 0, count: 141)
+                status.replaceSubrange(2..<6, with: withUnsafeBytes(of: Float(1).bitPattern.littleEndian, Array.init))
+                profile += [0x16, 141] + status
             }
             let seed = Int(id % 251)
             var remaining = profileBytes - profile.count
             while remaining >= 4 {
                 let length = remaining > 259 ? 254 : remaining > 256 ? 100 : remaining - 2
-                profile += [0x40, UInt8(length), 0x10, 0x00]
+                profile += [0x40, UInt8(length), 0xE8, 0x03]
                 let base = profile.count
                 profile += (0..<(length - 2)).map { UInt8(truncatingIfNeeded: (base + $0) &* 31 &+ 7 &+ seed) }
                 remaining = profileBytes - profile.count
