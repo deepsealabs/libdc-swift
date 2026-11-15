@@ -104,6 +104,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var dropAfterChunks: Int?
         /// Lose the link at the next /Summary GET, before it is answered.
         var dropAtSummaryGet = false
+        /// /Summary GETs to leave unanswered on a live link.
+        var unansweredSummaryGets = 0
         /// Lose the link right after the next /Data stream's end markers, before the UNSUBSCRIBE.
         var dropAfterEndMarker = false
         /// Lose the link at the Nth /Data page request from now, before it is answered.
@@ -390,6 +392,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 }
                 if unknownPaths.contains(path) {
                     send(Self.packet(0x02, msgid, [0xFF, 0xFF, 0xFF, 0x01, 0x80, 0x00] + Self.u16(404)))
+                    return
+                }
+                if path.hasSuffix("/Summary") && unansweredSummaryGets > 0 {
+                    unansweredSummaryGets -= 1
                     return
                 }
                 if path.hasSuffix("/Summary") && dropAtSummaryGet {
@@ -1274,6 +1280,35 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2, "streamed from the start")
+    }
+
+    func testAResumedDiveWhoseSummaryTimesOutKeepsItsBytes() throws {
+        let dive = FakeDive(id: 1_789_390_916, profileBytes: 20_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.dropAfterChunks = 20
+        let resume = SuuntoNauticResume()
+
+        let first = try open(watch, resume: resume)
+        XCTAssertEqual(download(first, id: dive.id).0, DC_STATUS_IO)
+        close(device: first)
+        let kept = 20 * watch.mdsPayloadSize
+
+        // A quiet watch on a live link times out at the /Summary, before any /Data read.
+        watch.reconnect()
+        watch.unansweredSummaryGets = 1
+        let second = try open(watch, resume: resume)
+        XCTAssertEqual(download(second, id: dive.id).0, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: second), kept, "kept for the next connection")
+        close(device: second)
+
+        watch.reconnect()
+        let third = try open(watch, resume: resume)
+        let (status, data) = download(third, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        XCTAssertEqual(watch.streamsServed, 1, "the rest is read in pages, not streamed again")
+        XCTAssertEqual(watch.dataPageOffsets.first, UInt32(kept))
+        XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: third))
     }
 
     func testForeachCarriesOnWithTheDiveTheLinkDroppedIn() throws {
