@@ -234,7 +234,7 @@ final class SerialTapFactory {
     func attach(_ session: DiveComputerSession) {
         let cancellation = cancellation
         tap?.setCancellation { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
-        if let tap { session.onClosing { tap.beginClosing() } }
+        if let tap { session.onClosing { state in tap.beginClosing(sessionCancelled: state.cancelled || cancellation.isCancelled) } }
     }
 }
 

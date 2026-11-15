@@ -334,6 +334,19 @@ final class TapStreamTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(milliseconds(since: start), 350, "upstream waits the driver's timeout for a quit's reply")
     }
 
+    func testACloseLatchedCleanKeepsTheDriversTimeoutWhateverTheCheckNowSays() throws {
+        let t = try tappedPort()
+        // A released session's weak check answers true.
+        t.cancelled.value = true
+        t.tap.beginClosing(sessionCancelled: false, readLimit: 100)
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var actual = 0
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, 400), DC_STATUS_SUCCESS)
+        let start = DispatchTime.now()
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT)
+        XCTAssertGreaterThanOrEqual(milliseconds(since: start), 350, "not capped at the closing limit")
+    }
+
     func testATimedOutReadCapsTheClosesReads() throws {
         let t = try tappedPort()
         var buffer = [UInt8](repeating: 0, count: 4)

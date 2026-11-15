@@ -187,6 +187,8 @@ another's model. Key per-computer records on `DiveDownloadResult.identity` (`dev
 | `notFound` | ENOENT, ENXIO, ENODEV: the cable came out before the open |
 | `noResponse(family)` | `DC_STATUS_TIMEOUT` before any dive: the wrong model, not seated, or not in PC mode. `message` adds the family's `DeviceCatalog.cableConnectInstructions(for:)` |
 | `unplugged` | The discovery saw the port go, or the open or download failed (with any status, a timeout included) with the port gone: serial_posix reads a vanished node as end of file, which becomes `DC_STATUS_TIMEOUT` |
+| `cancelled` | The opening task was cancelled (at once, even while `open(2)` is stuck), or a cancel landed as the open returned, or `DC_STATUS_CANCELLED` from a download |
+| `portError(errno:)` | Any other errno from opening the port |
 | `protocolError(status)` | Anything else libdivecomputer reports once the port is open |
 
 ## Fixtures

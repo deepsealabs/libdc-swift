@@ -60,12 +60,10 @@ public final class TapStream: DCIOStreamBackend {
     /// (Cressi Goa needs its 100 ms sleep for the quit to land). Once the session was cancelled or a read timed out, each read or
     /// poll waits at most `readLimit` ms; a clean close keeps the driver's own timeouts. On a serial port, when a cancel ended a
     /// read, the line is drained first (until 100 ms pass with nothing, for at most 1 s) and input purged, so the driver's quit
-    /// isn't answered by the rest of a dump.
-    public func beginClosing(readLimit: Int32 = TapStream.closingReadLimitMilliseconds) {
-        cancelLock.lock()
-        let check = closing ? nil : cancelCheck
-        cancelLock.unlock()
-        let sessionCancelled = check?() ?? false
+    /// isn't answered by the rest of a dump. `sessionCancelled` is whether the session was cancelled as its close began; nil
+    /// asks the cancel check now, which a check on a session already released answers wrongly.
+    public func beginClosing(sessionCancelled: Bool? = nil, readLimit: Int32 = TapStream.closingReadLimitMilliseconds) {
+        let sessionCancelled = sessionCancelled ?? cancelled
         cancelLock.lock()
         closing = true
         closingLimit = sessionCancelled || readCancelled || readTimedOut ? max(readLimit, 1) : nil

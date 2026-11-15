@@ -103,7 +103,7 @@ public final class DiveComputerSession {
     private var unplugged = false
     /// A cable session's close reached on the main thread runs on `cableQueue`: the driver's close sleeps and reads.
     private var closesOffMain = false
-    private var closingActions: [() -> Void] = []
+    private var closingActions: [(ClosingState) -> Void] = []
     private var teardownActions: [() -> Void] = []
     /// The family the device opened as, read while the descriptor is valid; `CableError(download:)` reads it after a close too.
     let openedFamily: DeviceConfiguration.DeviceFamily?
@@ -377,12 +377,14 @@ public final class DiveComputerSession {
         releaseLookupContext()
         let devicePtr = devicePtr, ownsDevice = ownsDevice, lease = lease, waiters = closeWaiters
 #if os(macOS)
+        // Latched while self is alive: the close below can run after the last release.
+        let state = closingState
         let beforeClose = takeActions(\.closingActions), afterClose = takeActions(\.teardownActions)
 #endif
         let closeDevice = {
             if ownsDevice {
 #if os(macOS)
-                beforeClose.forEach { $0() }
+                beforeClose.forEach { $0(state) }
 #endif
                 libdc_close_device_data(devicePtr)
                 devicePtr.deinitialize(count: 1)
@@ -458,12 +460,28 @@ extension DiveComputerSession {
         cancelled = true
     }
 
-    /// Runs just before an owned device's close, while its iostream is still open (a tap switching to its closing limits).
-    func onClosing(_ action: @escaping () -> Void) {
+    /// Whether a session was cancelled, and unplugged, as its close began.
+    struct ClosingState: Equatable {
+        let cancelled: Bool
+        let unplugged: Bool
+    }
+
+    private var closingState: ClosingState {
+        lock.lock(); defer { lock.unlock() }
+        return ClosingState(cancelled: cancelled, unplugged: unplugged)
+    }
+
+    /// Runs just before an owned device's close, while its iostream is still open (a tap switching to its closing limits),
+    /// with the session's state as the close began, read while the session was alive.
+    func onClosing(_ action: @escaping (ClosingState) -> Void) {
         lock.lock()
         guard !closed else { lock.unlock(); return }
         closingActions.append(action)
         lock.unlock()
+    }
+
+    func onClosing(_ action: @escaping () -> Void) {
+        onClosing { (_: ClosingState) in action() }
     }
 
     /// Runs once the device is closed, or at once if the session already is.
@@ -478,7 +496,7 @@ extension DiveComputerSession {
         lock.unlock()
     }
 
-    private func takeActions(_ list: ReferenceWritableKeyPath<DiveComputerSession, [() -> Void]>) -> [() -> Void] {
+    private func takeActions<Action>(_ list: ReferenceWritableKeyPath<DiveComputerSession, [Action]>) -> [Action] {
         lock.lock(); defer { lock.unlock() }
         let actions = self[keyPath: list]
         self[keyPath: list] = []

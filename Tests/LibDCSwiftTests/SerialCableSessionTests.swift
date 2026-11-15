@@ -185,6 +185,28 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertTrue(waitFor { ostc3.received.last == FakeOSTC3.exitCommand }, "EXIT still goes out")
     }
 
+    func testClosingActionsGetTheCancelAsTheCloseBegan() throws {
+        let link = try link()
+        let endpoint = CableFixtures.endpoint(link)
+        let model = try CableFixtures.model("Heinrichs Weikamp OSTC Mk2")
+        let lease = DiveComputerSessionLease()
+        let states = ClosingStates()
+        func open(_ name: String) throws -> DiveComputerSession {
+            let session = try openCable(endpoint, model: model, lease: lease)
+            session.onClosing { state in states.set(name, state) }
+            return session
+        }
+        // A close on the main thread runs its closing actions later, on the cable queue.
+        try open("clean").close()
+        XCTAssertTrue(waitFor(5) { !lease.isHeld })
+        let cancelled = try open("cancelled")
+        cancelled.cancel()
+        cancelled.close()
+        XCTAssertTrue(waitFor(5) { !lease.isHeld })
+        XCTAssertEqual(states["clean"], .init(cancelled: false, unplugged: false))
+        XCTAssertEqual(states["cancelled"], .init(cancelled: true, unplugged: false))
+    }
+
     func testAMainThreadCloseHoldsTheLeaseUntilThePortIsClosed() throws {
         let link = try link()
         let lease = DiveComputerSessionLease()
@@ -574,6 +596,21 @@ final class SerialCableSessionTests: XCTestCase {
 
     func testSerialOpensMakeOneAttempt() {
         XCTAssertEqual(LIBDC_SERIAL_OPEN_ATTEMPTS, 1)
+    }
+}
+
+private final class ClosingStates: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [String: DiveComputerSession.ClosingState] = [:]
+
+    func set(_ name: String, _ state: DiveComputerSession.ClosingState) {
+        lock.lock(); defer { lock.unlock() }
+        states[name] = state
+    }
+
+    subscript(name: String) -> DiveComputerSession.ClosingState? {
+        lock.lock(); defer { lock.unlock() }
+        return states[name]
     }
 }
 #endif
