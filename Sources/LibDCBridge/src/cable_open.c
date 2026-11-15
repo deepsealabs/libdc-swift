@@ -5,8 +5,15 @@
 #include <libdivecomputer/serial.h>
 #include "bridge_private.h"
 
-dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
-    libdc_iostream_wrap_t wrap, void *wrap_userdata) {
+typedef dc_status_t (*libdc_port_open_t)(dc_iostream_t **iostream, dc_context_t *context, const char *path, unsigned int limit);
+
+static dc_status_t libdc_open_posix_port(dc_iostream_t **iostream, dc_context_t *context, const char *path, unsigned int limit)
+{
+    return dc_serial_open(iostream, context, path);
+}
+
+static dc_status_t open_port_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
+    libdc_port_open_t open_port, unsigned int limit, libdc_iostream_wrap_t wrap, void *wrap_userdata) {
     if (!data) {
         return DC_STATUS_INVALIDARGS;
     }
@@ -31,7 +38,7 @@ dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_
     }
     dc_descriptor_free(descriptor);
 
-    // A wrapped port logs on its own context, WARNING and up (serial_posix's errno lines): its INFO lines would repeat
+    // A wrapped port logs on its own context, WARNING and up (the port's errno lines): its INFO lines would repeat
     // every call the wrapper logs, and the wrapper's 50 ms cancel slices would add a poll or sleep line each.
     dc_context_t *port_context = context;
     if (wrap) {
@@ -45,7 +52,7 @@ dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_
     }
 
     dc_iostream_t *iostream = NULL;
-    rc = dc_serial_open(&iostream, port_context, path);
+    rc = open_port(&iostream, port_context, path, limit);
     if (rc != DC_STATUS_SUCCESS) {
         if (port_context != context) {
             dc_context_free(port_context);
@@ -74,5 +81,15 @@ dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_
         }
     }
     return rc;
+}
+
+dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
+    libdc_iostream_wrap_t wrap, void *wrap_userdata) {
+    return open_port_device(data, path, family, model, libdc_open_posix_port, 0, wrap, wrap_userdata);
+}
+
+dc_status_t open_btserial_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
+    unsigned int write_limit_ms, libdc_iostream_wrap_t wrap, void *wrap_userdata) {
+    return open_port_device(data, path, family, model, libdc_btserial_open, write_limit_ms, wrap, wrap_userdata);
 }
 #endif

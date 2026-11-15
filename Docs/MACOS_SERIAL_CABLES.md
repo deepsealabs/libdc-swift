@@ -204,9 +204,24 @@ another's model. Key per-computer records on `DiveDownloadResult.identity` (`dev
 
 Shearwater has no download cable. The Predator, Petrel, Petrel 2, Nerd and Perdix instead carry a classic
 Bluetooth (not BLE) radio, which macOS's built-in `IOUserBluetoothSerialDriver` turns into a `/dev/cu.*`
-Serial Port Profile port once the computer is paired in System Settings > Bluetooth. That port is
-`DC_TRANSPORT_SERIAL` to libdivecomputer, so `DiveComputerSession.open` opens a `.classicBTSerial` endpoint
-exactly as it opens a USB-serial one, through the same `open_serial_device` and `TapStream`.
+Serial Port Profile port once the computer is paired in System Settings > Bluetooth. `DiveComputerSession.open`
+opens a `.classicBTSerial` endpoint through `open_btserial_device` (LibDCBridge), which is `open_serial_device`
+with the port opened by `libdc_btserial_open` instead of `dc_serial_open`, behind the same `TapStream`. The
+stream is `DC_TRANSPORT_SERIAL`, so Shearwater takes its non-BLE framing, and it answers as libdivecomputer's
+native RFCOMM transport (`bluetooth.c` over `socket.c`) and Subsurface's Qt RFCOMM stream do, not as
+`serial_posix.c`:
+
+- configure, DTR, RTS, break, flush and purge are tried on the pseudo-serial and answer `SUCCESS` even when it
+  refuses them (each refusal is logged with its errno). Both RFCOMM references leave them NULL, and
+  `shearwater_common_setup` fails the open on a configure that isn't `SUCCESS`. Purge still flushes, which an
+  RFCOMM socket can't, so stale bytes go as they would on serial.
+- Reads are full-or-`TIMEOUT` with the partial count and one deadline per call, as both `serial_posix.c` and
+  `socket.c` read.
+- Writes never `tcdrain`, which waits for ever on a link that went. A write that finds no room on the link for
+  `LIBDC_BTSERIAL_WRITE_LIMIT_MS` (12 s) is `TIMEOUT` with what went out, and once carrier has been seen up, a
+  write with carrier down is `IO` at once, as Subsurface refuses a write on a socket that isn't connected. So a
+  computer that leaves range mid-request, or the close's shutdown command into a dead link, can't hold the
+  session, its close or the lease.
 
 A sandboxed app opens the paired port under `com.apple.security.device.serial`, as any serial port: this path makes
 no IOBluetooth or CoreBluetooth call. Whether the sandbox also wants `com.apple.security.device.bluetooth` for a
@@ -226,25 +241,52 @@ blocking RFCOMM `connect()`, Subsurface by waiting up to 25 s for Qt's socket to
 only configures the line, then its first request goes out 300 ms later and is never resent, with 3 s for the
 reply. So for a `.classicBTSerial` endpoint:
 
-- Between `dc_serial_open` and `dc_device_open`, the open polls the port's lines every 50 ms for carrier, for
+- Between opening the port and `dc_device_open`, the open polls the port's lines every 50 ms for carrier, for
   up to 20 s (Qt's RFCOMM open timer), and goes on as soon as carrier rises. If it never rises, the open goes
   ahead anyway and logs the line changes, so the first hardware run can settle which line tracks the link.
-  A cancel ends the wait.
+  A cancel ends the wait and fails the open at once with `cancelled`: the port is closed before the driver's
+  open or close sends anything into a link that may not be up.
 - The tap raises any positive read timeout the driver sets to 12 s (`TapStream.bluetoothReadTimeoutFloorMilliseconds`,
   Subsurface's libdivecomputer value for Shearwater). Reads still poll in 50 ms slices, so a cancel lands as
   fast as before. Recordings keep the driver's own 3 s.
-- The port is opened once. A failed `dc_serial_open` is explained by a second open only after the fact, so no
+- The port is opened once. A failed open is explained by a second open only after the fact, so no
   extra open and close cycles the RFCOMM link right before the real one.
 
 A computer that never sends a byte (off, out of range, not in Upload Log) reads as
 `CableError.bluetoothNotConnected`, and one that answered and then went silent or failed as `bluetoothLinkLost`.
 ENOTCONN on the port means `bluetoothNotConnected` too, but the probe above suggests the port never reports it.
+At open, only a timeout reads as `bluetoothNotConnected`: line calls can't fail there any more, so a timed-out
+open is a request nothing answered. An `IO` at open is the port's own failure, with its errno in the log, and
+reads as `protocolError`, not as "not connected". `bluetoothNotConnected`'s message also says to turn the Mac's
+Bluetooth off and on, or remove and pair the computer again, if a paired computer in range and in Upload Log
+still won't connect: reports of SPP ports that open and stay silent until bluetoothd restarts suggest Upload Log
+and re-pairing alone may not clear it.
 
-A paired port is offered the Shearwater models its name starts with, case-insensitively (Perdix, Petrel,
-Nerd, Predator; a "Petrel" offers the Petrel 2 first, since both call themselves that). A port whose name
-matches none (a GPS, a phone) is offered all five, with the Petrel family first and the Predator, which has
-another driver, last. Other families libdivecomputer flags for Bluetooth (OSTC, Ratio, McLean) aren't offered
-on paired ports yet.
+With raw-data logging on, a paired port's inbound packet log has one line per SLIP frame end (0xC0), 256 bytes,
+or the next write or close, instead of one per byte (Shearwater reads 1 byte a call on anything but BLE). A recording still
+has every read, for replay.
+
+### Not the reference transport yet
+
+Subsurface on macOS doesn't use these `/dev/cu` nodes. It opens IOBluetooth RFCOMM itself: an SDP lookup by the
+Serial Port UUID (00001101-0000-1000-8000-00805F9B34FB), the first record with an RFCOMM channel,
+`openConnection:` before SDP on macOS 12 and later, a 20 s channel-open timer, and a run-loop thread feeding a
+buffer the blocking read waits on. This path instead relies on `IOUserBluetoothSerialDriver` making a usable node
+for the paired computer and on bluetoothd connecting it when the port opens, neither of which has been seen on
+hardware. The follow-up is an IOBluetooth RFCOMM stream that mirrors that behaviour (reads full-or-`TIMEOUT`, line
+calls `SUCCESS`, a write that fails when the channel isn't open), reported as `DC_TRANSPORT_SERIAL` or
+`DC_TRANSPORT_BLUETOOTH` (both non-BLE framing for Shearwater); that stream, not this one, is the path to take the
+Beta label off.
+
+A paired port's models come from its name. macOS's suffix ("-SerialPort", "-SPPDev", and any "-1" after it) is
+taken off, and libdivecomputer's own Bluetooth name filter (`dc_descriptor_filter` with `DC_TRANSPORT_BLUETOOTH`,
+which takes Shearwater's names exactly, case-insensitively) decides whether the name, or its first word, is one of
+these computers at all. A port it rejects (a GPS, a phone, a paired OSTC) is listed with no models, so nothing
+sends Shearwater's requests to another device. A name it passes is narrowed to the products it names (Perdix,
+Petrel, Nerd, Predator; a "Petrel" offers the Petrel 2 first, since both call themselves that), else all five,
+with the Petrel family first and the Predator, which has another driver, last. Other families libdivecomputer
+flags for Bluetooth (OSTC, Frog, Ratio, Tecdiving, McLean) aren't offered on paired ports yet; offering them,
+each through the same filter, is a follow-up.
 
 ## Fixtures
 

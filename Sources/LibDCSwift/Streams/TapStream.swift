@@ -30,17 +30,22 @@ public final class TapStream: DCIOStreamBackend {
     private var readCancelled = false
     private var readTimedOut = false
     private let readTimeoutFloor: Int32?
+    private let coalescesInboundLog: Bool
+    private var pendingInbound: [UInt8] = []
     private var received = 0
     private var timeout: Int32?
     private var innerTimeout: Int32?
     private var slicedReads = true
 
     /// Takes ownership of `inner`: `close()` closes it, and so does deinit if `close()` never ran. A positive timeout the driver
-    /// sets is raised to `readTimeoutFloor` on the inner stream; recordings keep the driver's own value.
+    /// sets is raised to `readTimeoutFloor` on the inner stream; recordings keep the driver's own value. With
+    /// `coalescesInboundLog`, the packet log gets one inbound line per SLIP frame end (0xC0), 256 bytes, or the next write or
+    /// close, instead of one per read (off BLE, Shearwater reads 1 byte a call); a recording still gets every read.
     public init(inner: OpaquePointer, channel: String? = nil, recorder: DCStreamRecorder? = nil,
-                isCancelled: (() -> Bool)? = nil, readTimeoutFloor: Int32? = nil) {
+                isCancelled: (() -> Bool)? = nil, readTimeoutFloor: Int32? = nil, coalescesInboundLog: Bool = false) {
         self.inner = inner
         self.readTimeoutFloor = readTimeoutFloor
+        self.coalescesInboundLog = coalescesInboundLog
         transport = dc_iostream_get_transport(inner)
         self.channel = channel ?? DCRecording.name(of: transport)
         self.recorder = recorder
@@ -190,7 +195,7 @@ public final class TapStream: DCIOStreamBackend {
         }
         if wantsBytes {
             let bytes = Array(UnsafeRawBufferPointer(rebasing: buffer[0..<actual]))
-            logPacket(.inbound, bytes)
+            logInbound(bytes, ended: status != DC_STATUS_SUCCESS)
             recorder?.append(.read(size: buffer.count, data: bytes, status: status))
         }
         return status
@@ -202,6 +207,7 @@ public final class TapStream: DCIOStreamBackend {
         actual = written
         if wantsBytes {
             let bytes = Array(data)
+            flushInboundLog()
             logPacket(.outbound, Array(bytes.prefix(written)))
             recorder?.append(.write(data: bytes, actual: written, status: status))
         }
@@ -238,6 +244,7 @@ public final class TapStream: DCIOStreamBackend {
 
     public func close() -> dc_status_t {
         guard let inner else { return DC_STATUS_SUCCESS }
+        flushInboundLog()
         self.inner = nil
         let status = dc_iostream_close(inner)
         recorder?.append(.close(status: status))
@@ -251,6 +258,22 @@ public final class TapStream: DCIOStreamBackend {
     private func logPacket(_ direction: PacketDirection, _ bytes: [UInt8]) {
         guard !bytes.isEmpty else { return }
         Logger.shared.logPacket(direction: direction, data: Data(bytes), channel: channel)
+    }
+
+    static let slipEnd: UInt8 = 0xC0
+    static let coalescedLogLimit = 256
+
+    private func logInbound(_ bytes: [UInt8], ended: Bool) {
+        guard coalescesInboundLog else { return logPacket(.inbound, bytes) }
+        pendingInbound += bytes
+        if ended || bytes.contains(Self.slipEnd) || pendingInbound.count >= Self.coalescedLogLimit { flushInboundLog() }
+    }
+
+    private func flushInboundLog() {
+        guard !pendingInbound.isEmpty else { return }
+        let bytes = pendingInbound
+        pendingInbound = []
+        logPacket(.inbound, bytes)
     }
 
     private static func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }

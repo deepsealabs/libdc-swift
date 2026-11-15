@@ -65,6 +65,7 @@ let package = Package(
                 "src/BLEBridge.m",
                 "src/transport_caps.c",
                 "src/cable_open.c",
+                "src/btserial.c",
                 "src/USBBridge.m"
             ],
             publicHeadersPath: "include",

@@ -293,6 +293,32 @@ typedef dc_iostream_t *(*libdc_iostream_wrap_t)(dc_context_t *context, dc_iostre
  */
 dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
     libdc_iostream_wrap_t wrap, void *wrap_userdata);
+
+/** The longest one write to a paired classic-Bluetooth port waits for room on the link: Subsurface's Shearwater timeout */
+#define LIBDC_BTSERIAL_WRITE_LIMIT_MS 12000
+
+/**
+ * Opens a paired classic-Bluetooth port (the /dev/cu.* node macOS's IOUserBluetoothSerialDriver makes) as a
+ * DC_TRANSPORT_SERIAL iostream that answers as libdivecomputer's native RFCOMM transport does (macOS only)
+ * @param write_limit_ms: The longest one write waits for room on the link (0 is 1 ms)
+ * @return DC_STATUS_SUCCESS; or the open's errno mapped as serial_posix maps it
+ * @note configure, set_dtr, set_rts, set_break, flush and purge answer SUCCESS even when the pseudo-serial refuses
+ *       them, logging a WARNING, since an RFCOMM socket has no line and drivers fail their open on a refusal.
+ *       Reads are full-or-TIMEOUT with one deadline per call. Writes never tcdrain: one that finds no room within
+ *       write_limit_ms is DC_STATUS_TIMEOUT with the partial count, and once carrier was seen up (get_lines), a write
+ *       with carrier down is DC_STATUS_IO without writing. ioctl is UNSUPPORTED
+ */
+dc_status_t libdc_btserial_open(dc_iostream_t **iostream, dc_context_t *context, const char *path, unsigned int write_limit_ms);
+
+/** The write gate: carrier was seen up, and `lines` (DC_LINE_* bits) has it down */
+bool libdc_btserial_carrier_lost(bool carrier_seen, unsigned int lines);
+
+/**
+ * open_serial_device for a paired classic-Bluetooth port: the port opens with libdc_btserial_open in place of
+ * dc_serial_open, on its own context; ownership, wrap and failure behave as open_serial_device's (macOS only)
+ */
+dc_status_t open_btserial_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
+    unsigned int write_limit_ms, libdc_iostream_wrap_t wrap, void *wrap_userdata);
 #endif
 
 #ifdef __cplusplus

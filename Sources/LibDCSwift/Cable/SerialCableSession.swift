@@ -117,11 +117,16 @@ extension DiveComputerSession {
         let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
         data.initialize(to: device_data_t())
         data.pointee.context = context
+        let classicBluetooth = endpoint.transport == .classicBTSerial
         let factory = SerialTapFactory(recorder: recorder, cancellation: cancellation, lease: lease,
-                                       classicBluetooth: endpoint.transport == .classicBTSerial)
-        let status = withExtendedLifetime(factory) {
-            open_serial_device(data, path, model.dcFamily, model.model, SerialTapFactory.wrap,
-                               Unmanaged.passUnretained(factory).toOpaque())
+                                       classicBluetooth: classicBluetooth)
+        let status = withExtendedLifetime(factory) { () -> dc_status_t in
+            let userdata = Unmanaged.passUnretained(factory).toOpaque()
+            // A paired port answers as RFCOMM does (line calls never fail the open, writes never block), not as serial_posix.
+            return classicBluetooth
+                ? open_btserial_device(data, path, model.dcFamily, model.model, UInt32(LIBDC_BTSERIAL_WRITE_LIMIT_MS),
+                                       SerialTapFactory.wrap, userdata)
+                : open_serial_device(data, path, model.dcFamily, model.model, SerialTapFactory.wrap, userdata)
         }
         guard status == DC_STATUS_SUCCESS else {
             data.deinitialize(count: 1)
@@ -129,7 +134,10 @@ extension DiveComputerSession {
             if factory.leaseTaken { lease.release() }
             guard factory.wrapCalled else { throw SerialPortPreflight.explain(status, path: path, transport: endpoint.transport) }
             guard factory.leaseTaken else { throw CableError.sessionInProgress }
-            if endpoint.transport == .classicBTSerial, status == DC_STATUS_TIMEOUT || status == DC_STATUS_IO {
+            if factory.linkWait == .cancelled { throw CableError.cancelled }
+            // Line calls answer SUCCESS on a paired port, so a timed-out open is a request nothing answered: the link isn't up,
+            // or the computer isn't in its upload mode. An IO is the port's own failure, with its errno in the log.
+            if classicBluetooth, status == DC_STATUS_TIMEOUT {
                 throw (factory.tap?.bytesRead ?? 0) > 0 ? CableError.bluetoothLinkLost : CableError.bluetoothNotConnected
             }
             throw CableError.deviceFailed(status, family: model.family, portPresent: access(path, F_OK) == 0)
@@ -236,7 +244,7 @@ final class SerialOpensInFlight {
     }
 }
 
-/// Builds the `TapStream` around the port `open_serial_device` opens, taking the session lease once the port is open.
+/// Builds the `TapStream` around the port `open_serial_device` or `open_btserial_device` opens, taking the session lease once the port is open.
 final class SerialTapFactory {
     let recorder: DCStreamRecorder?
     let cancellation: CableOpenCancellation
@@ -272,9 +280,15 @@ final class SerialTapFactory {
                 var lines: UInt32 = 0
                 return dc_iostream_get_lines(inner, &lines) == DC_STATUS_SUCCESS ? lines : nil
             }
+            // A cancelled open fails here, before the driver's open or close sends anything into a link that may not be up.
+            if factory.linkWait == .cancelled {
+                dc_iostream_close(inner)
+                return nil
+            }
         }
         let tap = TapStream(inner: inner, recorder: factory.recorder, isCancelled: { cancellation.isCancelled },
-                            readTimeoutFloor: factory.classicBluetooth ? TapStream.bluetoothReadTimeoutFloorMilliseconds : nil)
+                            readTimeoutFloor: factory.classicBluetooth ? TapStream.bluetoothReadTimeoutFloorMilliseconds : nil,
+                            coalescesInboundLog: factory.classicBluetooth)
         guard let stream = try? DCCustomStream.open(backend: tap, transport: tap.transport, context: context) else {
             // Dropping the tap closes inner.
             return nil

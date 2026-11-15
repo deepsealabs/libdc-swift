@@ -110,7 +110,8 @@ public enum CableError: Error, Equatable {
         case .driverMissing:
             return "macOS made no serial port for this cable. Unplug it and plug it in again; if it still has none, macOS has no driver for it."
         case .bluetoothNotConnected:
-            return "This dive computer isn't connected over Bluetooth. Start Upload Log on it and keep it near the Mac; if it was unpaired, pair it again in System Settings > Bluetooth."
+            return "This dive computer isn't connected over Bluetooth. Start Upload Log on it and keep it near the Mac; if it was unpaired, pair it again in System Settings > Bluetooth. "
+                + "If it's paired, in range and in Upload Log and still won't connect, turn the Mac's Bluetooth off and on again, or remove the computer in System Settings > Bluetooth and pair it again."
         case .bluetoothLinkLost:
             return "The Bluetooth connection dropped. Keep the computer near the Mac and run Upload Log again."
         case .permissionDenied:
