@@ -93,7 +93,12 @@ extension DiveComputerSession {
         session.setPresenceCheck { !usb.isRemoved && device.isAttached }
         let isCancelled: () -> Bool = { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
         tap.setCancellation(isCancelled)
-        session.onClosing { tap.beginClosing() }
+        // Upstream never interrupts a close: its transfers run on their own timeouts, unless the cable already went.
+        session.onClosing { state in
+            usb.cancelCheck = nil
+            usb.abortCheck = { state.unplugged }
+            tap.beginClosing(sessionCancelled: state.cancelled || cancellation.isCancelled)
+        }
         usb.cancelCheck = isCancelled
         // An unplug the registry saw aborts at once; there is no dive left to finish.
         usb.abortCheck = { [weak session] in session?.wasUnplugged ?? true }

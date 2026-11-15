@@ -181,3 +181,21 @@ dives, it writes the recording to `Tests/LibDCSwiftTests/Fixtures/Hardware/<fami
 downloads again and expects `.noNewDives`. With `LIBDC_USB_EXPECT_BUSY=1`, it expects the open to fail with
 `busy` instead. Dive dates stay as the computer sent them, so commit a recording only for dives that are fine
 to publish.
+
+Check on that first traced run:
+
+- **The version read after the drain.** The stale-input drain's 150 ms read on bulk IN normally ends by
+  timeout, which `usb.c` never does before the driver. `IOUSBLib.h` warns that a timed-out bulk request may
+  leave the data toggle out of step; if it does, the 16-byte version reply is dropped as a duplicate and every
+  open ends `noResponse`. In the trace, the drain's timed-out completion should be followed by a 16-byte version
+  completion with `kIOReturnSuccess`. If that read ever times out, call `ClearPipeStallBothEnds` on 0x82 once
+  when the drain ended by timeout, or retry the open once after clearing the IN pipe.
+
+### Before the Beta label comes off
+
+- `atomics_cobalt_device_version` (libdivecomputer 1b201bb) returns `SUCCESS` for a version read that ends
+  short with `SUCCESS`, without copying the reply, so the version block is whatever `malloc` left: DEVINFO's
+  model and serial, and the identity keys built from them, could come from garbage. The stale-input drain removes the known cause (a tail
+  a killed app left on bulk IN). The root fix is one line in the deepsealabs/libdivecomputer fork: return
+  `DC_STATUS_PROTOCOL` when the read is `SUCCESS` but shorter than 16 bytes, then bump the submodule.
+- A real Cobalt has downloaded through `USBHardwareTests` with the checks above.
