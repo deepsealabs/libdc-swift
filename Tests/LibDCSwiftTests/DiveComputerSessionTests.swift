@@ -858,7 +858,7 @@ final class DiveComputerSessionTests: XCTestCase {
     // MARK: - Suunto Nautic start time
 
     func testASessionTakesANauticStartFromTheParsersInstantNotTheFingerprint() throws {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "sbem"))
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
         let dive = try Data(contentsOf: url)
         let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
         data.initialize(to: device_data_t())

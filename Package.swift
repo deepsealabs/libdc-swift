@@ -139,7 +139,7 @@ let package = Package(
             dependencies: ["LibDCSwift", "LibDCBridge", "Clibdivecomputer"],
             path: "Tests/LibDCSwiftTests",
             resources: [
-                .copy("Fixtures/suunto_nautic_1787752091.sbem"),
+                .copy("Fixtures/suunto_nautic_1787752091.bin"),
                 .copy("Fixtures/logbook_entries_multi.bin"),
                 .copy("Fixtures/suunto_nautic_1787752091.golden.json"),
                 .copy("Fixtures/reefnet_sensus_synthetic.dcrec")

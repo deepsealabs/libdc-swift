@@ -17,6 +17,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let decompressed: [UInt8]
         /// The size /Logbook/Entries lists; defaults to the true /Data + /Summary.
         var listedSize: UInt32
+        /// Whether the entry flags its size as present, as every real one does.
+        var hasSize = true
 
         init(id: UInt32, profileBytes: Int, summaryBytes: Int = 2036) {
             self.id = id
@@ -29,6 +31,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
             s += (0..<max(0, summaryBytes - s.count)).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 1) }
             summary = s
             listedSize = UInt32(compressed.count + summary.count)
+        }
+
+        /// The dive as the driver delivers it: SUMMARY_SIZE(4) SUMMARY PROFILE.
+        var blob: [UInt8] {
+            withUnsafeBytes(of: UInt32(summary.count).littleEndian, Array.init) + summary + decompressed
         }
 
         /// An empty/aborted logbook entry: listed with size 0, no profile data.
@@ -308,11 +315,22 @@ final class SuuntoNauticTransportTests: XCTestCase {
             Self.packet(0x05, msgid, handle + [0x01, 0x80, 0x00] + Self.u16(status) + body)
         }
 
-        /// A /Data notification: HANDLE(3) FLAGS(3) ?(4) OFFSET(4) LENGTH(2) ?(6) DATA.
+        /// A /Data notification: HANDLE(3) FLAGS(3) ?(4) OFFSET(4) LENGTH(2) ?(6) DATA 00.
         private func chunkFrame(_ payload: ArraySlice<UInt8>, offset: Int = 0) -> [UInt8] {
             Self.packet(0x01, [0x00, 0x00], [0xF0, 0x24, 0x0E, 0x01, 0x80, 0x00, 0x02, 0x24, 0x22, 0x25]
-                + Self.u32(UInt32(offset)) + Self.u16(payload.count) + [0x00, 0x10, 0x0C, 0x00, 0x00, 0x00] + Array(payload))
+                + Self.u32(UInt32(offset)) + Self.u16(payload.count) + [0x00, 0x10, 0x0C, 0x00, 0x00, 0x00] + Array(payload) + [0x00])
         }
+
+        /// /Info as the watch serves it: TYPE(2) SIZE(2) ?(2), then a struct led by the offsets of its eight strings.
+        private static let info: [UInt8] = {
+            let strings = ["Suunto", "Ocean", "Porvoo", "T", "2604C3003306", "01385D425091602000000100034252D12543", "2.51.28", "4252D1"]
+            var offsets: [UInt8] = [], text: [UInt8] = []
+            for string in strings {
+                offsets += u32(UInt32(strings.count * 4 + text.count))
+                text += Array(string.utf8) + [0x00]
+            }
+            return [0x02, 0x2F, 0x19, 0x25, 0x01, 0x00] + offsets + text
+        }()
 
         private var sortedDives: [FakeDive] { dives.sorted { $0.id < $1.id } }
 
@@ -505,7 +523,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     let header: [UInt8] = [0x0D, 0x00, 0x02, len[0], len[1], 0x00, len[0], len[1], 0x00, len[0], len[1]]
                     send(dataFrame(msgid: msgid, handle: h, status: end < content.count ? 100 : 200, body: header + data))
                 } else if path == "/Info" {
-                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: Array("Suunto\0Ocean\0Porvoo\0T\02604C3003306\02.51.28\0".utf8)))
+                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: Self.info))
                 } else {
                     send(dataFrame(msgid: msgid, handle: h, status: 404, body: []))
                 }
@@ -566,7 +584,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 ? [0x01, 0x24, 0x0A, 0x24, 0x00, 0x00, 0x00, 0x00, 0x08, 0x3C, 0x08, 0x00, 0x00, 0x00]
                 : [0x01, 0x24] + Self.u32(2_100_000_000 - 1) + Self.u32(UInt32(page.count)) + Self.u32(12) + Self.u32(16)
             for d in page {
-                body += Self.u32(d.id) + Self.u32(d.id + 1800) + Self.u32(1) + Self.u32(0)
+                body += Self.u32(d.id) + Self.u32(d.id + 1800) + Self.u32(d.hasSize ? 1 : 0) + Self.u32(0)
                     + Self.u32(d.listedSize) + Self.u32(0)
             }
             send(dataFrame(msgid: msgid, handle: handle, status: more ? 100 : 200, body: body))
@@ -746,7 +764,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status, dives) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(dives.count, 1)
-        XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(dives.first?.data, dive.blob)
         XCTAssertEqual(watch.streamStops, 1)
     }
 
@@ -759,7 +777,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, dives) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(dives.first?.data, dive.blob)
         XCTAssertEqual(watch.summaryOffsets, [0, 451, 902, 1353, 1804])
     }
 
@@ -788,7 +806,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, dives) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(dives.first?.data, dive.blob)
     }
 
     func testRefusedStreamFailsTheDive() throws {
@@ -801,13 +819,13 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_PROTOCOL, "the driver doesn't issue a refused stream again")
         XCTAssertTrue(dives.isEmpty)
         XCTAssertEqual(watch.streamsServed, 0)
-        XCTAssertTrue(watch.summaryOffsets.isEmpty)
+        XCTAssertEqual(watch.summaryOffsets.filter { $0 == 0 }.count, 1, "the /Summary comes before the stream")
         XCTAssertEqual(watch.heldIdHandles, [], "the refused stream's handle is released")
 
         // The retry is the application's, and works on the same link.
         let (retryStatus, retried) = foreach(device)
         XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
-        XCTAssertEqual(retried.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(retried.first?.data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1)
     }
 
@@ -866,7 +884,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         // The application's retry on the same link gets the whole dive.
         let (retryStatus, retried) = download(device, id: dive.id)
         XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
-        XCTAssertEqual(retried, dive.decompressed + dive.summary)
+        XCTAssertEqual(retried, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2)
     }
 
@@ -881,7 +899,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(data.isEmpty, "a stream without its end marker is never handed out")
         XCTAssertEqual(watch.streamsServed, 1, "one stream, not retried by the driver")
         XCTAssertEqual(watch.streamStops, 1, "and it was unsubscribed")
-        XCTAssertTrue(watch.summaryOffsets.isEmpty)
+        XCTAssertEqual(watch.summaryOffsets.filter { $0 == 0 }.count, 1, "the /Summary comes before the stream")
         XCTAssertEqual(watch.heldIdHandles, [], "and released")
     }
 
@@ -896,12 +914,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(data.isEmpty)
         XCTAssertEqual(watch.streamsServed, 1)
         XCTAssertEqual(watch.streamStops, 1, "the failed stream is still unsubscribed")
-        XCTAssertTrue(watch.summaryOffsets.isEmpty, "the stream check caught it, not the size check")
+        XCTAssertEqual(watch.summaryOffsets.filter { $0 == 0 }.count, 1, "the /Summary comes before the stream")
         XCTAssertTrue(watch.dataPageOffsets.isEmpty, "a chunk at an earlier offset isn't read again in pages")
 
         let (retryStatus, retried) = download(device, id: dive.id)
         XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
-        XCTAssertEqual(retried, dive.decompressed + dive.summary)
+        XCTAssertEqual(retried, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2)
     }
 
@@ -913,7 +931,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary, "the same dive as an uninterrupted stream")
+        XCTAssertEqual(data, dive.blob, "the same dive as an uninterrupted stream")
         XCTAssertEqual(watch.streamsServed, 1, "recovered on the same stream, not by downloading again")
         XCTAssertEqual(watch.streamStops, 1)
         let first = watch.mdsPayloadSize, page = watch.summaryPageSize
@@ -947,7 +965,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: second), kept, "the next connection's device has the kept bytes")
         let (status2, data2) = download(second, id: dive.id)
         XCTAssertEqual(status2, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data2, dive.decompressed + dive.summary, "byte for byte the dive an uninterrupted stream gives")
+        XCTAssertEqual(data2, dive.blob, "byte for byte the dive an uninterrupted stream gives")
         XCTAssertEqual(watch.streamsServed, 1, "the rest isn't streamed again")
         XCTAssertEqual(watch.dataPageOffsets, stride(from: kept, to: dive.compressed.count, by: watch.summaryPageSize).map(UInt32.init),
                        "pages from the first missing byte to the end")
@@ -956,7 +974,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second), "a dive that downloaded forgets what was kept")
     }
 
-    func testDropAtTheSummaryKeepsTheWholeProfileAndTheNextConnectionFetchesOnlyTheSummary() throws {
+    func testDropAtTheSummaryComesBeforeTheProfileSoTheNextConnectionDownloadsItWhole() throws {
         let dive = FakeDive(id: 1_789_390_907, profileBytes: 8000)
         let watch = FakeWatch(dives: [dive])
         watch.dropAtSummaryGet = true
@@ -964,16 +982,15 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let first = try open(watch, resume: resume)
         XCTAssertEqual(download(first, id: dive.id).0, DC_STATUS_IO)
-        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: first), dive.compressed.count)
+        XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: first), "no /Data had arrived yet")
+        XCTAssertEqual(watch.streamsServed, 0)
         close(device: first)
 
         watch.reconnect()
-        let before = watch.getPaths.count
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
-        XCTAssertFalse(watch.getPaths[before...].contains("/Logbook/byId/\(dive.id)/Data"), "the profile isn't read again")
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1)
         XCTAssertTrue(watch.dataPageOffsets.isEmpty)
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second))
@@ -997,7 +1014,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.dataPageOffsets.first, UInt32(kept))
         XCTAssertEqual(watch.streamsServed, 1)
     }
@@ -1026,7 +1043,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2, "streamed from the start again")
         XCTAssertTrue(watch.dataPageOffsets.isEmpty)
     }
@@ -1048,7 +1065,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, other.decompressed + other.summary)
+        XCTAssertEqual(data, other.blob)
         XCTAssertTrue(watch.dataPageOffsets.isEmpty, "streamed from the start")
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second))
     }
@@ -1080,7 +1097,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         for dive in [a, b] {
             let (status, data) = download(third, id: dive.id)
             XCTAssertEqual(status, DC_STATUS_SUCCESS)
-            XCTAssertEqual(data, dive.decompressed + dive.summary)
+            XCTAssertEqual(data, dive.blob)
             XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: third))
         }
         XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(a.id)/Data", "/Logbook/byId/\(b.id)/Data", "/Logbook/byId/\(b.id)/Data"],
@@ -1132,7 +1149,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.dataPageOffsets[pagesBefore], UInt32(kept), "the third connection starts where the second stopped")
         XCTAssertEqual(watch.streamsServed, 1)
     }
@@ -1159,7 +1176,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
     }
 
     /// The whole /Data arrived, but the stream didn't end cleanly: no end marker, the link went right
@@ -1189,7 +1206,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
             let second = try open(watch, resume: resume)
             let (status, data) = download(second, id: dive.id)
             XCTAssertEqual(status, DC_STATUS_SUCCESS, "\(ending)")
-            XCTAssertEqual(data, dive.decompressed + dive.summary, "\(ending)")
+            XCTAssertEqual(data, dive.blob, "\(ending)")
             XCTAssertFalse(watch.getPaths[before...].contains("/Logbook/byId/\(dive.id)/Data"), "\(ending): the /Data isn't asked for again")
             XCTAssertTrue(watch.dataPageOffsets.isEmpty, "\(ending)")
             XCTAssertEqual(watch.streamsServed, 1, "\(ending)")
@@ -1211,7 +1228,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.dataPageOffsets, [UInt32(20 * watch.mdsPayloadSize)], "one refused page, then the stream")
         XCTAssertEqual(watch.streamsServed, 2)
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second))
@@ -1238,7 +1255,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2, "streamed from the start")
     }
 
@@ -1262,7 +1279,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status2, delivered2) = foreach(second)
         XCTAssertEqual(status2, DC_STATUS_SUCCESS)
         XCTAssertEqual(delivered2.map(\.fingerprint), dives.reversed().map(\.id))
-        XCTAssertEqual(delivered2.map(\.data), dives.reversed().map { $0.decompressed + $0.summary })
+        XCTAssertEqual(delivered2.map(\.data), dives.reversed().map { $0.blob })
         XCTAssertEqual(watch.streamedPaths, [dives[2], dives[1], dives[2], dives[0]].map { "/Logbook/byId/\($0.id)/Data" },
                        "the dive the link dropped in isn't streamed a second time")
         XCTAssertEqual(watch.dataPageOffsets.first, UInt32(30 * watch.mdsPayloadSize))
@@ -1294,7 +1311,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1, "skipped, not recovered by a retry")
     }
 
@@ -1345,7 +1362,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         }
         XCTAssertEqual(status, DC_STATUS_IO, "a dive that failed to download is an error, not a skip")
         XCTAssertEqual(delivered.map(\.fingerprint), [new[2].id], "nothing older than the gap is delivered")
-        XCTAssertEqual(delivered.first?.data, new[2].decompressed + new[2].summary)
+        XCTAssertEqual(delivered.first?.data, new[2].blob)
         XCTAssertEqual(watch.drops, 1)
 
         let afterFirst = DiveLogRetriever.outcome(status: status, family: DC_FAMILY_SUUNTO_NAUTIC, fingerprintMatched: false,
@@ -1363,7 +1380,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status2, DC_STATUS_SUCCESS)
         XCTAssertEqual(delivered2.map(\.fingerprint), new.map(\.id).reversed(), "every new dive, stopping at the stored fingerprint")
         for (got, fake) in zip(delivered2, new.reversed()) {
-            XCTAssertEqual(got.data, fake.decompressed + fake.summary)
+            XCTAssertEqual(got.data, fake.blob)
         }
         XCTAssertEqual(watch.streamsServed - streamsBefore, 3, "the already-synced dive is not downloaded again")
 
@@ -1410,7 +1427,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(watch.cancelledCalls, [.read, .write, .write], "the first cancelled read ends the dive")
         XCTAssertEqual(watch.streamsServed, 2)
         XCTAssertEqual(watch.getPaths.filter { $0.hasSuffix("/Data") }.count, 2)
-        XCTAssertFalse(watch.getPaths.contains("/Logbook/byId/\(dives[1].id)/Summary"), "no request after the cancel")
+        XCTAssertFalse(watch.getPaths.contains { $0.contains("\(dives[0].id)") }, "no request after the cancel")
     }
 
     func testCancelledWriteBetweenDivesEndsForeach() throws {
@@ -1448,7 +1465,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(outcome.interrupted)
     }
 
-    func testEmptyLogbookEntryIsSkipped() throws {
+    func testEmptyLogbookEntryIsDeliveredNotSkipped() throws {
         let older = FakeDive(id: 1_789_900_000, profileBytes: 4000)
         let empty = FakeDive(emptyID: 1_789_907_200)
         let newer = FakeDive(id: 1_789_914_400, profileBytes: 4000)
@@ -1456,9 +1473,23 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let device = try open(watch)
 
         let (status, delivered) = foreach(device)
-        XCTAssertEqual(status, DC_STATUS_SUCCESS, "an entry with nothing to download is not a gap")
-        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, older.id])
-        XCTAssertFalse(watch.streamedPaths.contains("/Logbook/byId/\(empty.id)/Data"), "skipped without a download")
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, empty.id, older.id], "nothing is skipped")
+        XCTAssertEqual(delivered.dropFirst().first?.data, empty.blob, "an empty /Summary and /Data, which the parser rejects")
+        XCTAssertTrue(watch.streamedPaths.contains("/Logbook/byId/\(empty.id)/Data"))
+    }
+
+    func testEntryListedWithoutASizeFailsForeach() throws {
+        let older = FakeDive(id: 1_789_900_000, profileBytes: 4000)
+        var unsized = FakeDive(id: 1_789_907_200, profileBytes: 4000)
+        unsized.hasSize = false
+        let newer = FakeDive(id: 1_789_914_400, profileBytes: 4000)
+        let watch = FakeWatch(dives: [older, unsized, newer])
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_DATAFORMAT)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id], "foreach stops at the entry it can't check")
     }
 
     func testCompleteDownloadById() throws {
@@ -1468,7 +1499,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1)
     }
 
@@ -1484,7 +1515,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: unlisted.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, unlisted.decompressed + unlisted.summary)
+        XCTAssertEqual(data, unlisted.blob)
         XCTAssertEqual(watch.entriesStartAfter.count, listings + 1, "the listing was read for the dive's size")
         XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(unlisted.id)/Data"])
     }
@@ -1500,12 +1531,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (statusA, dataA) = download(device, id: a.id)
         XCTAssertEqual(statusA, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dataA, a.decompressed + a.summary)
+        XCTAssertEqual(dataA, a.blob)
 
         let (statusB, dataB) = download(device, id: b.id)
         XCTAssertEqual(statusB, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dataB, b.decompressed + b.summary, "dive B's request must not come back with dive A's profile")
-        XCTAssertFalse(dataB.starts(with: a.decompressed))
+        XCTAssertEqual(dataB, b.blob, "dive B's request must not come back with dive A's profile")
+        XCTAssertFalse(dataB.dropFirst(4 + b.summary.count).starts(with: a.decompressed))
 
         XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(a.id)/Data", "/Logbook/byId/\(b.id)/Data"])
         XCTAssertEqual(watch.heldIdHandles, [], "every per-id resolution is released")
@@ -1520,7 +1551,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         let newestFirst = dives.sorted { $0.id > $1.id }
         XCTAssertEqual(got.map(\.fingerprint), newestFirst.map(\.id))
-        XCTAssertEqual(got.map(\.data), newestFirst.map { $0.decompressed + $0.summary })
+        XCTAssertEqual(got.map(\.data), newestFirst.map { $0.blob })
         XCTAssertEqual(watch.streamedPaths, newestFirst.map { "/Logbook/byId/\($0.id)/Data" })
         XCTAssertEqual(watch.heldIdHandles, [])
     }
@@ -1695,7 +1726,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let delivered = Self.dives(events)
         XCTAssertEqual(delivered.map(\.id), dives.map(\.id), "oldest first, each dive exactly once")
         for (dive, fake) in zip(delivered, dives) {
-            XCTAssertEqual(dive.data, Data(fake.decompressed + fake.summary))
+            XCTAssertEqual(dive.data, Data(fake.blob))
             XCTAssertTrue(dive.isComplete)
         }
         XCTAssertEqual(delivered[1].attempts, 2, "the dive the link died on is fetched again from the start")
@@ -1726,7 +1757,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let delivered = Self.dives(events)
         XCTAssertEqual(delivered.map(\.id), dives.map(\.id), "oldest first, each dive exactly once")
         for (dive, fake) in zip(delivered, dives) {
-            XCTAssertEqual(dive.data, Data(fake.decompressed + fake.summary))
+            XCTAssertEqual(dive.data, Data(fake.blob))
             XCTAssertTrue(dive.isComplete)
         }
         XCTAssertEqual(delivered[1].attempts, 2)
@@ -1752,7 +1783,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let delivered = Self.dives(log.all)
         XCTAssertEqual(delivered.count, 1)
         XCTAssertEqual(delivered.first?.isComplete, true)
-        XCTAssertEqual(delivered.first?.data, Data(dive.decompressed + dive.summary))
+        XCTAssertEqual(delivered.first?.data, Data(dive.blob))
         XCTAssertTrue(Self.logs(log.all).contains { $0.hasPrefix("Dive \(dive.id) failed (PROTOCOL); retrying") })
         XCTAssertEqual(connector.connects, 1, "retried on the same link")
     }

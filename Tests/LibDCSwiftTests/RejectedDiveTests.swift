@@ -18,13 +18,13 @@ final class RejectedDiveTests: XCTestCase {
     private let ids: [UInt32] = [1_787_900_000, 1_787_800_000, 1_787_752_091]
 
     private func fixture() throws -> Data {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "sbem"))
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
         return try Data(contentsOf: url)
     }
 
-    /// The dive as the third-round driver delivers a profile without the SBEM0103 magic.
+    /// The dive with its /Summary's SBEM magic damaged, which the parser rejects.
     private func badMagic(_ dive: Data) -> Data {
-        Data("SBEM9999".utf8) + dive.dropFirst(8)
+        dive.prefix(4) + Data("XBEM".utf8) + dive.dropFirst(8)
     }
 
     private func context(stored: UInt32? = nil) -> DiveLogRetriever.CallbackContext {
