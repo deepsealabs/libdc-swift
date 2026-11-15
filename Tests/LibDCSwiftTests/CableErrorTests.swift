@@ -59,6 +59,13 @@ final class CableErrorTests: XCTestCase {
                        .protocolError(DC_STATUS_PROTOCOL))
     }
 
+    func testAGonePortIsAnUnplugWhateverTheStatus() {
+        // serial_posix reads a vanished node as end of file, and a short read is TIMEOUT.
+        for status in [DC_STATUS_TIMEOUT, DC_STATUS_IO, DC_STATUS_NODEVICE, DC_STATUS_PROTOCOL, DC_STATUS_CANCELLED] {
+            XCTAssertEqual(CableError.deviceFailed(status, family: .suuntoD9, portPresent: false), .unplugged, "\(status)")
+        }
+    }
+
     // MARK: - Download outcomes
 
     private func session(path: String) throws -> DiveComputerSession {
@@ -92,6 +99,11 @@ final class CableErrorTests: XCTestCase {
 
         let gone = try session(path: "/dev/cu.libdcswift-no-such-port")
         XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_IO), dives: 1), session: gone), .unplugged)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: gone), .unplugged,
+                       "an end of file on a gone node, before discovery saw the removal")
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 2), session: gone), .unplugged,
+                       "checked before the stalled-link rule")
+        XCTAssertEqual(CableError(download: result(.cancelled), session: gone), .cancelled, "a cancel stays the user's")
     }
 
     func testAClosedSessionStillNamesItsFamily() throws {

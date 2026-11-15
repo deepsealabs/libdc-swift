@@ -6,8 +6,12 @@ import Clibdivecomputer
 public final class TapStream: DCIOStreamBackend {
     /// The longest a blocked read, poll or sleep waits between cancel checks; half of 100 ms so a cancel lands within 100 ms.
     public static let cancelCheckMilliseconds: Int32 = 50
-    /// While closing, the longest one read or poll waits, so a silent computer can't hold a driver's close for its full timeout.
+    /// While closing after a cancel or a timed-out read, the longest one read or poll waits, so a computer that stopped answering
+    /// can't hold a driver's close for its full timeout.
     public static let closingReadLimitMilliseconds: Int32 = 500
+    /// Before the close of a serial session a cancel cut a read short: the quiet that ends the drain, and the longest it runs.
+    static let drainSilenceMilliseconds: Int32 = 100
+    static let drainLimitMilliseconds: Int32 = 1000
 
     /// The inner stream's transport, to open the tap's own stream with.
     public let transport: dc_transport_t
@@ -18,7 +22,10 @@ public final class TapStream: DCIOStreamBackend {
     private var inner: OpaquePointer?
     private let cancelLock = NSLock()
     private var cancelCheck: (() -> Bool)?
+    private var closing = false
     private var closingLimit: Int32?
+    private var readCancelled = false
+    private var readTimedOut = false
     private var timeout: Int32?
     private var innerTimeout: Int32?
     private var slicedReads = true
@@ -49,18 +56,35 @@ public final class TapStream: DCIOStreamBackend {
         cancelCheck = isCancelled
     }
 
-    /// For a driver's close: the cancel check is ignored, sleeps and writes run in full, and each read or poll waits at most `readLimit` ms.
-    /// Upstream never interrupts a close, and some drivers need their pre-command sleep for the quit to land (Cressi Goa's 100 ms).
+    /// For a driver's close: the cancel check is ignored and sleeps and writes run in full, as upstream never interrupts a close
+    /// (Cressi Goa needs its 100 ms sleep for the quit to land). Once the session was cancelled or a read timed out, each read or
+    /// poll waits at most `readLimit` ms; a clean close keeps the driver's own timeouts. On a serial port, when a cancel ended a
+    /// read, the line is drained first (until 100 ms pass with nothing, for at most 1 s) and input purged, so the driver's quit
+    /// isn't answered by the rest of a dump.
     public func beginClosing(readLimit: Int32 = TapStream.closingReadLimitMilliseconds) {
-        cancelLock.lock(); defer { cancelLock.unlock() }
-        closingLimit = max(readLimit, 1)
+        cancelLock.lock()
+        let check = closing ? nil : cancelCheck
+        cancelLock.unlock()
+        let sessionCancelled = check?() ?? false
+        cancelLock.lock()
+        closing = true
+        closingLimit = sessionCancelled || readCancelled || readTimedOut ? max(readLimit, 1) : nil
+        let drain = readCancelled && transport == DC_TRANSPORT_SERIAL
+        cancelLock.unlock()
+        if drain { drainInput() }
     }
 
     private var cancelled: Bool {
         cancelLock.lock()
-        let check = closingLimit == nil ? cancelCheck : nil
+        let check = closing ? nil : cancelCheck
         cancelLock.unlock()
         return check?() ?? false
+    }
+
+    private func note(_ status: dc_status_t) {
+        guard status == DC_STATUS_CANCELLED || status == DC_STATUS_TIMEOUT else { return }
+        cancelLock.lock(); defer { cancelLock.unlock() }
+        if status == DC_STATUS_CANCELLED { readCancelled = true } else { readTimedOut = true }
     }
 
     /// `timeout` capped by the closing limit: blocking becomes the limit, 0 stays a no-wait read.
@@ -145,6 +169,7 @@ public final class TapStream: DCIOStreamBackend {
         } else {
             status = cancellableRead(buffer, &actual)
         }
+        note(status)
         if wantsBytes {
             let bytes = Array(UnsafeRawBufferPointer(rebasing: buffer[0..<actual]))
             logPacket(.inbound, bytes)
@@ -302,6 +327,23 @@ public final class TapStream: DCIOStreamBackend {
             if cancelled { return DC_STATUS_CANCELLED }
             if Self.expired(deadline) { return DC_STATUS_TIMEOUT }
         }
+    }
+
+    /// Reads and drops what the computer still sends, then purges input; not recorded, since no driver asked for it.
+    private func drainInput() {
+        guard let inner, let deadline = Self.deadline(after: Self.drainLimitMilliseconds) else { return }
+        var scratch = [UInt8](repeating: 0, count: 1024)
+        var dropped = 0
+        while !Self.expired(deadline) {
+            let quiet = min(Self.drainSilenceMilliseconds, max(Self.millisecondsLeft(deadline), 1))
+            guard dc_iostream_poll(inner, quiet) == DC_STATUS_SUCCESS, setInnerTimeout(inner, 0) == DC_STATUS_SUCCESS else { break }
+            var count = 0
+            let status = scratch.withUnsafeMutableBytes { dc_iostream_read(inner, $0.baseAddress, $0.count, &count) }
+            dropped += count
+            if count == 0 || (status != DC_STATUS_SUCCESS && status != DC_STATUS_TIMEOUT) { break }
+        }
+        let purged = dc_iostream_purge(inner, DC_DIRECTION_INPUT)
+        logInfo("\(channel): dropped \(dropped) byte(s) a cancelled read left on the line before the driver's close (purge \(purged.rawValue))")
     }
 
     private func cancellableSleep(_ milliseconds: UInt32) -> dc_status_t {

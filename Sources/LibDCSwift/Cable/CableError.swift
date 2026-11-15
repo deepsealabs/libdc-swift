@@ -47,12 +47,13 @@ public enum CableError: Error, Equatable {
         }
     }
 
-    /// The device failing to open, or a download failing, on a port that is open; `portPresent` tells an unplug from a link error.
+    /// The device failing to open, or a download failing, on a port that is open; a gone port is an unplug whatever the status,
+    /// since serial_posix reads a vanished node as end of file, which becomes `TIMEOUT`.
     static func deviceFailed(_ status: dc_status_t, family: DeviceConfiguration.DeviceFamily, portPresent: Bool) -> CableError {
+        guard portPresent else { return .unplugged }
         switch status {
         case DC_STATUS_TIMEOUT: return .noResponse(family)
         case DC_STATUS_CANCELLED: return .cancelled
-        case DC_STATUS_IO, DC_STATUS_NODEVICE: return portPresent ? .protocolError(status) : .unplugged
         default: return .protocolError(status)
         }
     }
@@ -71,6 +72,8 @@ public enum CableError: Error, Equatable {
         case .cancelled:
             self = .cancelled
         case .failed(let status), .interrupted(let status):
+            // Before the timeout rule below: a node that went away mid-read reads as a timeout.
+            guard portPresent else { self = .unplugged; return }
             guard let family else { self = .protocolError(status); return }
             // A timeout after some dives is a link that stalled, not a computer that never answered.
             if status == DC_STATUS_TIMEOUT, result.divesDownloaded > 0 {

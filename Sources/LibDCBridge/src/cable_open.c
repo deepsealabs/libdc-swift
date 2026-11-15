@@ -31,9 +31,25 @@ dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_
     }
     dc_descriptor_free(descriptor);
 
+    // A wrapped port logs on its own context, WARNING and up (serial_posix's errno lines): its INFO lines would repeat
+    // every call the wrapper logs, and the wrapper's 50 ms cancel slices would add a poll or sleep line each.
+    dc_context_t *port_context = context;
+    if (wrap) {
+        port_context = NULL;
+        if (dc_context_new(&port_context) != DC_STATUS_SUCCESS || !port_context) {
+            dc_context_free(context);
+            return DC_STATUS_NOMEMORY;
+        }
+        libdc_configure_context_logging(port_context);
+        dc_context_set_loglevel(port_context, DC_LOGLEVEL_WARNING);
+    }
+
     dc_iostream_t *iostream = NULL;
-    rc = dc_serial_open(&iostream, context, path);
+    rc = dc_serial_open(&iostream, port_context, path);
     if (rc != DC_STATUS_SUCCESS) {
+        if (port_context != context) {
+            dc_context_free(port_context);
+        }
         dc_context_free(context);
         return rc;
     }
@@ -41,12 +57,22 @@ dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_
     if (wrap) {
         iostream = wrap(context, iostream, wrap_userdata);
         if (!iostream) {
+            dc_context_free(port_context);
             dc_context_free(context);
             return DC_STATUS_NOMEMORY;
         }
     }
 
     data->context = context;
-    return open_device_on_iostream(data, iostream, family, model, LIBDC_SERIAL_OPEN_ATTEMPTS, 0);
+    rc = open_device_on_iostream(data, iostream, family, model, LIBDC_SERIAL_OPEN_ATTEMPTS, 0);
+    if (port_context != context) {
+        if (rc == DC_STATUS_SUCCESS) {
+            data->stream_context = port_context;
+        } else {
+            // open_device_on_iostream closed the stream, and the port with it.
+            dc_context_free(port_context);
+        }
+    }
+    return rc;
 }
 #endif

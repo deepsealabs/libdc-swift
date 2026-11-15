@@ -77,6 +77,23 @@ AppleUSBSLCOM, AppleUSBPLCOM, AppleUSBCHCOM). 0403:F460, 04B8:0521, 04B8:0522 an
 Older macOS versions may lack other PIDs, so every FTDI hint carries FTDI's driver page as a fallback
 `driverURL`. A hint with no `driverURL` still says that a driver is missing, and that the cable's maker supplies it.
 
+The OSTC 4 and OSTC 5 aren't offered on any cable: their descriptors carry the SERIAL flag for the RFCOMM tty a
+Linux host binds, but the computers have no data cable (`DeviceCatalog.noCableModels`).
+
+### Known gap: the Oceanic/Pelagic cable (0403:F460)
+
+This is the biggest serial group in libdivecomputer's table (the Oceanic Atom 2, Veo 250 and VT Pro families:
+Oceanic, Aqualung, Sherwood, Aeris, Hollis and Tusa), and macOS has no driver for its PID, so it gets no
+`/dev/cu.*` node and is listed as `driverMissing`. Outside the App Store, FTDI's VCP driver gives it a port.
+An App Store build can't send people to install that driver, so its users can't download over this cable yet.
+Subsurface's macOS build reaches it from userspace through libftdi. The follow-up is the same here: a
+userspace FTDI stream on IOUSBLib (as `USBStream` is for raw USB), under `com.apple.security.device.usb`,
+opened with `dc_custom_open` as `DC_TRANSPORT_SERIAL`. It resets and purges the chip at open, sets the baud
+divisor in eighths of 3 MHz, the line (8N1, 8E1, 8O1, 8N2), DTR and RTS through MODEM_CTRL and a 1 ms latency
+timer, strips the two modem-status bytes from every 64-byte IN packet, and reads full-or-`TIMEOUT` with the
+partial count. It could also stand in for F680, 87D0 and the generic FTDI PIDs when macOS makes no port. Until
+then the `driverMissing` path stays as it is.
+
 ## When a cable isn't listed, or has no port
 
 - **Not listed at all.** On Apple silicon Mac laptops (macOS 13 and later), macOS asks "Allow accessory to
@@ -127,10 +144,17 @@ Writes can't be interrupted. A cancel that lands just as the open finishes close
 pulling the cable cancels the session and sets `wasUnplugged`.
 
 `session.close()` runs the driver's close as upstream does: its quit or exit command goes out after the
-driver's own sleeps (Cressi Goa needs 100 ms before every command, or the computer stays in PC Link). The tap
-caps each read at `TapStream.closingReadLimitMilliseconds` (500 ms), so a computer that has stopped answering
-holds a close for about half a second per acknowledgement instead of the driver's 1 to 9 s. That is still up
-to about 1.7 s (Oceanic Atom 2's retries), and a write to a stalled link can block longer, so a close that
+driver's own sleeps (Cressi Goa needs 100 ms before every command, or the computer stays in PC Link), and a
+clean close waits the driver's own timeout for the acknowledgement. Once the session was cancelled or
+unplugged, or a read in it timed out, the tap caps each read at `TapStream.closingReadLimitMilliseconds`
+(500 ms), so a computer that has stopped answering holds a close for about half a second per acknowledgement
+instead of the driver's 1 to 9 s. Upstream drivers only stop between packets, but a cancel ends a tap read in
+the middle of one, while the computer may still be sending a memory dump. So when a cancel ended a read, the
+tap first reads and drops what still arrives, until 100 ms pass with nothing (for at most 1 s), and purges
+input, before the driver's close sends its quit: hw_ostc3's close reads the EXIT echo, and would read stale
+dump bytes instead. A cancel never commits a fingerprint, so no dives are lost either way. A close can still
+take a few seconds (Oceanic Atom 2's retries, a clean close's acknowledgement), and a write to a stalled link
+can block longer, so a close that
 reaches the main thread (a `close()` call there, the end of a download a close was waiting for, or the last
 release of the session) runs on a background queue instead. `isClosed` is true at once, but the session keeps
 the lease, and the endpoint stays `busy`, until the port is really closed, so an open in the meantime throws
@@ -140,12 +164,18 @@ thread returns once the port is closed.
 None of this has run against a real computer yet: the sessions are tested over a pseudo-terminal against
 emulators built from libdivecomputer's protocol code, and through recorded exchanges.
 
+With `set_ble_debug_logging(1)`, the port itself logs on a context of its own that passes only WARNING and
+ERROR (serial_posix's errno lines), kept in `device_data_t.stream_context`. The driver's calls are logged once,
+by the tap's stream, instead of again for each 50 ms slice the tap polls or sleeps in.
+
 The session's `storageKey` is the endpoint's `locatorKey`. It is never the computer's identity, which DEVINFO
 gives during the download. Fingerprints are keyed by identity (see `DEVICE_IDENTITY.md`). For a computer that
 reports no serial, the adapter's USB serial number stands in for the unit. The `StoredDevice` a cable download
 updates is keyed by that locator too, so it describes the last computer reached through this cable, not one
 computer: two computers on one cable share it, and a CH340 with no USB serial is keyed by its port path, which
-changes with the USB port. Key per-computer records on `DiveDownloadResult.identity` (`deviceKey`) instead.
+changes with the USB port. When a computer of another family comes through the same cable, the record takes the
+family (and, if the hardware reports none, the model) the session opened, so it never pairs one family with
+another's model. Key per-computer records on `DiveDownloadResult.identity` (`deviceKey`) instead.
 
 | `CableError` | From |
 |---|---|
@@ -156,7 +186,7 @@ changes with the USB port. Key per-computer records on `DiveDownloadResult.ident
 | `sessionInProgress` | Another session is open or still closing, or another open is in progress on the port |
 | `notFound` | ENOENT, ENXIO, ENODEV: the cable came out before the open |
 | `noResponse(family)` | `DC_STATUS_TIMEOUT` before any dive: the wrong model, not seated, or not in PC mode. `message` adds the family's `DeviceCatalog.cableConnectInstructions(for:)` |
-| `unplugged` | The discovery saw the port go, or the link failed with the port gone |
+| `unplugged` | The discovery saw the port go, or the open or download failed (with any status, a timeout included) with the port gone: serial_posix reads a vanished node as end of file, which becomes `DC_STATUS_TIMEOUT` |
 | `protocolError(status)` | Anything else libdivecomputer reports once the port is open |
 
 ## Fixtures

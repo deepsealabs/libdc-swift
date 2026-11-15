@@ -321,6 +321,77 @@ final class TapStreamTests: XCTestCase {
         XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT, "0 still takes what is there")
     }
 
+    func testACleanCloseKeepsTheDriversTimeoutAndTheLine() throws {
+        let t = try tappedPort()
+        t.port.send([0x5A])
+        t.tap.beginClosing(readLimit: 100)
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var actual = 0
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, 400), DC_STATUS_SUCCESS)
+        let start = DispatchTime.now()
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT)
+        XCTAssertEqual(Array(buffer.prefix(actual)), [0x5A], "nothing was drained")
+        XCTAssertGreaterThanOrEqual(milliseconds(since: start), 350, "upstream waits the driver's timeout for a quit's reply")
+    }
+
+    func testATimedOutReadCapsTheClosesReads() throws {
+        let t = try tappedPort()
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var actual = 0
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, 30), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT)
+        t.tap.beginClosing(readLimit: 100)
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, 3000), DC_STATUS_SUCCESS)
+        let start = DispatchTime.now()
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_TIMEOUT)
+        XCTAssertLessThan(milliseconds(since: start), wallClockBound(1000), "a computer that stopped answering")
+    }
+
+    func testACancelThatEndedAReadDrainsTheLineBeforeTheClose() throws {
+        let t = try tappedPort()
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var actual = 0
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, -1), DC_STATUS_SUCCESS)
+        t.cancelled.value = true
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_CANCELLED)
+        // The rest of a memory dump, on the line as the close starts.
+        t.port.send([0xAA, 0xBB, 0xCC])
+        let start = DispatchTime.now()
+        t.tap.beginClosing(readLimit: 500)
+        let drained = milliseconds(since: start)
+        XCTAssertGreaterThanOrEqual(drained, Double(TapStream.drainSilenceMilliseconds) - 10, "until the line goes quiet")
+        XCTAssertLessThan(drained, wallClockBound(Double(TapStream.drainLimitMilliseconds) + 200))
+        // The quit's echo is the first thing the driver's close reads.
+        t.port.send([0x01])
+        XCTAssertEqual(dc_iostream_set_timeout(t.stream, 500), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 1, &actual), DC_STATUS_SUCCESS)
+        XCTAssertEqual(Array(buffer.prefix(actual)), [0x01])
+    }
+
+    func testTheDrainStopsAtItsLimitOnAComputerThatKeepsSending() throws {
+        let t = try tappedPort()
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var actual = 0
+        t.cancelled.value = true
+        XCTAssertEqual(dc_iostream_read(t.stream, &buffer, 4, &actual), DC_STATUS_CANCELLED)
+        let stop = Flag()
+        let stopped = DispatchSemaphore(value: 0)
+        let master = t.port.master
+        let chunk = [UInt8](repeating: 0xEE, count: 16)
+        // Already sending when the close starts, with gaps far shorter than the drain's 100 ms of quiet.
+        t.port.send(chunk)
+        DispatchQueue.global().async {
+            while !stop.value { _ = Darwin.write(master, chunk, chunk.count); usleep(2_000) }
+            stopped.signal()
+        }
+        defer { stop.value = true; stopped.wait() }
+        let start = DispatchTime.now()
+        t.tap.beginClosing()
+        let elapsed = milliseconds(since: start)
+        XCTAssertGreaterThanOrEqual(elapsed, Double(TapStream.drainLimitMilliseconds) - 50)
+        XCTAssertLessThan(elapsed, wallClockBound(Double(TapStream.drainLimitMilliseconds) + 300))
+    }
+
     func testSetCancellationReplacesTheCheck() throws {
         let probe = ProbeBackend()
         let tap = TapStream(inner: try probeStream(probe))

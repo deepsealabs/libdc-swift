@@ -439,6 +439,35 @@ final class SerialCableSessionTests: XCTestCase {
         XCTAssertFalse(SerialPortClaims.shared.claimedPaths.contains(link.path))
     }
 
+    // MARK: - Logging
+
+    private static let logLock = NSLock()
+    private static var logged: [String] = []
+
+    func testADebugLogHasTheDriversCallsOnceAndNotThePortsSlices() throws {
+        set_ble_debug_logging(1)
+        set_libdc_log_sink { _, message in
+            guard let message else { return }
+            SerialCableSessionTests.logLock.lock()
+            SerialCableSessionTests.logged.append(String(cString: message))
+            SerialCableSessionTests.logLock.unlock()
+        }
+        defer {
+            set_libdc_log_sink(nil)
+            set_ble_debug_logging(0)
+            Self.logLock.lock(); Self.logged = []; Self.logLock.unlock()
+        }
+        let session = try openCable(CableFixtures.endpoint(try link(FakeOSTC3())), model: CableFixtures.model("Heinrichs Weikamp OSTC 3"))
+        session.cancel()
+        closeAndWait(session)
+        Self.logLock.lock()
+        let sleeps = Self.logged.filter { $0.contains("Sleep: value=") }
+        Self.logLock.unlock()
+        // hw_ostc3's open sleeps 300 ms; the tap sleeps it on the port in 50 ms slices.
+        XCTAssertEqual(sleeps.filter { $0.hasSuffix("value=300") }.count, 1, "\(sleeps)")
+        XCTAssertEqual(sleeps.filter { $0.hasSuffix("value=50") }, [], "the port's own context logs WARNING and up")
+    }
+
     // MARK: - open_serial_device
 
     private func newContext() throws -> OpaquePointer {

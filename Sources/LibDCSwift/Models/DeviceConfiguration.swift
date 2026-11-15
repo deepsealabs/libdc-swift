@@ -570,25 +570,36 @@ import LibDCBridge
             return true
         }
 
-        func unstoredGuess() -> (family: DeviceFamily, model: UInt32)? {
+        /// A cable's family and model as opened: its name is the catalog's, which a BLE name pattern can match to another family,
+        /// and its record is keyed by the cable, which another family's computer can come through next.
+        func openedDescriptor() -> (family: DeviceFamily, model: UInt32)? {
 #if os(macOS)
-            // A cable's name is the catalog's, which a BLE name pattern can match to another family; the opened descriptor can't.
             if let transport, transport != .ble, let descriptor = deviceDataPtr.pointee.descriptor,
                let family = DeviceFamily(dcFamily: dc_descriptor_get_type(descriptor)) {
                 return (family, dc_descriptor_get_model(descriptor))
             }
 #endif
-            return fromName(deviceName)
+            return nil
+        }
+
+        func unstoredGuess() -> (family: DeviceFamily, model: UInt32)? {
+            openedDescriptor() ?? fromName(deviceName)
         }
         
         if let storedDevice = storage.getStoredDevice(uuid: deviceAddress) {
-            if storedDevice.model != actualModel, storable(storedDevice.family) {
-                logInfo("🔄 Updating stored device model from \(storedDevice.model) to actual model \(actualModel) for \(deviceName)")
+            let opened = openedDescriptor()
+            let family = opened?.family ?? storedDevice.family
+            let familyChanged = family != storedDevice.family
+            guard familyChanged || storedDevice.model != actualModel else { return }
+            // A computer of another family with no usable reported model takes the opened descriptor's.
+            let model: UInt32? = storable(family) ? actualModel : (familyChanged ? opened?.model : nil)
+            if let model {
+                logInfo("🔄 Updating stored device from \(storedDevice.family.rawValue) model \(storedDevice.model) to \(family.rawValue) model \(model) for \(deviceName)")
                 storage.storeDevice(
                     uuid: deviceAddress,
                     name: deviceName,
-                    family: storedDevice.family,
-                    model: actualModel,
+                    family: family,
+                    model: model,
                     transport: transport,
                     locator: locator
                 )

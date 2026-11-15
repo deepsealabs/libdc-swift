@@ -324,6 +324,11 @@ static void close_device_data(device_data_t *data) {
         dc_iostream_close(data->iostream);
         data->iostream = NULL;
     }
+    // After the iostream: closing a wrapping stream closes the port it wraps.
+    if (data->stream_context) {
+        dc_context_free(data->stream_context);
+        data->stream_context = NULL;
+    }
     if (data->context) {
         dc_context_free(data->context);
         data->context = NULL;

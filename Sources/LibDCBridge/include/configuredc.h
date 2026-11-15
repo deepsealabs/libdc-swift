@@ -51,6 +51,9 @@ typedef struct {
     const char *model;     // Model string (from descriptor)
     uint32_t fdeviceid;   // Device ID associated with fingerprint
     uint32_t fdiveid;     // Dive ID associated with fingerprint
+
+    // A wrapped port's own context (open_serial_device), freed after iostream; it logs WARNING and ERROR only.
+    dc_context_t *stream_context;
 } device_data_t;
 
 typedef void (*dc_sample_callback_t)(dc_sample_type_t type, 
@@ -264,7 +267,7 @@ unsigned int libdc_cable_transports(void);
 
 /**
  * Wraps an opened iostream in another one (a tap that logs, records or cancels)
- * @param context: The context inner was opened on
+ * @param context: The device's context, to open the wrapping stream on; inner has its own (see open_serial_device)
  * @param inner: The opened iostream; the wrapper owns it from this call on, on every path
  * @param userdata: open_serial_device's wrap_userdata
  * @return The iostream to open the device on, owning inner; NULL if wrapping failed, with inner already closed
@@ -285,7 +288,8 @@ typedef dc_iostream_t *(*libdc_iostream_wrap_t)(dc_context_t *context, dc_iostre
  *         DC_STATUS_NOMEMORY if wrap returns NULL; else open_device_on_iostream's
  * @note Takes ownership of data->context on every path, as open_device_on_iostream does, and opens
  *       the device through it with LIBDC_SERIAL_OPEN_ATTEMPTS and no retry wait. On failure data is zeroed
- * @note Sets the bridge's log callback and level on data->context before the port opens
+ * @note Sets the bridge's log callback and level on data->context before the port opens. With a wrap, the port
+ *       opens on a context of its own that logs WARNING and ERROR only, kept in data->stream_context
  */
 dc_status_t open_serial_device(device_data_t *data, const char *path, dc_family_t family, unsigned int model,
     libdc_iostream_wrap_t wrap, void *wrap_userdata);
