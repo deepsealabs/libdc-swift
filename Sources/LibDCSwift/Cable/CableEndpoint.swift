@@ -104,7 +104,7 @@ public struct CableEndpoint: Identifiable, Hashable, Sendable {
     public let id: String
     /// `.serial` for a USB port, `.classicBTSerial` for a paired Bluetooth port, `.usbHID` for a computer that is itself a USB HID device.
     public let transport: DCTransport
-    /// The /dev/cu.* device to open; nil when `driverMissing`.
+    /// The /dev/cu.* device to open; nil when `driverMissing`, and for USB HID endpoints, which have no port.
     public let calloutPath: String?
     public let vendorID: UInt16?
     public let productID: UInt16?

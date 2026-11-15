@@ -97,9 +97,9 @@ extension DiveComputerSession {
         tap.setCancellation(isCancelled)
         hid.setCancellation(isCancelled)
         // Upstream never interrupts a close: its reads wait only on the tap's closing limit, as on serial.
-        session.onClosing {
+        session.onClosing { state in
             hid.setCancellation(nil)
-            tap.beginClosing()
+            tap.beginClosing(sessionCancelled: state.cancelled || cancellation.isCancelled)
         }
         claims.claim(claimKey)
         session.onTeardown { claims.release(claimKey) }
