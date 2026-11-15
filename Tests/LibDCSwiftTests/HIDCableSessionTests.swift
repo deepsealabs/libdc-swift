@@ -110,6 +110,13 @@ final class HIDCableSessionTests: XCTestCase {
         closeAndWait(asG2)
         XCTAssertEqual(second.model, 0x31)
         XCTAssertEqual(second.canonicalName, "Scubapro G2 TEK")
+
+        // Not offered, but a host that picked the G3 (learned over BLE, say) opens it; CMD_MODEL names the computer.
+        XCTAssertFalse(endpoint.candidates.map(\.name).contains("Scubapro G3"))
+        let asG3 = try openCable(endpoint, model: HIDFixtures.model("Scubapro G3"), hidDevice: factory(FakeG2(model: 0x32)).factory)
+        let third = try XCTUnwrap(downloadToEnd(asG3).result?.identity)
+        closeAndWait(asG3)
+        XCTAssertEqual(third.canonicalName, "Scubapro G2")
     }
 
     func testFilesSpanningManyReportsArriveWhole() throws {
@@ -185,7 +192,8 @@ final class HIDCableSessionTests: XCTestCase {
             let lease = DiveComputerSessionLease()
             XCTAssertEqual(cableOpenError(HIDFixtures.eonSteel, model: model, lease: lease, hidDevice: devices.factory), expected)
             XCTAssertFalse(lease.isHeld)
-            XCTAssertEqual(devices.devices.first?.calls, [.open(seize: true)])
+            XCTAssertEqual(devices.devices.first?.calls.first, .open(seize: true))
+            XCTAssertFalse(devices.devices.first?.calls.contains(.activate) ?? true)
         }
         XCTAssertTrue(CableError.busy.message.contains("dive computer"))
         XCTAssertEqual(CableError(hidOpen: kIOReturnNotPrivileged), .permissionDenied)

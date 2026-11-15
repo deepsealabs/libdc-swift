@@ -24,7 +24,11 @@ rejected, so a log tells "nothing enumerated" from "not a known model". Download
 | 2e6c:4201 | Scubapro G2 HUD | |
 | c251:2006 | Scubapro Aladin Square | USB HID only |
 
-The Scubapro G3 has no PID in libdivecomputer's table yet, so it isn't listed.
+The Scubapro G3 has no PID in libdivecomputer's table yet, so it isn't offered. A host that already knows the
+computer as a G3 (from a BLE download, say) can still open it on any Scubapro PID (`DeviceCatalog.canOpen`):
+libdivecomputer's Uwatec filter accepts every Scubapro PID for every Uwatec model, and DEVINFO's model comes
+from the computer's own CMD_MODEL, so the computer names itself. The EON Steel gets no such leeway, because its
+driver reports the opened descriptor's model.
 
 ## Finding computers
 
@@ -59,15 +63,21 @@ This is the same call as for a serial endpoint. For a USB HID endpoint, `open` d
 
 1. It refuses a model that this VID:PID can't be (`unsupportedTransport(.usbHID)`) before the device is touched.
    The EON Steel driver reports the opened descriptor's model as the computer's own, so opening an EON Steel
-   as an EON Core would store it as one. It takes the session lease, or throws `sessionInProgress`.
+   as an EON Core would store it as one. A host-chosen Scubapro G3 opens on any Scubapro PID (see above). It
+   takes the session lease, or throws `sessionInProgress`.
 2. It creates a fresh `IOHIDDevice` from the endpoint's registry entry. A device that was cancelled can't be
    scheduled again, so every open gets a new one.
-3. `HIDStream.start()` opens it with `IOHIDDeviceOpen`, seizing it by default as hidapi does on macOS.
+3. `HIDStream.start()` opens it with `IOHIDDeviceOpen`, seizing it by default as hidapi does on macOS. When
+   another client has seized it, `IOHIDDeviceOpen` returns `kIOReturnExclusiveAccess` but IOKit still marks the
+   device open (with its reports dropped), so the stream closes it again before it throws `busy`.
 4. It wraps the stream in a `TapStream` (for packet logging on the `"usbhid"` channel and optional `.dcrec`
    recording) and opens the device with one `dc_device_open` attempt.
 
 Cancelling the opening task, or calling `session.cancel()`, ends a blocked read within 100 ms. Writes can't be
-interrupted, and they aren't refused after a cancel, so a driver's quit command still goes out on close. The
+interrupted, and they aren't refused after a cancel, so a driver's quit command still goes out on close. During
+the driver's close the stream no longer gives up on a cancel: as upstream, a close is never interrupted, and
+its reads wait only on the tap's closing limit. The inner stream logs on a context of its own that passes only
+WARNING and ERROR, so a debug log has each driver call once, from the tap's stream. The
 device reports its own removal, so pulling it out ends the download and sets `wasUnplugged` even without a
 discovery. With one, the endpoint also disappears. A close that reaches the main thread runs the driver's close
 on a background queue and keeps the lease until the device is closed, as for a serial endpoint;
@@ -84,7 +94,7 @@ Uwatec Smart HID protocols, built from libdivecomputer's drivers.
 | `notFound` | The registry entry is gone, or `kIOReturnNoDevice`, `kIOReturnNotAttached`, `kIOReturnNotFound`, `kIOReturnOffline` |
 | `usbError(ioReturn:)` | `IOHIDDeviceOpen` failed for another reason |
 | `noResponse(family)` | `DC_STATUS_TIMEOUT` before any dive, including a computer that answers the open and then goes silent with a fingerprint stored. `message` adds `DeviceCatalog.cableConnectInstructions(for:)` |
-| `unplugged` | The device went away during the session |
+| `unplugged` | The device went away during the session: its removal callback ran, its registry entry is gone (a transfer can fail before the callback runs), or a write found it gone (`DC_STATUS_NODEVICE`) |
 | `protocolError(status)` | Anything else libdivecomputer reports once the device is open |
 
 A seize also succeeds over another app's shared open and cuts that app off. The device stays seized until the
@@ -99,7 +109,7 @@ path libdivecomputer uses on macOS:
 |---|---|
 | `set_timeout` | Negative blocks, 0 returns at once, N waits N ms. The stream starts at -1, as `usbhid.c` does |
 | `read` | One input report per call, with the report-ID byte exactly as IOKit delivered it (the EON Steel driver checks byte 0 is 0x3f), cut to the requested size. The rest of a cut report is dropped. A positive timeout that passes is `TIMEOUT` with 0 bytes, not hidapi's `SUCCESS` with 0: both drivers turn that into `PROTOCOL`, which a download with a stored fingerprint and no new dives reads as "up to date". A 0 timeout with nothing waiting is `SUCCESS` with 0 bytes. After a removal, reports that arrived first are still read, then `IO`. After a dropped report, the next read is `IO` |
-| `write` | If byte 0 is 0, `IOHIDDeviceSetReport(Output, 0, data + 1, n - 1)`; otherwise `IOHIDDeviceSetReport(Output, data[0], data, n)`. In both cases `actual` is n, report-ID byte included. An empty write sends nothing. A failed report is `IO` |
+| `write` | If byte 0 is 0, `IOHIDDeviceSetReport(Output, 0, data + 1, n - 1)`; otherwise `IOHIDDeviceSetReport(Output, data[0], data, n)`. In both cases `actual` is n, report-ID byte included. An empty write sends nothing. A report that finds the device gone (`kIOReturnNotAttached`, `kIOReturnNoDevice`, `kIOReturnOffline`) is `NODEVICE`, as `usb.c` maps libusb's `NO_DEVICE`; any other failure is `IO` |
 | `poll`, `ioctl` | `UNSUPPORTED` |
 | `configure`, `purge`, `flush`, `sleep`, `set_break`, `set_dtr`, `set_rts` | `SUCCESS`, doing nothing, because `usbhid.c` has no entry for them. `purge` doesn't drop queued reports, and `sleep` returns at once |
 | `get_lines`, `get_available` | `SUCCESS` with 0 |
@@ -116,7 +126,8 @@ report was lost instead of later as a protocol error. The report buffer is the d
 `HIDStream` follows the rules in `IOHIDDevice.h` for a device on a dispatch queue:
 
 ```
-created --start()--> IOHIDDeviceOpen --fails--> closed (nothing else was called)
+created --start()--> IOHIDDeviceOpen --fails--> closed (nothing else was called, but IOHIDDeviceClose
+                         |                              after kIOReturnExclusiveAccess)
                          |
                          v
                       opened: IOHIDDeviceRegisterInputReportCallback(buffer)
@@ -144,7 +155,8 @@ created --start()--> IOHIDDeviceOpen --fails--> closed (nothing else was called)
 - A stream that is dropped without being closed cancels its device, and the handler cleans up.
 
 `HIDDeviceIO` is the seam: `IOKitHIDDevice` is the live device, and the tests use a fake that checks this order
-and fails on anything the header forbids.
+and fails on anything the header forbids. `HIDDeviceIO.isAttached` says whether the device's registry entry is
+still there, which `CableError(download:session:)` reads through the session, even after `close()`.
 
 ## Testing
 

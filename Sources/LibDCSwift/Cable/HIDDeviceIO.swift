@@ -7,6 +7,8 @@ import IOKit.hid
 public protocol HIDDeviceIO: AnyObject {
     /// kIOHIDMaxInputReportSizeKey; nil when the device doesn't say.
     var maxInputReportSize: Int? { get }
+    /// Whether the device's registry entry is still there; false once it is gone, which the removal callback may not have said yet.
+    var isAttached: Bool { get }
     /// IOHIDDeviceOpen with kIOHIDOptionsTypeSeizeDevice when `seize`, else kIOHIDOptionsTypeNone.
     func open(seize: Bool) -> IOReturn
     /// IOHIDDeviceRegisterInputReportCallback: each input report is copied into `buffer`, then `handler` sees it there, on the dispatch queue.
@@ -61,6 +63,13 @@ public final class IOKitHIDDevice: HIDDeviceIO {
 
     public var maxInputReportSize: Int? {
         (IOHIDDeviceGetProperty(device, kIOHIDMaxInputReportSizeKey as CFString) as? NSNumber)?.intValue
+    }
+
+    public var isAttached: Bool {
+        let service = IOHIDDeviceGetService(device)
+        var registryID: UInt64 = 0
+        guard service != 0, IORegistryEntryGetRegistryEntryID(service, &registryID) == KERN_SUCCESS else { return false }
+        return DiveComputerLocator.usbHID(vid: 0, pid: 0, registryID: registryID).isPresent
     }
 
     private static func options(seize: Bool) -> IOOptionBits {

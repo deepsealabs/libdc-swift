@@ -40,6 +40,12 @@ final class FakeHIDDevice: HIDDeviceIO, @unchecked Sendable {
     private var activated = false
     private var cancelled = false
     private var handlerRan = false
+    private var detached = false
+
+    var isAttached: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return !detached
+    }
 
     init(maxInputReportSize: Int? = 64) {
         self.maxInputReportSize = maxInputReportSize
@@ -190,6 +196,7 @@ final class FakeHIDDevice: HIDDeviceIO, @unchecked Sendable {
         lock.lock()
         let queue = queue
         setReportResult = kIOReturnNoDevice
+        detached = true
         lock.unlock()
         queue?.async { [self] in
             lock.lock()

@@ -72,11 +72,15 @@ final class HIDStreamTests: XCTestCase {
             let stream = HIDStream(device: device)
             XCTAssertEqual(stream.start(), result)
             XCTAssertEqual(stream.state, .closed)
-            XCTAssertEqual(device.calls, [.open(seize: true)], "no callbacks, queue or close after a failed open")
+            // IOKit marks a seized device open anyway (IOHIDDeviceClass's -open:), so that one alone is closed again.
+            let expected: [FakeHIDDevice.Call] = result == kIOReturnExclusiveAccess ? [.open(seize: true), .close(seize: true)]
+                                                                                     : [.open(seize: true)]
+            XCTAssertEqual(device.calls, expected, "no callbacks or queue after a failed open")
             XCTAssertEqual(read(stream).status, DC_STATUS_IO)
             XCTAssertEqual(write(stream, [0x00, 0x01]).status, DC_STATUS_IO)
             XCTAssertEqual(stream.close(), DC_STATUS_SUCCESS)
-            XCTAssertEqual(device.calls, [.open(seize: true)])
+            XCTAssertEqual(device.calls, expected)
+            XCTAssertEqual(device.violations, [])
         }
     }
 
@@ -335,6 +339,34 @@ final class HIDStreamTests: XCTestCase {
         let failed = write(stream, [0x3f, 0x01])
         XCTAssertEqual(failed.status, DC_STATUS_IO)
         XCTAssertEqual(failed.actual, 0)
+    }
+
+    func testAWriteThatFindsTheDeviceGoneIsNoDevice() {
+        // usb.c maps libusb's NO_DEVICE to NODEVICE, which the session reads as an unplug.
+        for result in [kIOReturnNotAttached, kIOReturnNoDevice, kIOReturnOffline] {
+            let device = FakeHIDDevice()
+            let stream = started(device)
+            device.setReportResult = result
+            XCTAssertEqual(write(stream, [0x3f, 0x01]).status, DC_STATUS_NODEVICE, String(format: "0x%08x", result))
+        }
+    }
+
+    func testAttachedFollowsTheRegistryAheadOfTheRemovalCallback() {
+        let device = FakeHIDDevice()
+        let stream = started(device)
+        XCTAssertTrue(stream.isAttached)
+        device.remove()
+        XCTAssertFalse(stream.isAttached, "the registry says so before the removal callback runs")
+        device.settle()
+        XCTAssertTrue(stream.isRemoved)
+        XCTAssertFalse(DiveComputerLocator.usbHID(vid: 0x1493, pid: 0x0030, registryID: 0xFFFF_FFFF_FFFF_FFF0).isPresent)
+        // Any service the registry always has stands in for a plugged-in device.
+        let platform = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+        XCTAssertNotEqual(platform, 0)
+        defer { IOObjectRelease(platform) }
+        var platformID: UInt64 = 0
+        XCTAssertEqual(IORegistryEntryGetRegistryEntryID(platform, &platformID), KERN_SUCCESS)
+        XCTAssertTrue(DiveComputerLocator.usbHID(vid: 0x1493, pid: 0x0030, registryID: platformID).isPresent)
     }
 
     // MARK: - The other operations, through libdivecomputer

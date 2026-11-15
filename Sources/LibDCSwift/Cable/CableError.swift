@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import IOKit
 import Clibdivecomputer
 
 /// Why a cable session didn't open, or a cable download ended early, in terms a host can show.
@@ -56,6 +57,8 @@ public enum CableError: Error, Equatable {
         switch status {
         case DC_STATUS_TIMEOUT: return .noResponse(family)
         case DC_STATUS_CANCELLED: return .cancelled
+        // A USB HID write that found the device gone, before the registry or the removal callback caught up.
+        case DC_STATUS_NODEVICE: return .unplugged
         default: return .protocolError(status)
         }
     }
@@ -69,7 +72,7 @@ public enum CableError: Error, Equatable {
         }
         // Not the descriptor: a closed session has freed it.
         let family = session.openedFamily
-        let portPresent = session.locator?.portPath.map { access($0, F_OK) == 0 } ?? true
+        let portPresent = session.cablePresent
         switch result.outcome {
         case .cancelled:
             self = .cancelled
@@ -130,6 +133,22 @@ extension DiveComputerLocator {
         switch self {
         case .serial(let path, _, _, _), .classicBTSerial(let path): return path
         case .ble, .usbHID, .usb: return nil
+        }
+    }
+
+    /// Whether the port or USB device is still there: its device file, or its registry entry, which goes as the device does.
+    var isPresent: Bool {
+        switch self {
+        case .serial(let path, _, _, _), .classicBTSerial(let path):
+            return access(path, F_OK) == 0
+        case .usbHID(_, _, let registryID), .usb(_, _, let registryID):
+            guard let matching = IORegistryEntryIDMatching(registryID) else { return true }
+            let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+            guard service != 0 else { return false }
+            IOObjectRelease(service)
+            return true
+        case .ble:
+            return true
         }
     }
 }

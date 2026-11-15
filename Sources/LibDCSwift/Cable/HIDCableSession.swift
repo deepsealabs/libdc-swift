@@ -24,7 +24,7 @@ extension DiveComputerSession {
         }
         // EON Steel reports the opened descriptor's model as its own, so only a model this VID:PID can be is opened.
         guard model.transports.contains(.usbHID),
-              DeviceCatalog.candidates(vid: vid, pid: pid, transport: .usbHID).contains(model),
+              DeviceCatalog.canOpen(model, vid: vid, pid: pid, transport: .usbHID),
               DeviceConfiguration.hasDescriptor(family: model.dcFamily, model: model.model) else {
             throw CableError.unsupportedTransport(.usbHID)
         }
@@ -39,16 +39,26 @@ extension DiveComputerSession {
         guard opened == kIOReturnSuccess else { throw CableError(hidOpen: opened) }
 
         var context: OpaquePointer?
+        var innerContext: OpaquePointer?
         guard dc_context_new(&context) == DC_STATUS_SUCCESS, let context else {
             _ = hid.close()
             throw CableError.protocolError(DC_STATUS_NOMEMORY)
         }
+        // The inner stream logs WARNING and up on its own context, so a debug log has each driver call once, from the tap's stream.
+        guard dc_context_new(&innerContext) == DC_STATUS_SUCCESS, let innerContext else {
+            _ = hid.close()
+            dc_context_free(context)
+            throw CableError.protocolError(DC_STATUS_NOMEMORY)
+        }
+        attach_libdc_log(innerContext)
+        dc_context_set_loglevel(innerContext, DC_LOGLEVEL_WARNING)
         hid.setCancellation { cancellation.isCancelled }
         let inner: OpaquePointer
         do {
-            inner = try DCCustomStream.open(backend: hid, transport: DC_TRANSPORT_USBHID, context: context)
+            inner = try DCCustomStream.open(backend: hid, transport: DC_TRANSPORT_USBHID, context: innerContext)
         } catch {
             _ = hid.close()
+            dc_context_free(innerContext)
             dc_context_free(context)
             throw CableError.protocolError((error as? DCCustomStreamError)?.status ?? DC_STATUS_NOMEMORY)
         }
@@ -59,6 +69,7 @@ extension DiveComputerSession {
         } catch {
             // Closed here, while the context the inner stream logs to is still alive.
             _ = tap.close()
+            dc_context_free(innerContext)
             dc_context_free(context)
             throw CableError.protocolError((error as? DCCustomStreamError)?.status ?? DC_STATUS_NOMEMORY)
         }
@@ -69,18 +80,27 @@ extension DiveComputerSession {
         // One attempt, as on serial: a computer that didn't answer won't answer a retry on the same device.
         let status = open_device_on_iostream(data, stream, model.dcFamily, model.model, 1, 0)
         guard status == DC_STATUS_SUCCESS else {
+            // The failed open closed the tap's stream, and the inner stream with it.
+            dc_context_free(innerContext)
             data.deinitialize(count: 1)
             data.deallocate()
-            throw CableError.deviceFailed(status, family: model.family, portPresent: !hid.isRemoved)
+            throw CableError.deviceFailed(status, family: model.family, portPresent: hid.isAttached)
         }
+        data.pointee.stream_context = innerContext
 
         let session = openedCable(devicePtr: data, displayName: model.name, storageKey: locator.locatorKey,
                                   locator: locator, deviceStorage: deviceStorage, lease: lease)
         leaseHeld = false
+        // Held past close, so a download that failed can still tell an unplug from a link error.
+        session.setPresenceCheck { hid.isAttached }
         let isCancelled: () -> Bool = { [weak session] in cancellation.isCancelled || (session?.isCancelled ?? true) }
         tap.setCancellation(isCancelled)
         hid.setCancellation(isCancelled)
-        session.onClosing { tap.beginClosing() }
+        // Upstream never interrupts a close: its reads wait only on the tap's closing limit, as on serial.
+        session.onClosing {
+            hid.setCancellation(nil)
+            tap.beginClosing()
+        }
         claims.claim(claimKey)
         session.onTeardown { claims.release(claimKey) }
         // The device itself says when it goes, so an unplug is seen without a discovery too.

@@ -65,9 +65,13 @@ public final class HIDStream: DCUSBHIDStreamBackend {
     /// The device went away; reports that arrived before still read.
     public var isRemoved: Bool { inbox.isRemoved }
 
+    /// Not removed, and still in the registry: a transfer can find the device gone before its removal callback runs.
+    public var isAttached: Bool { !inbox.isRemoved && device.isAttached }
+
     var reportInbox: HIDReportInbox { inbox }
 
-    /// Opens the device and activates it, once, returning IOHIDDeviceOpen's result (kIOReturnError for a second start); after a failure nothing else was called and the stream is closed.
+    /// Opens the device and activates it, once, returning IOHIDDeviceOpen's result (kIOReturnError for a second start); after a failure
+    /// nothing else was called but a close of a device another client seized, and the stream is closed.
     @discardableResult
     public func start() -> IOReturn {
         lock.lock()
@@ -79,6 +83,8 @@ public final class HIDStream: DCUSBHIDStreamBackend {
         lock.unlock()
         let opened = device.open(seize: seize)
         guard opened == kIOReturnSuccess else {
+            // IOKit marks a seized device open anyway, with its reports dropped (IOHIDDeviceClass's -open:), so it is closed again.
+            if opened == kIOReturnExclusiveAccess { _ = device.close(seize: seize) }
             lock.lock()
             currentState = .closed
             lock.unlock()
@@ -211,7 +217,8 @@ public final class HIDStream: DCUSBHIDStreamBackend {
             : device.setOutputReport(reportID: reportID, data)
         guard result == kIOReturnSuccess else {
             logWarning(String(format: "IOHIDDeviceSetReport failed: 0x%08x", result))
-            return DC_STATUS_IO
+            // As usb.c maps libusb's NO_DEVICE: the device went before its removal callback ran.
+            return Self.goneResults.contains(result) ? DC_STATUS_NODEVICE : DC_STATUS_IO
         }
         actual = data.count
         return DC_STATUS_SUCCESS
@@ -237,6 +244,8 @@ public final class HIDStream: DCUSBHIDStreamBackend {
         lock.unlock()
         return DC_STATUS_SUCCESS
     }
+
+    static let goneResults: Set<IOReturn> = [kIOReturnNotAttached, kIOReturnNoDevice, kIOReturnOffline]
 
     /// Rounded up, so the slice that reaches the deadline doesn't spin on 0.
     private static func millisecondsLeft(_ deadline: UInt64) -> Int32 {

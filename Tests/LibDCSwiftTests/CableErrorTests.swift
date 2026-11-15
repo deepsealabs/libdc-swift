@@ -55,6 +55,8 @@ final class CableErrorTests: XCTestCase {
         XCTAssertEqual(CableError.deviceFailed(DC_STATUS_IO, family: .suuntoD9, portPresent: false), .unplugged)
         XCTAssertEqual(CableError.deviceFailed(DC_STATUS_NODEVICE, family: .suuntoD9, portPresent: false), .unplugged)
         XCTAssertEqual(CableError.deviceFailed(DC_STATUS_IO, family: .suuntoD9, portPresent: true), .protocolError(DC_STATUS_IO))
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_NODEVICE, family: .suuntoEonSteel, portPresent: true), .unplugged,
+                       "a USB HID write that found the device gone before the registry did")
         XCTAssertEqual(CableError.deviceFailed(DC_STATUS_PROTOCOL, family: .suuntoD9, portPresent: true),
                        .protocolError(DC_STATUS_PROTOCOL))
     }
@@ -104,6 +106,23 @@ final class CableErrorTests: XCTestCase {
         XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 2), session: gone), .unplugged,
                        "checked before the stalled-link rule")
         XCTAssertEqual(CableError(download: result(.cancelled), session: gone), .cancelled, "a cancel stays the user's")
+    }
+
+    func testAUSBHIDDownloadOnAGoneRegistryEntryIsAnUnplug() throws {
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let stream = try DCCustomStream.open(backend: ProbeBackend(), transport: DC_TRANSPORT_USBHID, context: context)
+        let session = try DiveComputerSession.open(
+            iostream: stream, context: try XCTUnwrap(context), family: DC_FAMILY_REEFNET_SENSUS, model: 1,
+            displayName: "Reefnet Sensus", storageKey: "usbhid:test",
+            locator: .usbHID(vid: 0x1493, pid: 0x0030, registryID: 0xFFFF_FFFF_FFFF_FFF0),
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
+        addTeardownBlock { session.close() }
+        // The registry says the device went, ahead of a removal callback still queued.
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_IO), dives: 1), session: session), .unplugged)
+        session.setPresenceCheck { true }
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_IO), dives: 1), session: session),
+                       .protocolError(DC_STATUS_IO), "the opener's check comes first")
     }
 
     func testAClosedSessionStillNamesItsFamily() throws {
