@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import IOKit
 import Clibdivecomputer
 
 /// Why a cable session didn't open, or a cable download ended early, in terms a host can show.
@@ -9,13 +10,13 @@ public enum CableError: Error, Equatable {
     /// macOS made no port for the cable; `CableEndpoint.driverMissingMessage` says which driver to get and where, and
     /// `driverMissingStoreMessage` says what to do without pointing to a driver download.
     case driverMissing
-    /// The app may not open the port (EPERM, EACCES): a sandboxed app without `com.apple.security.device.serial`, say.
+    /// The app may not open the port (EPERM, EACCES) or USB device (kIOReturnNotPermitted): a sandboxed app without `com.apple.security.device.serial` or `device.usb`, say.
     case permissionDenied
-    /// Another app has the port open exclusively (EBUSY), often the computer maker's own app.
+    /// Another app has the port open exclusively (EBUSY), or has seized the USB device (kIOReturnExclusiveAccess), often the computer maker's own app.
     case busy
     /// Another `DiveComputerSession` is open, or still closing, or another open is in progress on the same port; there is one at a time.
     case sessionInProgress
-    /// The port isn't there (ENOENT, ENXIO, ENODEV): the cable came out before the open.
+    /// The port or USB device isn't there (ENOENT, ENXIO, ENODEV, kIOReturnNoDevice): it came out before the open.
     case notFound
     /// The cable came out while the session was open.
     case unplugged
@@ -24,6 +25,8 @@ public enum CableError: Error, Equatable {
     case cancelled
     /// The port wouldn't open for another reason, with its errno.
     case portError(errno: Int32)
+    /// The USB device wouldn't open for another reason, with its IOReturn.
+    case usbError(ioReturn: Int32)
     /// libdivecomputer failed with this status once the port was open (a protocol or data error, often the wrong model).
     case protocolError(dc_status_t)
 
@@ -54,6 +57,8 @@ public enum CableError: Error, Equatable {
         switch status {
         case DC_STATUS_TIMEOUT: return .noResponse(family)
         case DC_STATUS_CANCELLED: return .cancelled
+        // A USB HID write that found the device gone, before the registry or the removal callback caught up.
+        case DC_STATUS_NODEVICE: return .unplugged
         default: return .protocolError(status)
         }
     }
@@ -67,7 +72,7 @@ public enum CableError: Error, Equatable {
         }
         // Not the descriptor: a closed session has freed it.
         let family = session.openedFamily
-        let portPresent = session.locator?.portPath.map { access($0, F_OK) == 0 } ?? true
+        let portPresent = session.cablePresent
         switch result.outcome {
         case .cancelled:
             self = .cancelled
@@ -94,13 +99,13 @@ public enum CableError: Error, Equatable {
         case .driverMissing:
             return "macOS made no serial port for this cable. Unplug it and plug it in again; if it still has none, macOS has no driver for it."
         case .permissionDenied:
-            return "This app isn't allowed to open the cable's serial port."
+            return "This app isn't allowed to open the cable's serial port or the dive computer's USB connection."
         case .busy:
-            return "Another app is using the cable. Quit the dive computer maker's app, then try again."
+            return "Another app is using the cable or dive computer. Quit the dive computer maker's app, then try again."
         case .sessionInProgress:
             return "Another dive computer is open in this app. Let its download finish, or cancel it, then try again."
         case .notFound:
-            return "The cable isn't connected. Plug it in and try again."
+            return "The cable or dive computer isn't connected. Plug it in and try again."
         case .unplugged:
             return "The cable was unplugged during the download."
         case .noResponse(let family):
@@ -110,6 +115,8 @@ public enum CableError: Error, Equatable {
             return "The download was cancelled."
         case .portError(let code):
             return "The cable's serial port couldn't be opened (\(String(cString: strerror(code))))."
+        case .usbError(let code):
+            return "The dive computer's USB connection couldn't be opened (IOReturn " + String(format: "0x%08x", code) + ")."
         case .protocolError(let status):
             return "The dive computer's reply couldn't be read (libdivecomputer status \(status.rawValue)). Check that the model is right."
         }
@@ -126,6 +133,22 @@ extension DiveComputerLocator {
         switch self {
         case .serial(let path, _, _, _), .classicBTSerial(let path): return path
         case .ble, .usbHID, .usb: return nil
+        }
+    }
+
+    /// Whether the port or USB device is still there: its device file, or its registry entry, which goes as the device does.
+    var isPresent: Bool {
+        switch self {
+        case .serial(let path, _, _, _), .classicBTSerial(let path):
+            return access(path, F_OK) == 0
+        case .usbHID(_, _, let registryID), .usb(_, _, let registryID):
+            guard let matching = IORegistryEntryIDMatching(registryID) else { return true }
+            let service = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+            guard service != 0 else { return false }
+            IOObjectRelease(service)
+            return true
+        case .ble:
+            return true
         }
     }
 }
@@ -148,6 +171,10 @@ extension DeviceCatalog {
             return "Seat the Sensus in its ReefNet interface so the contacts touch."
         case .uwatecAladin, .uwatecMemomouse:
             return "Seat the computer on the Memomouse so its contacts touch the pins."
+        case .suuntoEonSteel:
+            return "Attach the Suunto USB cable so it clicks onto the computer's contacts, then wake the computer."
+        case .uwatecSmart:
+            return "Connect the computer's USB cable, then wake the computer."
         default:
             return "Wake the computer, attach the cable, and start its PC, download or transfer mode if it has one."
         }

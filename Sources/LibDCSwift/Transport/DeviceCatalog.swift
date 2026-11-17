@@ -46,6 +46,27 @@ public enum DeviceCatalog {
 
     /// The models a USB or USB HID device can be: libdivecomputer's family filter, narrowed by `usbModels`; empty on other transports.
     public static func candidates(vid: UInt16, pid: UInt16, transport: DCTransport) -> [DCModel] {
+        let matches = filterMatches(vid: vid, pid: pid, transport: transport)
+        guard let names = usbModels[usbKey(vid: vid, pid: pid)] else { return matches }
+        return matches.filter { names.contains($0.name) }
+    }
+
+    /// Whether a session may open `model` on this device: one of its `candidates`, or a model the family filter passes whose
+    /// DEVINFO names the computer itself, though no PID is known for it (`usbOpenableUnlisted`).
+    static func canOpen(_ model: DCModel, vid: UInt16, pid: UInt16, transport: DCTransport) -> Bool {
+        if candidates(vid: vid, pid: pid, transport: transport).contains(model) { return true }
+        guard usbOpenableUnlisted[model.family]?.contains(model.name) == true else { return false }
+        return filterMatches(vid: vid, pid: pid, transport: transport).contains(model)
+    }
+
+    /// Uwatec's DEVINFO model comes from the computer's own CMD_MODEL, so a host that picked the G3 (learned over BLE, say) opens it;
+    /// the EON Steel reports the opened descriptor's model, so it gets no such entry.
+    static let usbOpenableUnlisted: [DeviceConfiguration.DeviceFamily: Set<String>] = [
+        .uwatecSmart: ["Scubapro G3"],
+    ]
+
+    /// libdivecomputer's family filter alone, which accepts any PID of the family for any of its models.
+    static func filterMatches(vid: UInt16, pid: UInt16, transport: DCTransport) -> [DCModel] {
         guard transport == .usbHID || transport == .usb else { return [] }
         let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var matches: [DCModel] = []
@@ -62,8 +83,7 @@ public enum DeviceCatalog {
                   let model = byID[DCModel.id(family: family, model: entry.model, name: entry.name)] else { return }
             matches.append(model)
         }
-        guard let names = usbModels[usbKey(vid: vid, pid: pid)] else { return matches }
-        return matches.filter { names.contains($0.name) }
+        return matches
     }
 
     /// The products each VID:PID is: the family filters accept any PID of the family, and EON Steel reports the descriptor's model as its own.

@@ -139,6 +139,22 @@ final class DeviceCatalogTests: XCTestCase {
         }
     }
 
+    func testAUwatecPIDOpensAHostChosenG3ButAnEONSteelPIDOnlyItsOwnModel() throws {
+        func model(_ name: String) throws -> DCModel {
+            try XCTUnwrap(DeviceCatalog.models(for: .usbHID).first { $0.name == name }, name)
+        }
+        let g3 = try model("Scubapro G3")
+        for pid: UInt16 in [0x3201, 0x3211, 0x4201] {
+            XCTAssertTrue(DeviceCatalog.canOpen(g3, vid: 0x2e6c, pid: pid, transport: .usbHID), "DEVINFO names a uwatec computer")
+            XCTAssertFalse(DeviceCatalog.candidates(vid: 0x2e6c, pid: pid, transport: .usbHID).contains(g3), "not offered")
+        }
+        XCTAssertTrue(DeviceCatalog.canOpen(try model("Scubapro G2 TEK"), vid: 0x2e6c, pid: 0x3201, transport: .usbHID))
+        XCTAssertFalse(DeviceCatalog.canOpen(try model("Scubapro G2 Console"), vid: 0x2e6c, pid: 0x3201, transport: .usbHID))
+        XCTAssertFalse(DeviceCatalog.canOpen(try model("Suunto EON Core"), vid: 0x1493, pid: 0x0030, transport: .usbHID),
+                       "the EON Steel stores the opened model as its own")
+        XCTAssertFalse(DeviceCatalog.canOpen(g3, vid: 0x1493, pid: 0x0030, transport: .usbHID))
+    }
+
     func testTheFamilyFilterAloneMatchesTheWholeFamily() {
         // Why the PID table exists: libdivecomputer accepts any of the family's PIDs for every model in it.
         var desc = dc_usbhid_desc_t(vid: 0x1493, pid: 0x0030)
@@ -210,7 +226,7 @@ final class DeviceCatalogTests: XCTestCase {
 
     func testCableSupportFollowsThePlatform() {
         #if os(macOS)
-        XCTAssertEqual(CableSupport.transports, [.serial])
+        XCTAssertEqual(CableSupport.transports, [.serial, .usbHID])
         #else
         XCTAssertEqual(CableSupport.transports, [])
         #endif

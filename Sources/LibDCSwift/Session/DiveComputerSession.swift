@@ -101,6 +101,8 @@ public final class DiveComputerSession {
     private let closeWaiters = CloseWaiters()
 #if os(macOS)
     private var unplugged = false
+    /// The opener's word on whether the cable's port or device is still there; nil asks the locator.
+    private var presence: (() -> Bool)?
     /// A cable session's close reached on the main thread runs on `cableQueue`: the driver's close sleeps and reads.
     private var closesOffMain = false
     private var closingActions: [(ClosingState) -> Void] = []
@@ -452,6 +454,19 @@ extension DiveComputerSession {
     public var wasUnplugged: Bool {
         lock.lock(); defer { lock.unlock() }
         return unplugged
+    }
+
+    /// Whether the cable's port or device is still there, safe after `close()`.
+    var cablePresent: Bool {
+        lock.lock()
+        let check = presence
+        lock.unlock()
+        return check?() ?? locator?.isPresent ?? true
+    }
+
+    func setPresenceCheck(_ check: @escaping () -> Bool) {
+        lock.lock(); defer { lock.unlock() }
+        presence = check
     }
 
     func markUnplugged() {
