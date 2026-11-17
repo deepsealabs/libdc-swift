@@ -455,13 +455,13 @@ public class DiveLogRetriever {
             }
         } catch let error where isNonDiveActivity(error, family: parseFamily) {
             // Not a dive: not delivered and not a rejection, so it never holds, and never becomes the fingerprint.
-            logInfo("Skipping \(fingerprintData.hexString): not a dive")
+            logInfo("Skipping \(entryName(fingerprintData, family: parseFamily)): not a dive")
             if newest { context.lastFingerprint = nil }
             context.nonDiveCount += 1
             return 1
         } catch {
             // Go on to the older dives; settle decides whether this one holds the fingerprint.
-            logError("❌ Failed to parse dive #\(context.logCount): \(error)")
+            logError("❌ Failed to parse dive #\(context.logCount) (\(entryName(fingerprintData, family: parseFamily))): \(error)")
             if context.rejectedFingerprints.isEmpty { context.rejectionStatus = parseFailureStatus(error) }
             context.rejectedFingerprints.append(fingerprintData)
             return 1
@@ -540,10 +540,20 @@ public class DiveLogRetriever {
     /// little-endian UNIX timestamp). Supply it as a fallback so the dive
     /// parses instead of throwing on the missing datetime.
     private static func nauticFallbackDate(family: dc_family_t, fingerprint fingerprintData: Data) -> Date? {
-        guard family == DC_FAMILY_SUUNTO_NAUTIC, fingerprintData.count == 4 else { return nil }
-        let b = [UInt8](fingerprintData)
-        let id = UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
-        return Date(timeIntervalSince1970: TimeInterval(id))
+        nauticID(family: family, fingerprint: fingerprintData).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+    }
+
+    /// A Suunto Nautic/Ocean fingerprint is the dive's logbook id, little-endian.
+    private static func nauticID(family: dc_family_t, fingerprint: Data) -> UInt32? {
+        guard family == DC_FAMILY_SUUNTO_NAUTIC, fingerprint.count == 4 else { return nil }
+        let b = [UInt8](fingerprint)
+        return UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
+    }
+
+    /// How a log line names a dive: a Nautic's logbook id, as the driver's own lines do, or else its fingerprint.
+    static func entryName(_ fingerprint: Data, family: dc_family_t) -> String {
+        if let id = nauticID(family: family, fingerprint: fingerprint) { return "entry \(id)" }
+        return fingerprint.isEmpty ? "no fingerprint" : "fingerprint \(fingerprint.hexString)"
     }
     
     private static let fingerprintLookup: @convention(c) (
