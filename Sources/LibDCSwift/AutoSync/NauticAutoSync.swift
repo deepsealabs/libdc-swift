@@ -113,6 +113,9 @@ public final class NauticAutoSync {
     public let events: AsyncStream<Event>
     public weak var delegate: NauticAutoSyncDelegate?
     /// Called off the main thread for each dive before it is marked synced; throw to keep it pending.
+    /// The watch lists every activity, so an Ocean's runs and other sports come here too, and
+    /// `GenericParser.parseDiveData` throws `sampleProcessingFailed(DC_STATUS_UNSUPPORTED)` for one.
+    /// Return without throwing for it: a dive given up on is downloaded whole again on the next run.
     public var onDive: ((DownloadedDive) throws -> Void)?
 
     private let connector: NauticSyncConnector
