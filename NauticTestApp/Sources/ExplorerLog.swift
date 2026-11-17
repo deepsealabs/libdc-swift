@@ -7,6 +7,7 @@ final class ExplorerLog: ObservableObject {
     static let shared = ExplorerLog()
 
     @Published private(set) var lines: [String] = []
+    private var lastText: String?
 
     private static let maxLines = 3000
     private let file = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -24,6 +25,7 @@ final class ExplorerLog: ObservableObject {
     }
 
     func append(_ text: String) {
+        lastText = text
         let line = "\(Self.timestamp.string(from: Date())) \(text)"
         lines.append(line)
         if lines.count > Self.maxLines { lines.removeFirst(lines.count - Self.maxLines) }
@@ -37,7 +39,14 @@ final class ExplorerLog: ObservableObject {
         }
     }
 
+    /// Leaves out a line the same as the one just before it.
+    func appendUnlessRepeated(_ text: String) {
+        guard text != lastText else { return }
+        append(text)
+    }
+
     func clear() {
+        lastText = nil
         lines.removeAll()
         try? FileManager.default.removeItem(at: file)
     }
