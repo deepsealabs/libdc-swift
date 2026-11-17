@@ -89,17 +89,28 @@ final class USBDiscoveryTests: XCTestCase {
 
     // MARK: - Beta
 
-    func testOnlyTheCobaltsAreBetaAndOnlyOverUSB() throws {
+    func testTheCobaltsAndShearwatersClassicBTAreBeta() throws {
         for transport in DCTransport.allCases {
             let beta = DeviceCatalog.models(for: transport).filter { $0.isBeta(on: transport) }.map(\.name)
-            XCTAssertEqual(beta, transport == .usb ? ["Atomic Aquatics Cobalt", "Atomic Aquatics Cobalt 2"] : [],
-                           transport.rawValue)
+            let expected: [String]
+            switch transport {
+            case .usb: expected = ["Atomic Aquatics Cobalt", "Atomic Aquatics Cobalt 2"]
+            case .classicBTSerial: expected = ["Shearwater Predator", "Shearwater Petrel", "Shearwater Petrel 2",
+                                               "Shearwater Nerd", "Shearwater Perdix"]
+            default: expected = []
+            }
+            XCTAssertEqual(beta, expected, transport.rawValue)
         }
         let cobalt = try XCTUnwrap(DeviceCatalog.models(for: .usb).first { $0.name == "Atomic Aquatics Cobalt 2" })
         XCTAssertFalse(cobalt.isBeta(on: .ble))
-        XCTAssertEqual(DeviceCatalog.betaFamilies, [.usb: [.atomicsCobalt]])
+        let perdix = try XCTUnwrap(DeviceCatalog.models(for: .classicBTSerial).first { $0.name == "Shearwater Perdix" })
+        XCTAssertFalse(perdix.isBeta(on: .ble), "the same model isn't beta on its other transport")
+        XCTAssertEqual(DeviceCatalog.betaFamilies, [.usb: [.atomicsCobalt], .classicBTSerial: [.shearwaterPetrel, .shearwaterPredator]])
 
         XCTAssertTrue(Self.cobaltEndpoint.isBeta)
+        let pairedPetrel = CableEndpoint(id: "/dev/cu.Petrel-SerialPort", transport: .classicBTSerial,
+                                         calloutPath: "/dev/cu.Petrel-SerialPort", candidates: DeviceCatalog.models(for: .classicBTSerial))
+        XCTAssertTrue(pairedPetrel.isBeta)
         XCTAssertFalse(try XCTUnwrap(CableEndpoint.usbHIDDevice(registryID: 1, vendorID: 0x1493, productID: 0x0030)).isBeta)
         XCTAssertFalse(CableEndpoint.serialPort(path: "/dev/cu.usbserial-TESTADAPTER", vendorID: 0x0403, productID: 0xF680).isBeta)
         XCTAssertFalse(CableEndpoint(id: "x", transport: .usb, calloutPath: nil, candidates: []).isBeta, "no candidates is no beta")

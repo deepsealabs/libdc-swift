@@ -172,16 +172,8 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertEqual(Set(ftdi.candidates.map(\.id)).count, serialCount, "no model is offered twice")
     }
 
-    func testPairedBluetoothPortsAreNotListedUntilTheyCanOpen() {
-        XCTAssertFalse(RegistrySnapshot.listsPairedBluetoothPorts)
-        let snapshot = RegistrySnapshot(ports: Self.macPorts + [
-            Port(calloutPath: "/dev/cu.Petrel-SerialPort", baseName: "Petrel-SerialPort", parent: .bluetooth),
-        ])
-        XCTAssertEqual(snapshot.endpoints, [])
-    }
-
     func testAPairedBluetoothPortIsClassicBluetoothSerial() throws {
-        try XCTSkipUnless(RegistrySnapshot.listsPairedBluetoothPorts)
+        XCTAssertTrue(RegistrySnapshot.listsPairedBluetoothPorts)
         let snapshot = RegistrySnapshot(ports: Self.macPorts + [
             Port(calloutPath: "/dev/cu.Petrel-SerialPort", baseName: "Petrel-SerialPort", parent: .bluetooth),
         ])
@@ -190,8 +182,26 @@ final class SerialDiscoveryTests: XCTestCase {
         XCTAssertEqual(endpoint.transport, .classicBTSerial)
         XCTAssertEqual(endpoint.locator, .classicBTSerial(path: "/dev/cu.Petrel-SerialPort"))
         XCTAssertNil(endpoint.hint)
-        XCTAssertEqual(endpoint.candidates, DeviceCatalog.models(for: .classicBTSerial))
-        XCTAssertFalse(endpoint.candidates.isEmpty)
+        XCTAssertEqual(endpoint.candidates.map(\.name), ["Shearwater Petrel 2", "Shearwater Petrel"],
+                       "both call themselves Petrel; the Predator's driver is never offered first")
+    }
+
+    func testAPairedPortsNameOrdersAndNarrowsItsModels() {
+        func names(_ port: String) -> [String] { DeviceCatalog.pairedBluetoothCandidates(portName: port).map(\.name) }
+        XCTAssertEqual(names("Perdix-SerialPort"), ["Shearwater Perdix"])
+        XCTAssertEqual(names("NERD"), ["Shearwater Nerd"])
+        XCTAssertEqual(names("predator-SPP"), ["Shearwater Predator"], "case-insensitive, any suffix")
+        XCTAssertEqual(names("PETREL 1234"), ["Shearwater Petrel 2", "Shearwater Petrel"], "the first word, if the whole name fails")
+        XCTAssertEqual(names("Petrel-SPPDev-1"), ["Shearwater Petrel 2", "Shearwater Petrel"], "an older macOS's suffix")
+        // libdivecomputer's own Bluetooth filter (dc_filter_shearwater, exact names) rejects a GPS, a phone or another maker's computer.
+        XCTAssertEqual(names("Garmin GLO"), [])
+        XCTAssertEqual(names("OSTC 4-SerialPort"), [], "a paired OSTC is never sent Shearwater's requests")
+        XCTAssertEqual(names("Petrolhead"), [], "a prefix isn't a name")
+        // A Shearwater name with no classic-Bluetooth product: everything, Petrel family first and the Predator, another driver, last.
+        XCTAssertEqual(names("Teric"), ["Shearwater Petrel", "Shearwater Petrel 2", "Shearwater Nerd", "Shearwater Perdix",
+                                        "Shearwater Predator"])
+        XCTAssertEqual(CableEndpoint.pairedBluetoothPort(path: "/dev/cu.Perdix").candidates.map(\.name), ["Shearwater Perdix"],
+                       "with no base name the path names the port")
     }
 
     func testEndpointsAreOrderedKnownCablesFirst() {
