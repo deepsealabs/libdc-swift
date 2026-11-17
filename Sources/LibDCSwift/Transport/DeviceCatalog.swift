@@ -28,7 +28,7 @@ public enum DeviceCatalog {
         return entries.compactMap { entry in
             guard let family = entry.family else { return nil }
             return DCModel(vendor: entry.vendor, product: entry.product, family: family, model: entry.model,
-                           transports: transports(mask: entry.mask, family: family),
+                           transports: transports(mask: entry.mask, family: family, model: entry.model),
                            canonicalName: canonicalName(family: family, model: entry.model,
                                                         descriptors: entries.lazy.map { ($0.family, $0.model, $0.name) }))
         }
@@ -97,8 +97,13 @@ public enum DeviceCatalog {
         name.lowercased().trimmingCharacters(in: .whitespaces)
     }
 
+    /// SERIAL|BLUETOOTH models with no cable: their SERIAL flag is the RFCOMM tty a Linux host binds.
+    static let noCableModels: [DeviceConfiguration.DeviceFamily: Set<UInt32>] = [
+        .hwOstc3: [0x43, 0x44], // OSTC 4, OSTC 5
+    ]
+
     // Shearwater has no cable: its SERIAL descriptors are the paired classic-Bluetooth SPP port.
-    private static func transports(mask: UInt32, family: DeviceConfiguration.DeviceFamily) -> Set<DCTransport> {
+    private static func transports(mask: UInt32, family: DeviceConfiguration.DeviceFamily, model: UInt32) -> Set<DCTransport> {
         var transports = Set<DCTransport>()
         func has(_ transport: dc_transport_t) -> Bool { mask & transport.rawValue != 0 }
         if has(DC_TRANSPORT_BLE) { transports.insert(.ble) }
@@ -106,7 +111,11 @@ public enum DeviceCatalog {
         if has(DC_TRANSPORT_USB) { transports.insert(.usb) }
         if has(DC_TRANSPORT_SERIAL) {
             let pairedPort = has(DC_TRANSPORT_BLUETOOTH) && (family == .shearwaterPetrel || family == .shearwaterPredator)
-            transports.insert(pairedPort ? .classicBTSerial : .serial)
+            if pairedPort {
+                transports.insert(.classicBTSerial)
+            } else if !(has(DC_TRANSPORT_BLUETOOTH) && noCableModels[family]?.contains(model) == true) {
+                transports.insert(.serial)
+            }
         }
         return transports
     }

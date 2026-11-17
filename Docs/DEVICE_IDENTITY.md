@@ -12,8 +12,8 @@ without forcing anyone to download their whole logbook again.
 download opens with. A paired classic-Bluetooth computer shows up on macOS as a serial port, so
 `classicBTSerial.dcValue` is `DC_TRANSPORT_SERIAL`.
 
-`CableSupport.transports` lists the cable transports this platform can download over. That's
-`[.serial, .usbHID]` on macOS and empty on iOS. It comes from `libdc_cable_transports()`, because
+`CableSupport.transports` lists the cable transports this platform can download over: the ones this package has an
+opener for. That's `[.serial]` on macOS and empty on iOS. It comes from `libdc_cable_transports()`, because
 `dc_context_get_transports` always reports serial.
 
 ## Catalog
