@@ -134,6 +134,16 @@ final class DiveComputerIdentityTests: XCTestCase {
         XCTAssertEqual(DiveComputerIdentity(device: unreported, transport: .usbHID)?.canonicalName, "Suunto D5")
     }
 
+#if os(macOS)
+    func testACobaltsReportedModelZeroIsTheCobalt1() throws {
+        let data = try deviceData(family: DC_FAMILY_ATOMICS_COBALT, descriptorModel: 2,
+                                  devinfo: dc_event_devinfo_t(model: 0, firmware: 0, serial: 12_345))
+        let identity = try XCTUnwrap(DiveComputerIdentity(device: data, transport: .usb))
+        XCTAssertEqual(identity.model, 0, "the driver reads the model off the computer")
+        XCTAssertEqual(identity.canonicalName, "Atomic Aquatics Cobalt")
+    }
+#endif
+
     func testAReportedSerialZeroGivesNoSerial() throws {
         let data = try deviceData(family: DC_FAMILY_OCEANS_S1, descriptorModel: 0,
                                   devinfo: dc_event_devinfo_t(model: 0, firmware: 0, serial: 0))

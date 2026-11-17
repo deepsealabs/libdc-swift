@@ -226,7 +226,7 @@ final class DeviceCatalogTests: XCTestCase {
 
     func testCableSupportFollowsThePlatform() {
         #if os(macOS)
-        XCTAssertEqual(CableSupport.transports, [.serial, .usbHID])
+        XCTAssertEqual(CableSupport.transports, [.serial, .usbHID, .usb])
         #else
         XCTAssertEqual(CableSupport.transports, [])
         #endif

@@ -30,6 +30,8 @@ libdivecomputer's Uwatec filter accepts every Scubapro PID for every Uwatec mode
 from the computer's own CMD_MODEL, so the computer names itself. The EON Steel gets no such leeway, because its
 driver reports the opened descriptor's model.
 
+The Atomic Aquatics Cobalt is a USB device but not a HID one; it has its own page, `MACOS_USB.md`.
+
 ## Finding computers
 
 `IOKitCableDiscovery` lists USB HID computers next to serial ports, before them. They come from an

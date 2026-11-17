@@ -9,7 +9,8 @@ A sandboxed app needs the `com.apple.security.device.serial` entitlement to open
 no entitlement.
 
 Computers that are USB HID devices themselves (Suunto EON Steel family, Scubapro G2 family, Aladin Square) are
-listed by the same discovery and opened by the same `open`; see `MACOS_USB_HID.md`.
+listed by the same discovery and opened by the same `open`; see `MACOS_USB_HID.md`. So is the Atomic Aquatics
+Cobalt, which libdivecomputer reads over raw USB; see `MACOS_USB.md`.
 
 ## Finding cables
 
