@@ -55,6 +55,59 @@ final class SuuntoNauticTransportTests: XCTestCase {
             withUnsafeBytes(of: UInt32(summary.count).littleEndian, Array.init) + summary + decompressed
         }
 
+        /// An entry with this /Summary and profile, listed with their true size.
+        init(id: UInt32, summary: [UInt8], profile: [UInt8]) {
+            self.id = id
+            self.summary = summary
+            decompressed = profile
+            compressed = FakeDive.heatshrinkLiterals(profile)
+            listedSize = UInt32(compressed.count + summary.count)
+        }
+
+        /// An activity the watch logs like a dive, a run by default. The /Summary is three Windows records and the
+        /// Header (ids 0x26 and 0x24, as on an Ocean), whose DateTime is the start, 0.3 s after `id` at UTC+2, and
+        /// whose ActivityType is `sport`. The profile is the timeline base, the activity record and heart rate samples,
+        /// without the dive status records. `diveHeader` puts a dive header first, `header: false` leaves the Header
+        /// out, `headerStart` gives the Header another start, and `diveStatus` adds a dive status record.
+        static func activity(id: UInt32, sport: UInt8 = 3, diveHeader: Bool = false, header: Bool = true,
+                             headerStart: UInt32? = nil, diveStatus: Bool = false, profileBytes: Int = 3000) -> FakeDive {
+            func record(_ rid: UInt8, _ data: [UInt8]) -> [UInt8] {
+                data.count < 0xFF ? [rid, UInt8(data.count)] + data
+                    : [rid, 0xFF] + withUnsafeBytes(of: UInt32(data.count).littleEndian, Array.init) + data
+            }
+            // local64: the local time in ms in 7 bytes, then the UTC offset in quarter hours.
+            func local64(_ seconds: UInt32) -> [UInt8] {
+                let local = UInt64(seconds) * 1000 + 300 + 8 * 900_000
+                return Array(withUnsafeBytes(of: local.littleEndian, Array.init).prefix(7)) + [8]
+            }
+            var summary = Array("SBEM0103".utf8)
+            if diveHeader {
+                var dive = [UInt8](repeating: 0, count: 410)
+                dive[185 + 1] = 21
+                summary += record(0x20, dive)
+            }
+            var window = [UInt8](repeating: 0, count: 239)
+            window.replaceSubrange(0..<8, with: local64(id + 1800))
+            window[8] = 1
+            window[9] = sport
+            for _ in 0..<3 { summary += record(0x26, window) }
+            if header {
+                var h = [UInt8](repeating: 0, count: 370)
+                h.replaceSubrange(0..<8, with: local64(id + 1800))
+                h.replaceSubrange(8..<16, with: local64(headerStart ?? id))
+                h[36] = sport
+                summary += record(0x24, h)
+            }
+            var profile = Array("SBEM0103".utf8) + record(0x01, local64(id)) + record(0x08, [0, 0, sport] + Array(String(sport).utf8) + [0])
+            if diveStatus {
+                profile += record(0x16, [UInt8](repeating: 0, count: 141))
+            }
+            while profile.count + 5 <= profileBytes {
+                profile += record(0x0F, [0xE8, 0x03, 120])
+            }
+            return FakeDive(id: id, summary: summary, profile: profile)
+        }
+
         /// An empty/aborted logbook entry: listed with size 0, no profile data.
         init(emptyID id: UInt32) {
             self.id = id
@@ -876,6 +929,180 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status, downloaded) = foreach(device, fingerprint: dives[20].id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(downloaded.map(\.fingerprint), [dives[22].id, dives[21].id])
+    }
+
+    // MARK: - libdc-swift#29: the activities that aren't dives
+
+    private final class ProgressEvents {
+        var last = dc_event_progress_t()
+        var count = 0
+    }
+
+    /// Records the progress events of `device` into `events`.
+    private func trackProgress(_ device: OpaquePointer, _ events: ProgressEvents) {
+        let status = dc_device_set_events(device, DC_EVENT_PROGRESS.rawValue, { _, event, data, userdata in
+            guard event == DC_EVENT_PROGRESS, let data, let userdata else { return }
+            let events = Unmanaged<ProgressEvents>.fromOpaque(userdata).takeUnretainedValue()
+            events.last = data.assumingMemoryBound(to: dc_event_progress_t.self).pointee
+            events.count += 1
+        }, Unmanaged.passUnretained(events).toOpaque())
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+    }
+
+    private func nonDives(_ device: OpaquePointer) -> UInt32 {
+        var count: UInt32 = .max
+        XCTAssertEqual(suunto_nautic_device_get_nondives(device, &count), DC_STATUS_SUCCESS)
+        return count
+    }
+
+    private func dataGets(_ watch: FakeWatch, _ id: UInt32) -> Int {
+        watch.getPaths.filter { $0 == "/Logbook/byId/\(id)/Data" }.count
+    }
+
+    func testARunBetweenDivesIsSkippedBeforeItsData() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let newer = FakeDive(id: 1_789_020_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [older, run, newer])
+        let device = try open(watch)
+        let progress = ProgressEvents()
+        trackProgress(device, progress)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, older.id], "the walk goes on past the run")
+        XCTAssertEqual(delivered.map(\.data), [newer.blob, older.blob])
+        XCTAssertTrue(watch.getPaths.contains("/Logbook/byId/\(run.id)/Summary"))
+        XCTAssertEqual(dataGets(watch, run.id), 0, "the run's /Data is never requested")
+        XCTAssertFalse(watch.streamedPaths.contains("/Logbook/byId/\(run.id)/Data"))
+        XCTAssertEqual(watch.streamsServed, 2)
+        XCTAssertEqual(nonDives(device), 1)
+        XCTAssertEqual(progress.last.current, progress.last.maximum, "the run's step is counted too")
+        XCTAssertEqual(progress.last.maximum, 4 * 1000)
+        XCTAssertEqual(watch.heldIdHandles, [])
+    }
+
+    func testANewestRunNeverBecomesTheFingerprintAndTheNextSyncReadsOnlyItsSummary() throws {
+        let dive = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let runs = [FakeDive.activity(id: 1_789_010_000), FakeDive.activity(id: 1_789_020_000, sport: 100)]
+        let watch = FakeWatch(dives: [dive] + runs)
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dive.id], "the first fingerprint delivered, the one a host stores, is the dive's")
+        XCTAssertEqual(nonDives(device), 2)
+        close(device: device)
+
+        watch.reconnect()
+        let next = try open(watch)
+        let (status2, delivered2) = foreach(next, fingerprint: dive.id)
+        XCTAssertEqual(status2, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered2.map(\.fingerprint), [], "nothing new, and the walk ends at the stored dive")
+        XCTAssertEqual(watch.getPaths.filter { $0.hasSuffix("/Summary") }.count, 3 + 2, "the second sync reads only the newer runs' /Summary")
+        XCTAssertEqual(watch.getPaths.filter { $0 == "/Logbook/byId/\(dive.id)/Summary" }.count, 1, "the stored dive isn't read again")
+        XCTAssertEqual(runs.map { dataGets(watch, $0.id) }, [0, 0])
+        XCTAssertEqual(nonDives(next), 2)
+    }
+
+    func testAFingerprintOnARunStillEndsTheWalk() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let newer = FakeDive(id: 1_789_020_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [older, run, newer])
+        let device = try open(watch)
+
+        // A build that delivered runs may have stored one as the fingerprint.
+        let (status, delivered) = foreach(device, fingerprint: run.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id])
+        XCTAssertFalse(watch.getPaths.contains { $0.contains("/\(run.id)/") || $0.contains("/\(older.id)/") })
+        XCTAssertEqual(nonDives(device), 0)
+    }
+
+    func testAnEntryThatCantBeToldFromADiveIsDownloaded() throws {
+        let entries = [
+            FakeDive.activity(id: 1_789_000_000, sport: 51),               // a diving sport
+            FakeDive.activity(id: 1_789_010_000, sport: 61),
+            FakeDive.activity(id: 1_789_020_000, sport: 62),
+            FakeDive.activity(id: 1_789_030_000, diveHeader: true),        // a dive header, whatever the sport
+            FakeDive.activity(id: 1_789_040_000, header: false),           // no Header to read the sport from
+            FakeDive.activity(id: 1_789_050_000, headerStart: 1_789_049_990), // a Header that doesn't start with the entry
+        ]
+        let watch = FakeWatch(dives: entries)
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), Array(entries.map(\.id).reversed()), "all of them, left to the parser")
+        XCTAssertEqual(delivered.map(\.data), entries.reversed().map(\.blob))
+        XCTAssertEqual(entries.map { dataGets(watch, $0.id) }, Array(repeating: 1, count: entries.count))
+        XCTAssertEqual(nonDives(device), 0)
+    }
+
+    func testTheHeaderOfARealOceanSummaryIsRead() throws {
+        // The /Summary of the synthetic run, whose Header is Ocean dive 1787699873's with the sport set to 3.
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_ocean_nondive_synthetic", withExtension: "bin"))
+        let run = [UInt8](try Data(contentsOf: url))
+        let size = Int(Self.le32(run, 0))
+        let ocean = FakeDive(id: 1_787_699_873, summary: Array(run[4..<(4 + size)]), profile: Array(run[(4 + size)...]))
+        // A real dive's /Summary, which starts with the Nautic's dive header (0x21).
+        let nautic = [UInt8](try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))))
+        let nauticSize = Int(Self.le32(nautic, 0))
+        let dive = FakeDive(id: 1_787_752_091, summary: Array(nautic[4..<(4 + nauticSize)]), profile: Array(nautic[(4 + nauticSize)...]))
+        let watch = FakeWatch(dives: [ocean, dive])
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dive.id])
+        XCTAssertEqual(delivered.first?.data, dive.blob)
+        XCTAssertEqual(dataGets(watch, ocean.id), 0)
+        XCTAssertEqual(nonDives(device), 1)
+    }
+
+    func testTheByIdDownloadFetchesARunWhole() throws {
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let watch = FakeWatch(dives: [run])
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: run.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, run.blob, "the extension API fetches any entry; the parser judges it")
+    }
+
+    func testBytesKeptForARunAreForgottenWhenItIsSkipped() throws {
+        let run = FakeDive.activity(id: 1_789_010_000, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [run])
+        watch.keepsSessionAcrossDrops = true
+        watch.dropAfterChunks = 10
+        let resume = SuuntoNauticResume()
+
+        // A by-id download keeps the bytes of a run, as an older build's foreach did.
+        let first = try open(watch, resume: resume)
+        XCTAssertEqual(download(first, id: run.id).0, DC_STATUS_IO)
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: run.id, on: first), 10 * watch.mdsPayloadSize)
+        close(device: first)
+
+        watch.reconnect()
+        let second = try open(watch, resume: resume)
+        let (status, delivered) = foreach(second)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.count, 0)
+        XCTAssertEqual(dataGets(watch, run.id), 1, "only the by-id download asked for the /Data")
+        XCTAssertNil(SuuntoNauticResume.resumableBytes(of: run.id, on: second))
+    }
+
+    func testALostLinkAtARunsSummaryStopsTheWalkLikeADive() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let watch = FakeWatch(dives: [older, run])
+        watch.dropAtSummaryGet = true
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertNotEqual(status, DC_STATUS_SUCCESS, "it isn't known to be a run before its /Summary arrives")
+        XCTAssertEqual(delivered.count, 0, "nothing older is delivered past it")
     }
 
     // MARK: - #58: downloads are checked against the listed size
