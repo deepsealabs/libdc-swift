@@ -68,9 +68,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// Header (ids 0x26 and 0x24, as on an Ocean), whose DateTime is the start, 0.3 s after `id` at UTC+2, and
         /// whose ActivityType is `sport`. The profile is the timeline base, the activity record and heart rate samples,
         /// without the dive status records. `diveHeader` puts a dive header first, `header: false` leaves the Header
-        /// out, `headerStart` gives the Header another start, and `diveStatus` adds a dive status record.
+        /// out, `headerStart` gives the Header another start, and `diveStatus` adds a dive status record. `windowID`
+        /// and `headerID` give the records the ids another set of descriptors could, and `headerFirst` puts the Header
+        /// before the Windows.
         static func activity(id: UInt32, sport: UInt8 = 3, diveHeader: Bool = false, header: Bool = true,
-                             headerStart: UInt32? = nil, diveStatus: Bool = false, profileBytes: Int = 3000) -> FakeDive {
+                             headerStart: UInt32? = nil, diveStatus: Bool = false, profileBytes: Int = 3000,
+                             windowID: UInt8 = 0x26, headerID: UInt8 = 0x24, headerFirst: Bool = false) -> FakeDive {
             func record(_ rid: UInt8, _ data: [UInt8]) -> [UInt8] {
                 data.count < 0xFF ? [rid, UInt8(data.count)] + data
                     : [rid, 0xFF] + withUnsafeBytes(of: UInt32(data.count).littleEndian, Array.init) + data
@@ -90,14 +93,16 @@ final class SuuntoNauticTransportTests: XCTestCase {
             window.replaceSubrange(0..<8, with: local64(id + 1800))
             window[8] = 1
             window[9] = sport
-            for _ in 0..<3 { summary += record(0x26, window) }
+            let windows = (0..<3).flatMap { _ in record(windowID, window) }
+            var headerRecord: [UInt8] = []
             if header {
                 var h = [UInt8](repeating: 0, count: 370)
                 h.replaceSubrange(0..<8, with: local64(id + 1800))
                 h.replaceSubrange(8..<16, with: local64(headerStart ?? id))
                 h[36] = sport
-                summary += record(0x24, h)
+                headerRecord = record(headerID, h)
             }
+            summary += headerFirst ? headerRecord + windows : windows + headerRecord
             var profile = Array("SBEM0103".utf8) + record(0x01, local64(id)) + record(0x08, [0, 0, sport] + Array(String(sport).utf8) + [0])
             if diveStatus {
                 profile += record(0x16, [UInt8](repeating: 0, count: 141))
@@ -1038,6 +1043,46 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(delivered.map(\.data), entries.reversed().map(\.blob))
         XCTAssertEqual(entries.map { dataGets(watch, $0.id) }, Array(repeating: 1, count: entries.count))
         XCTAssertEqual(nonDives(device), 0)
+    }
+
+    func testARunWhoseRecordsGetTheDiveHeaderIdsIsStillSkipped() throws {
+        // The descriptors of a run, without the dive records, could number its records from 0x20.
+        let runs = [
+            FakeDive.activity(id: 1_789_000_000, headerID: 0x20, headerFirst: true), // the Header first, as 0x20
+            FakeDive.activity(id: 1_789_010_000, windowID: 0x21, headerID: 0x20),    // Windows 0x21, Header 0x20
+            FakeDive.activity(id: 1_789_020_000, windowID: 0x20, headerID: 0x21),    // Windows 0x20, Header 0x21
+            FakeDive.activity(id: 1_789_030_000, windowID: 0x21, headerID: 0x22),    // Windows 0x21 first
+        ]
+        let dive = FakeDive(id: 1_789_040_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: runs + [dive])
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dive.id])
+        XCTAssertEqual(runs.map { dataGets(watch, $0.id) }, [0, 0, 0, 0], "a record too small for a dive header isn't one")
+        XCTAssertEqual(nonDives(device), 4)
+    }
+
+    func testTheSkipCountIsTheLastForeachsOnTheSameDevice() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let runs = [FakeDive.activity(id: 1_789_010_000), FakeDive.activity(id: 1_789_020_000, sport: 100)]
+        let watch = FakeWatch(dives: [older] + runs)
+        let device = try open(watch)
+
+        XCTAssertEqual(foreach(device).0, DC_STATUS_SUCCESS)
+        XCTAssertEqual(nonDives(device), 2)
+
+        // The Explorer downloads again on the same connection.
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [older.id])
+        XCTAssertEqual(nonDives(device), 2, "this foreach's skips, not the connection's")
+
+        let (status3, delivered3) = foreach(device, fingerprint: runs[0].id)
+        XCTAssertEqual(status3, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered3.count, 0)
+        XCTAssertEqual(nonDives(device), 1, "only the newer run was walked")
     }
 
     func testTheHeaderOfARealOceanSummaryIsRead() throws {

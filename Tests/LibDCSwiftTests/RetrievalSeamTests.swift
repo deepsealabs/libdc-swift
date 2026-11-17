@@ -162,11 +162,17 @@ final class RetrievalSeamTests: XCTestCase {
     /// production connect flow sets (`"%s %s", vendor, product`): without it,
     /// the Nautic driver's own fingerprint-match-stops-the-download path in
     /// `diveCallbackClosure` never has a `deviceTypeFromLibDC` to look up.
-    private func devicePtr(for watch: FakeWatch, modelName: String = "Suunto Ocean 123456") throws -> UnsafeMutablePointer<device_data_t> {
+    /// `logging` also hands over the context with the log sink attached, as the BLE open does.
+    private func devicePtr(for watch: FakeWatch, modelName: String = "Suunto Ocean 123456",
+                           logging: Bool = false) throws -> UnsafeMutablePointer<device_data_t> {
         let device = try openDevice(watch)
         let ptr = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
         ptr.initialize(to: device_data_t())
         ptr.pointee.device = device
+        if logging, let context = openSessions.last?.context {
+            attach_libdc_log(context)
+            ptr.pointee.context = context
+        }
         let model = strdup(modelName)
         modelStrings.append(model!)
         ptr.pointee.model = UnsafePointer(model)
@@ -436,5 +442,41 @@ final class RetrievalSeamTests: XCTestCase {
         XCTAssertNotNil(fingerprintsB.getFingerprint(forDeviceType: "Suunto Ocean BBB", serial: "c3003306"))
         XCTAssertNil(storageA.getStoredDevice(uuid: "UUID-B"))
         XCTAssertNil(storageB.getStoredDevice(uuid: "UUID-A"))
+    }
+
+    // MARK: - #29: activities that aren't dives
+
+    private static var sinkLines: [String] = []
+
+    func testTheParsersReasonForANonDiveReachesTheLogOnThisPathToo() throws {
+        Self.sinkLines = []
+        set_libdc_log_sink { _, message in
+            RetrievalSeamTests.sinkLines.append(message.map { String(cString: $0) } ?? "")
+        }
+        addTeardownBlock { set_libdc_log_sink(nil) }
+        var events: [LogEvent] = []
+        let lock = NSLock()
+        let previous = Logger.shared.onLog
+        Logger.shared.onLog = { event in lock.lock(); events.append(event); lock.unlock() }
+        addTeardownBlock { Logger.shared.onLog = previous }
+
+        // No Header, so the driver can't tell it from a dive, and the parser reports it.
+        let run = FakeDive.activity(id: 1_789_753_600, header: false)
+        let watch = FakeWatch(dives: [Self.diveA, run, Self.diveB])
+        let ptr = try devicePtr(for: watch, logging: true)
+        defer { ptr.deallocate() }
+        let viewModel = DiveDataViewModel(fingerprintStore: DeviceFingerprintStorage(userDefaults: isolatedSuite("fp")))
+        XCTAssertTrue(download(ptr, viewModel: viewModel, deviceStorage: DeviceStorage(userDefaults: isolatedSuite("dev"))))
+        waitUntil { isTerminal(viewModel.progress) }
+
+        XCTAssertEqual(viewModel.lastNonDivesSkipped, 1)
+        XCTAssertEqual(viewModel.dives.count, 2)
+        XCTAssertTrue(watch.getPaths.contains("/Logbook/byId/\(run.id)/Data"))
+        XCTAssertTrue(Self.sinkLines.contains { $0.hasPrefix("suunto_nautic_parser.c:") && $0.contains("Not a dive (activity 3).") },
+                      "the parser's line reaches the sink: \(Self.sinkLines)")
+        lock.lock(); defer { lock.unlock() }
+        XCTAssertTrue(events.contains { $0.level == .info && $0.message == "Skipping entry \(run.id): not a dive" },
+                      "the retriever names the entry: \(events.map(\.message))")
+        XCTAssertTrue(events.contains { $0.message == "Skipped 1 non-dive activity" })
     }
 }

@@ -52,6 +52,46 @@ final class NonDiveActivityTests: XCTestCase {
         return Data(blob)
     }
 
+    /// The records of the SBEM container at `start..<end` of `blob`: where each one starts, its id, and where its data is.
+    private static func records(_ blob: [UInt8], _ start: Int, _ end: Int) -> [(record: Int, id: Int, data: Int, length: Int)] {
+        var out: [(record: Int, id: Int, data: Int, length: Int)] = []
+        var offset = start + 8
+        while offset + 2 <= end {
+            var id = Int(blob[offset]), header = 1
+            if id == 0xFF { id = Int(blob[offset + 1]) | Int(blob[offset + 2]) << 8; header += 2 }
+            var length = Int(blob[offset + header]); header += 1
+            if length == 0xFF {
+                length = (0..<4).reduce(0) { $0 | Int(blob[offset + header + $1]) << (8 * $1) }
+                header += 4
+            }
+            out.append((offset, id, offset + header, length))
+            offset += header + length
+        }
+        return out
+    }
+
+    private static func summarySize(_ blob: [UInt8]) -> Int {
+        Int(UInt32(blob[0]) | UInt32(blob[1]) << 8 | UInt32(blob[2]) << 16 | UInt32(blob[3]) << 24)
+    }
+
+    /// The blob without the profile's records with this id.
+    private static func withoutProfileRecords(_ data: Data, id: Int) -> Data {
+        var blob = [UInt8](data)
+        for r in records(blob, 4 + summarySize(blob), blob.count).reversed() where r.id == id {
+            blob.removeSubrange(r.record..<(r.data + r.length))
+        }
+        return Data(blob)
+    }
+
+    /// The blob with its first /Summary record renumbered, as other descriptors could (a one-byte id).
+    private static func withFirstSummaryRecordID(_ data: Data, _ id: UInt8) throws -> Data {
+        var blob = [UInt8](data)
+        let first = try XCTUnwrap(records(blob, 4, 4 + summarySize(blob)).first)
+        XCTAssertLessThan(first.id, 0xFF)
+        blob[first.record] = id
+        return Data(blob)
+    }
+
     private static let logbookID: UInt32 = 1_787_699_873
 
     private func parse(_ data: Data) throws -> DiveData {
@@ -138,6 +178,23 @@ final class NonDiveActivityTests: XCTestCase {
             XCTAssertEqual(parsed.maxDepth, original.maxDepth, "sport \(String(describing: sport))")
             XCTAssertEqual(parsed.divetime, original.divetime, "sport \(String(describing: sport))")
             XCTAssertEqual(parsed.profile.count, original.profile.count, "sport \(String(describing: sport))")
+        }
+    }
+
+    func testADiveHeaderIsDiveDataWhateverTheSport() throws {
+        // A dive in a sport the table doesn't list, that never logged a dive status record, still has its dive header.
+        let dive = Self.withoutProfileRecords(try Self.withSport(try dive(), 3), id: 0x16)
+        XCTAssertFalse(Self.records([UInt8](dive), 4 + Self.summarySize([UInt8](dive)), dive.count).contains { $0.id == 0x16 })
+        XCTAssertEqual(cStatuses(dive).samples, DC_STATUS_SUCCESS)
+        let parsed = try parse(dive)
+        XCTAssertEqual(parsed.diveMode, .openCircuit)
+    }
+
+    func testARunWhoseFirstRecordGetsADiveHeaderIdIsStillUnsupported() throws {
+        // A Windows record (239 bytes) numbered 0x20 or 0x21 is too small for either dive header.
+        for id: UInt8 in [0x20, 0x21] {
+            let run = try Self.withFirstSummaryRecordID(try syntheticRun(), id)
+            XCTAssertEqual(cStatuses(run).samples, DC_STATUS_UNSUPPORTED, String(format: "%02x", id))
         }
     }
 
