@@ -221,8 +221,9 @@ struct AutoDownloadToggle: View {
         )) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Auto download").font(.headline)
+                // Named while it runs too: with two watches stored, a bare status doesn't say which one it's using.
                 Text(controller.isEnabled(for: device)
-                     ? controller.unreachableHint ?? AutoDownloadController.describe(controller.state).capitalizingFirstLetter
+                     ? "\(device.name) · \(controller.unreachableHint ?? AutoDownloadController.describe(controller.state).capitalizingFirstLetter)"
                      : device.name)
                     .font(.caption)
                     .foregroundColor(.secondary)
