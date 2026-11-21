@@ -83,8 +83,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
     // MARK: - Private Properties
     @objc private var timeout: Int = -1 // default to no timeout
-    private var writeCharacteristic: CBCharacteristic?
-    private var notifyCharacteristic: CBCharacteristic?
+    var writeCharacteristic: CBCharacteristic?
+    var notifyCharacteristic: CBCharacteristic?
     // Queue of raw BLE notification payloads, one entry per didUpdateValueFor
     // call. shearwater_common_slip_read (libdivecomputer) strips a fixed
     // 2-byte header from every dc_iostream_read() call on the assumption
@@ -107,6 +107,17 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     private var _deviceDataPtr: UnsafeMutablePointer<device_data_t>?
     let retrievalClose = RetrievalCloseCoordinator()
     let linkState = BLELinkState()
+    /// Runs each device's close: the close waits on BLE callbacks, which CoreBluetooth delivers on main.
+    private let linkQueue = DispatchQueue(label: "com.libdcswift.link", qos: .userInitiated)
+    private let teardownLock = NSLock()
+    private var _isTearingDown = false
+    private var closeWaiters: [UnsafeMutableRawPointer: [() -> Void]] = [:]
+    /// Test seams: the device's close, the peripheral's state and the link's cancel.
+    var closeDevice: (OpaquePointer) -> Void = { _ = dc_device_close($0) }
+    var peripheralState: (CBPeripheral) -> CBPeripheralState = { $0.state }
+    lazy var cancelConnection: (CBPeripheral) -> Void = { [unowned self] peripheral in
+        self.centralManager.cancelPeripheralConnection(peripheral)
+    }
     private var connectionCompletion: ((Bool) -> Void)?
     private var totalBytesReceived: Int = 0
     private var lastDataReceived: Date?
@@ -548,6 +559,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         // A device opened since is not this close's to tear down.
         guard openedDeviceDataPtr == devicePtr else {
             logWarning("The device a download held was replaced before the download stopped; not closing it")
+            runAfterPendingTeardown(takeCloseWaiters(for: devicePtr))
             return
         }
         closeLink(clearDevicePtr: true)
@@ -555,7 +567,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
 
     // MARK: - Device Management
 
-    /// A device `DiveLogRetriever` is still downloading from, or `withDeviceHeld` work is using, is closed once that has stopped.
+    /// Returns at once: the device's close runs on `linkQueue`, with the link kept up for its quit command, and the
+    /// link is cancelled on main once it has returned. A device `DiveLogRetriever` is still downloading from, or
+    /// `withDeviceHeld` work is using, is closed once that has stopped.
     @objc public func close(clearDevicePtr: Bool = false) {
         if clearDevicePtr, let devicePtr = openedDeviceDataPtr {
             let decision = retrievalClose.requestClose(UnsafeMutableRawPointer(devicePtr)) { [weak self] in
@@ -573,7 +587,101 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         closeLink(clearDevicePtr: clearDevicePtr)
     }
 
+    /// `close(clearDevicePtr:)`, then `completion` on main once the device's close has returned and the link's cancel
+    /// is issued; a close a download holds back finishes after the download stops.
+    public func close(clearDevicePtr: Bool, completion: @escaping () -> Void) {
+        // Before the close, so a download ending meanwhile can't run the held-back close without it.
+        let devicePtr = clearDevicePtr ? openedDeviceDataPtr : nil
+        if let devicePtr {
+            addCloseWaiter(completion, for: devicePtr)
+        }
+        close(clearDevicePtr: clearDevicePtr)
+        if devicePtr == nil {
+            runAfterPendingTeardown([completion])
+        }
+    }
+
+    private static let shutdownSettleSeconds: TimeInterval = 0.5
+    private static let pendingTeardownWaitSeconds: TimeInterval = 30
+
+    /// True from a close until its link's cancel is issued on main; until then the device's close may still be running.
+    var isTearingDown: Bool {
+        teardownLock.lock(); defer { teardownLock.unlock() }
+        return _isTearingDown
+    }
+
+    private func beginTeardown() -> Bool {
+        teardownLock.lock(); defer { teardownLock.unlock() }
+        guard !_isTearingDown else { return false }
+        _isTearingDown = true
+        return true
+    }
+
+    private func endTeardown() {
+        teardownLock.lock(); defer { teardownLock.unlock() }
+        _isTearingDown = false
+    }
+
+    private func addCloseWaiter(_ waiter: @escaping () -> Void, for devicePtr: UnsafeMutablePointer<device_data_t>) {
+        teardownLock.lock(); defer { teardownLock.unlock() }
+        closeWaiters[UnsafeMutableRawPointer(devicePtr), default: []].append(waiter)
+    }
+
+    private func takeCloseWaiters(for devicePtr: UnsafeMutablePointer<device_data_t>?) -> [() -> Void] {
+        guard let devicePtr else { return [] }
+        teardownLock.lock(); defer { teardownLock.unlock() }
+        return closeWaiters.removeValue(forKey: UnsafeMutableRawPointer(devicePtr)) ?? []
+    }
+
+    /// On main once every close queued so far has finished: each teardown queues its last step on main before it lets go of `linkQueue`.
+    private func runAfterPendingTeardown(_ waiters: [() -> Void]) {
+        guard !waiters.isEmpty else { return }
+        linkQueue.async {
+            DispatchQueue.main.async { waiters.forEach { $0() } }
+        }
+    }
+
+    /// Blocks until every earlier close's device close has returned and its link's cancel is issued, capped at
+    /// `timeout`. Call off main: on main it can't wait, since the close waits on callbacks delivered there.
+    func waitForPendingTeardown(timeout: TimeInterval = pendingTeardownWaitSeconds) {
+        guard !Thread.isMainThread else {
+            if isTearingDown {
+                logWarning("Not waiting on main for the device's close still running on the old link")
+            }
+            return
+        }
+        let drained = DispatchSemaphore(value: 0)
+        linkQueue.async { drained.signal() }
+        guard drained.wait(timeout: .now() + timeout) == .success else {
+            logWarning("A device's close was still running \(Int(timeout)) s later; going ahead")
+            return
+        }
+        // A teardown queues its last step on main before it lets go of the link queue.
+        if isTearingDown {
+            DispatchQueue.main.sync {}
+        }
+    }
+
     private func closeLink(clearDevicePtr: Bool) {
+        // Taken at once, so the host never sees a device that is being freed.
+        var devicePtr: UnsafeMutablePointer<device_data_t>?
+        if clearDevicePtr, let open = openedDeviceDataPtr {
+            devicePtr = open
+            openedDeviceDataPtr = nil
+        }
+        let waiters = takeCloseWaiters(for: devicePtr)
+
+        guard beginTeardown() else {
+            // Cancelling now would cut off the running close's quit command; that close cancels the link.
+            // A driver closing its iostream from inside its own close (Nautic, EON Steel, OSTC3) lands here too.
+            logDebug("Close requested while the link is still closing; leaving the link to that close")
+            if let devicePtr {
+                linkQueue.async { [self] in _ = closeAndFree(devicePtr) }
+            }
+            runAfterPendingTeardown(waiters)
+            return
+        }
+
         isDisconnecting = true
         onMain { self.connectAttempt.close() }
         // isPeripheralReady/connectedDevice are NOT published here when there's
@@ -602,68 +710,63 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         dataAvailableSemaphore.signal() // Signal once to unblock any waiting read
 
-        var needsShutdownSettleDelay = false
-        if clearDevicePtr {
-            if let devicePtr = self.openedDeviceDataPtr {
-                if devicePtr.pointee.device != nil {
-                    dc_device_close(devicePtr.pointee.device)
-                    needsShutdownSettleDelay = peripheral.map { linkState.needsShutdownSettle(peripheralState: $0.state) } ?? false
-                }
-                devicePtr.deallocate()
-                self.openedDeviceDataPtr = nil
+        // The peripheral and its characteristics stay set until the device's quit command has gone out on them.
+        let peripheral = self.peripheral
+        let generation = linkState.generation
+        linkQueue.async { [self] in
+            let closedDevice = devicePtr.map(closeAndFree) ?? false
+            // The quit command's write flushes asynchronously; an immediate cancel cuts it off (Shearwater stays
+            // on "WAIT CMD"). A link that already dropped has nothing to flush.
+            if closedDevice, let peripheral, linkState.needsShutdownSettle(peripheralState: peripheralState(peripheral)) {
+                Thread.sleep(forTimeInterval: Self.shutdownSettleSeconds)
+            }
+            DispatchQueue.main.async { [self] in
+                finishTeardown(of: peripheral, scheduledIn: generation)
             }
         }
+        runAfterPendingTeardown(waiters)
+    }
 
-        if let peripheral = self.peripheral {
-            self.writeCharacteristic = nil
-            self.notifyCharacteristic = nil
-            self.peripheral = nil
-            if needsShutdownSettleDelay {
-                // dc_device_close (above) sends a protocol-level shutdown command
-                // (e.g. Shearwater's "exit command mode" packet) over a writeValue
-                // that completes asynchronously on the BLE stack. Without a settle
-                // delay, cancelPeripheralConnection tears down the link before
-                // that write flushes, and the dive computer never sees the
-                // shutdown — it stays stuck on "Sending Dive" / "WAIT CMD" until
-                // it times out on its own. close() isn't guaranteed to run off
-                // the main thread (a caller may invoke it directly from a
-                // SwiftUI action), so this can't be a blocking sleep here.
-                // A connect within the delay reuses this same CBPeripheral when
-                // iOS holds the watch's link; the cancel must not end that one.
-                let generation = linkState.generation
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    guard self.linkState.shouldCancel(scheduledIn: generation) else {
-                        logInfo("A connect started since the close; not cancelling \(peripheral.name ?? "the peripheral")")
-                        return
-                    }
-                    self.centralManager.cancelPeripheralConnection(peripheral)
-                    // didDisconnectPeripheral publishes isPeripheralReady/connectedDevice
-                    // once CoreBluetooth actually confirms the teardown.
+    /// On `linkQueue`. Returns whether a device's close ran.
+    private func closeAndFree(_ devicePtr: UnsafeMutablePointer<device_data_t>) -> Bool {
+        defer { devicePtr.deallocate() }
+        guard let device = devicePtr.pointee.device else { return false }
+        closeDevice(device)
+        return true
+    }
+
+    /// Main, once the device's close has returned.
+    private func finishTeardown(of peripheral: CBPeripheral?, scheduledIn generation: Int) {
+        if let peripheral {
+            // A connect since reuses this same CBPeripheral when iOS holds the watch's link; the cancel must not end that one.
+            if linkState.shouldCancel(scheduledIn: generation) {
+                if self.peripheral === peripheral {
+                    writeCharacteristic = nil
+                    notifyCharacteristic = nil
+                    self.peripheral = nil
                 }
-            } else {
-                centralManager.cancelPeripheralConnection(peripheral)
+                cancelConnection(peripheral)
                 // didDisconnectPeripheral publishes isPeripheralReady/connectedDevice
                 // once CoreBluetooth actually confirms the teardown.
+            } else {
+                logInfo("A connect started since the close; not cancelling its link")
             }
-        } else {
+        } else if linkState.shouldCancel(scheduledIn: generation) {
             // Nothing to disconnect, but observers waiting on these properties
             // still need the signal.
-            DispatchQueue.main.async {
-                self.isPeripheralReady = false
-                self.connectedDevice = nil
-            }
+            isPeripheralReady = false
+            connectedDevice = nil
         }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.isDisconnecting = false
-        }
+        endTeardown()
+        isDisconnecting = false
     }
 
     /// Closes the open device and its link, then blocks until the peripheral
     /// has actually disconnected, so a connect that follows doesn't race the
-    /// cancel close() issues 0.5 s later. A close held back by a download is
-    /// waited for first. Each wait is capped at `timeout`. Call off main: the
-    /// waits poll main, where the CoreBluetooth callbacks land.
+    /// cancel close() issues once the device's close has run. A close held back
+    /// by a download is waited for first, then the device's close. The download
+    /// and disconnect waits are capped at `timeout`. Call off main: the waits
+    /// poll main, where the CoreBluetooth callbacks land.
     /// Returns the name of what was closed, or nil if nothing was open.
     @discardableResult
     func closeAndWaitForDisconnect(timeout: TimeInterval = 3) -> String? {
@@ -676,6 +779,9 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
         }
         if let held = closed?.held {
             waitForDeferredClose(of: held, timeout: timeout)
+        }
+        if closed != nil {
+            waitForPendingTeardown()
         }
         if let peripheral = closed?.peripheral {
             Self.waitForDisconnect(peripheral, timeout: timeout)
@@ -743,6 +849,8 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
 
     @objc public func connect(toDevice address: String!) -> Bool {
+        // A close may still be sending the old device's quit command on the link it's about to replace.
+        waitForPendingTeardown()
         // Must not touch CoreBluetooth before .poweredOn (see startScanning);
         // this call is blocking, so it fails rather than defers.
         guard isBluetoothReady else {
