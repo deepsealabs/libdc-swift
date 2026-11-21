@@ -130,8 +130,9 @@ struct DeviceExplorerView: View {
     private var explorerLogSection: some View {
         Section {
             let device = deviceName
+            FullLoggingToggle()
             Button {
-                shareItems = [log.text(device: device)]
+                log.shareItems(device: device) { shareItems = $0 }
             } label: {
                 Label("Share log", systemImage: "square.and.arrow.up")
             }
@@ -144,7 +145,7 @@ struct DeviceExplorerView: View {
         } header: {
             Text("Explorer log")
         } footer: {
-            Text("\(log.lines.count) line(s): connects, commands and their results, for a GitHub report.")
+            Text("\(log.lineCount) line(s): connects, commands and their results, for a GitHub report. \(FullLogging.footer)")
         }
     }
 

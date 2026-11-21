@@ -80,6 +80,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         deviceName = device.name
         defaults.set(device.name, forKey: Self.enabledKey)
         append("Auto download ON for \(device.name) (DC Tester \(Self.appVersion), LibDCSwift \(libDCSwiftBuildTag))")
+        // Its libdivecomputer lines, a full log's included, go to the explorer log, not this one.
+        ExplorerLog.shared.noteConnection("Auto download ON for \(device.name)", device: device.name)
         if closedManualSession {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak sync] in sync?.start() }
         } else {
@@ -236,6 +238,7 @@ struct AutoDownloadView: View {
     @ObservedObject var controller: AutoDownloadController
     @State private var shareItems: [Any]?
     @State private var autoScroll = true
+    @AppStorage(FullLogging.key) private var fullLogging = false
 
     var body: some View {
         Form {
@@ -249,6 +252,11 @@ struct AutoDownloadView: View {
                 }
                 if let name = controller.deviceName {
                     LabeledContent("Watch", value: name)
+                }
+                if fullLogging {
+                    Text("Full logging is on: the protocol log is in Share log under Log on the first screen.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
                 }
                 Button {
                     shareItems = [controller.logText]

@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var connectingPeripheralID: UUID?
     // Set only once an open succeeds: before that, the manager may still hold another watch's device.
     @State private var explorerDeviceName: String?
+    @State private var shareItems: [Any]?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -54,6 +55,8 @@ struct ContentView: View {
                                 .font(.footnote)
                         }
                     }
+
+                    logSection
                 }
                 .listStyle(.insetGrouped)
             }
@@ -98,6 +101,25 @@ struct ContentView: View {
                     connectError = "Link to \(explorerDeviceName ?? "the dive computer") lost. Tap Connect to reconnect."
                 }
             }
+            .sheet(isPresented: Binding(get: { shareItems != nil }, set: { if !$0 { shareItems = nil } })) {
+                ShareSheet(activityItems: shareItems ?? [])
+            }
+        }
+    }
+
+    // Reachable without a connection: auto download's libdivecomputer lines land in this log too.
+    private var logSection: some View {
+        Section {
+            FullLoggingToggle()
+            Button {
+                ExplorerLog.shared.shareItems { shareItems = $0 }
+            } label: {
+                Label("Share log", systemImage: "square.and.arrow.up")
+            }
+        } header: {
+            Text("Log")
+        } footer: {
+            Text(FullLogging.footer)
         }
     }
 
@@ -167,7 +189,7 @@ struct ContentView: View {
         isConnecting = true
         connectError = nil
         connectingPeripheralID = peripheral.identifier
-        ExplorerLog.shared.append("Connecting to \(name)")
+        ExplorerLog.shared.noteConnection("Connecting to \(name)", device: name)
 
         // openBLEDevice is blocking (it polls internally until the
         // libdivecomputer handshake succeeds/fails/times out) - keep it
