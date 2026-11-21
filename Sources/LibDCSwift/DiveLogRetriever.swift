@@ -274,6 +274,22 @@ public class DiveLogRetriever {
         closedMidDownload || stoppedByHost ? DC_STATUS_CANCELLED : status
     }
 
+    /// The local wall clock at `now`; `timezone` is in seconds east of UTC, as `dc_datetime_mktime` and the drivers read it.
+    static func clockSyncDateTime(at now: Date, in timeZone: TimeZone = .current) -> dc_datetime_t? {
+        let comps = Calendar(identifier: .gregorian).dateComponents(in: timeZone, from: now)
+        guard let year = comps.year, let month = comps.month, let day = comps.day,
+              let hour = comps.hour, let minute = comps.minute, let second = comps.second else { return nil }
+        var dt = dc_datetime_t()
+        dt.year     = Int32(year)
+        dt.month    = Int32(month)
+        dt.day      = Int32(day)
+        dt.hour     = Int32(hour)
+        dt.minute   = Int32(minute)
+        dt.second   = Int32(second)
+        dt.timezone = Int32(timeZone.secondsFromGMT(for: now))
+        return dt
+    }
+
     /// Stable, human-stable name for a libdivecomputer status code, used for
     /// logging and for `DiveDataViewModel.lastDownloadStatus` (analytics).
     static func statusName(_ status: dc_status_t) -> String {
@@ -850,20 +866,7 @@ public class DiveLogRetriever {
                 let clockSyncAllowed = enumStatus == DC_STATUS_SUCCESS
                     || (enumStatus == DC_STATUS_PROTOCOL && context.fingerprintMatched)
                 if syncClock && clockSyncAllowed {
-                    let now = Date()
-                    let comps = Calendar(identifier: .gregorian).dateComponents(
-                        in: TimeZone.current, from: now
-                    )
-                    if let year = comps.year, let month = comps.month, let day = comps.day,
-                       let hour = comps.hour, let minute = comps.minute, let second = comps.second {
-                        var dt = dc_datetime_t()
-                        dt.year     = Int32(year)
-                        dt.month    = Int32(month)
-                        dt.day      = Int32(day)
-                        dt.hour     = Int32(hour)
-                        dt.minute   = Int32(minute)
-                        dt.second   = Int32(second)
-                        dt.timezone = Int32(TimeZone.current.secondsFromGMT(for: now) / 60)
+                    if var dt = clockSyncDateTime(at: Date()) {
                         let clockStatus = dc_device_timesync(dcDevice, &dt)
                         switch clockStatus {
                         case DC_STATUS_SUCCESS:

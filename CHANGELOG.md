@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CoreBluetoothManager.isConnectFailed()` (optional in `CoreBluetoothManagerProtocol`): true once CoreBluetooth failed the current connect. The open's connect wait ends as soon as CoreBluetooth reports the failure instead of running out its 10 s, so `openBLEDevice` returns false and releases the open for the next one sooner
 ### Changed
 - Suunto Nautic/Ocean: `dc_parser_get_datetime` reports the wall clock a dive logged with `timezone` set to its offset, not UTC fields, and answers for a dive with no GPS fix. Where that record is unusable or a GPS fix contradicts it, the GPS start is reported as before, in UTC with `timezone` 0. `DiveData.datetime` and `SuuntoNauticExplorer`'s `startDate` stay the same instant, and `SuuntoNauticExplorer.owningLogbookID(of:among:)` can now match a dive with no GPS fix (libdivecomputer submodule, deepsealabs/libdivecomputer#19)
+### Fixed
+- Clock sync (`syncClock: true`) hands `dc_device_timesync` the time zone in seconds east of UTC, as libdivecomputer reads it. It was in minutes, so a Shearwater was set to a UTC time off by about the offset and stored an offset of minutes instead of hours (at UTC+2, about 7080 s ahead and 2 minutes), and a Divesoft iDive refused any zone but UTC with `DC_STATUS_INVALIDARGS` (#107)
 
 ## [1.22.0] - 2026-11-17
 ### Added
