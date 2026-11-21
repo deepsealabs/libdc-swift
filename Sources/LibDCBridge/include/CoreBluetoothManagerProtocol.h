@@ -27,6 +27,8 @@
 - (BOOL)isLinkLost;
 // YES once CoreBluetooth failed the current connect, until the next one; the connect wait then ends.
 - (BOOL)isConnectFailed;
+// Logs (and in debug builds asserts) when a blocking link call runs on the main thread.
+- (void)warnIfOnMainThread:(NSString *)caller NS_SWIFT_NAME(warnIfOnMainThread(_:));
 @end
 
 #else

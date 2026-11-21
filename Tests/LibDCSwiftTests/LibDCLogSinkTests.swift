@@ -15,8 +15,9 @@ final class LibDCLogSinkTests: XCTestCase {
     }
 
     func testParserErrorReachesSinkWithLevelAndSource() throws {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "sbem"))
-        let dive = Data("SBEM9999".utf8) + (try Data(contentsOf: url)).dropFirst(8)
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
+        let fixture = try Data(contentsOf: url)
+        let dive = fixture.prefix(4) + Data("XBEM".utf8) + fixture.dropFirst(8)
 
         var context: OpaquePointer?
         XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
@@ -33,7 +34,7 @@ final class LibDCLogSinkTests: XCTestCase {
                 context: context)
         }
 
-        let error = try XCTUnwrap(Self.received.first { $0.message.contains("Unexpected magic") },
+        let error = try XCTUnwrap(Self.received.first { $0.message.contains("Unexpected SBEM header") },
                                   "parser ERROR never reached the sink: \(Self.received)")
         XCTAssertEqual(error.level, "ERROR")
         XCTAssertTrue(error.message.hasPrefix("suunto_nautic_parser.c:"), "file:line prefix, no build path: \(error.message)")

@@ -1577,1238 +1577,1189 @@
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14268,
+      "pointIndex" : 14267,
       "time" : 1311.16,
       "tts" : 384
     },
     {
-      "pointIndex" : 14269,
+      "pointIndex" : 14268,
       "time" : 1311.19
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14314,
+      "pointIndex" : 14313,
       "time" : 1315.25,
       "tts" : 380
     },
     {
-      "pointIndex" : 14315,
+      "pointIndex" : 14314,
       "time" : 1315.31
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14366,
+      "pointIndex" : 14365,
       "time" : 1320.03,
       "tts" : 380
     },
     {
-      "pointIndex" : 14367,
+      "pointIndex" : 14366,
       "time" : 1320.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14477,
+      "pointIndex" : 14476,
       "time" : 1330.03,
       "tts" : 368
     },
     {
-      "pointIndex" : 14478,
+      "pointIndex" : 14477,
       "time" : 1330.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14586,
+      "pointIndex" : 14585,
       "time" : 1340.02,
       "tts" : 360
     },
     {
-      "pointIndex" : 14587,
+      "pointIndex" : 14586,
       "time" : 1340.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14695,
+      "pointIndex" : 14694,
       "time" : 1350.03,
       "tts" : 356
     },
     {
-      "pointIndex" : 14696,
+      "pointIndex" : 14695,
       "time" : 1350.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14804,
+      "pointIndex" : 14803,
       "time" : 1360.02,
       "tts" : 348
     },
     {
-      "pointIndex" : 14805,
+      "pointIndex" : 14804,
       "time" : 1360.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 14916,
+      "pointIndex" : 14915,
       "time" : 1370.02,
       "tts" : 340
     },
     {
-      "pointIndex" : 14917,
+      "pointIndex" : 14916,
       "time" : 1370.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15027,
+      "pointIndex" : 15026,
       "time" : 1380.02,
       "tts" : 336
     },
     {
-      "pointIndex" : 15028,
+      "pointIndex" : 15027,
       "time" : 1380.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15134,
+      "pointIndex" : 15133,
       "time" : 1390.02,
       "tts" : 328
     },
     {
-      "pointIndex" : 15135,
+      "pointIndex" : 15134,
       "time" : 1390.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15228,
+      "pointIndex" : 15227,
       "time" : 1398.35,
       "tts" : 320
     },
     {
-      "pointIndex" : 15229,
+      "pointIndex" : 15228,
       "time" : 1398.39
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15247,
+      "pointIndex" : 15246,
       "time" : 1400.02,
       "tts" : 316
     },
     {
-      "pointIndex" : 15248,
+      "pointIndex" : 15247,
       "time" : 1400.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 15285,
+      "pointIndex" : 15284,
       "time" : 1403.45,
       "tts" : 0
     },
     {
-      "pointIndex" : 15286,
+      "pointIndex" : 15285,
       "time" : 1403.54
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15357,
+      "pointIndex" : 15356,
       "time" : 1410.02,
       "tts" : 312
     },
     {
-      "pointIndex" : 15358,
+      "pointIndex" : 15357,
       "time" : 1410.03
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15455,
+      "pointIndex" : 15454,
       "time" : 1418.75,
       "tts" : 304
     },
     {
-      "pointIndex" : 15456,
+      "pointIndex" : 15455,
       "time" : 1418.86
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15469,
+      "pointIndex" : 15468,
       "time" : 1420.03,
       "tts" : 300
     },
     {
-      "pointIndex" : 15470,
+      "pointIndex" : 15469,
       "time" : 1420.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 15490,
+      "pointIndex" : 15489,
       "time" : 1421.85,
       "tts" : 0
     },
     {
-      "pointIndex" : 15491,
+      "pointIndex" : 15490,
       "time" : 1421.9
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15581,
+      "pointIndex" : 15580,
       "time" : 1430.02,
       "tts" : 296
     },
     {
-      "pointIndex" : 15582,
+      "pointIndex" : 15581,
       "time" : 1430.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15688,
+      "pointIndex" : 15687,
       "time" : 1440.03,
       "tts" : 277
     },
     {
-      "pointIndex" : 15689,
+      "pointIndex" : 15688,
       "time" : 1440.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15800,
+      "pointIndex" : 15799,
       "time" : 1450.03,
       "tts" : 269
     },
     {
-      "pointIndex" : 15801,
+      "pointIndex" : 15800,
       "time" : 1450.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 15908,
+      "pointIndex" : 15907,
       "time" : 1460.03,
       "tts" : 261
     },
     {
-      "pointIndex" : 15909,
+      "pointIndex" : 15908,
       "time" : 1460.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16016,
+      "pointIndex" : 16015,
       "time" : 1470.03,
       "tts" : 253
     },
     {
-      "pointIndex" : 16017,
+      "pointIndex" : 16016,
       "time" : 1470.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16124,
+      "pointIndex" : 16123,
       "time" : 1480.03,
       "tts" : 249
     },
     {
-      "pointIndex" : 16125,
+      "pointIndex" : 16124,
       "time" : 1480.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16233,
+      "pointIndex" : 16232,
       "time" : 1490.03,
       "tts" : 245
     },
     {
-      "pointIndex" : 16234,
+      "pointIndex" : 16233,
       "time" : 1490.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16276,
+      "pointIndex" : 16275,
       "time" : 1493.65,
       "tts" : 241
     },
     {
-      "pointIndex" : 16277,
+      "pointIndex" : 16276,
       "time" : 1493.7
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16344,
+      "pointIndex" : 16343,
       "time" : 1500.03,
       "tts" : 226
     },
     {
-      "pointIndex" : 16345,
+      "pointIndex" : 16344,
       "time" : 1500.23
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 16377,
+      "pointIndex" : 16376,
       "time" : 1502.95,
       "tts" : 0
     },
     {
-      "pointIndex" : 16378,
+      "pointIndex" : 16377,
       "time" : 1503.03
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16454,
+      "pointIndex" : 16453,
       "time" : 1510.02,
       "tts" : 218
     },
     {
-      "pointIndex" : 16455,
+      "pointIndex" : 16454,
       "time" : 1510.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16562,
+      "pointIndex" : 16561,
       "time" : 1520.03,
       "tts" : 218
     },
     {
-      "pointIndex" : 16563,
+      "pointIndex" : 16562,
       "time" : 1520.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16673,
+      "pointIndex" : 16672,
       "time" : 1530.03,
       "tts" : 203
     },
     {
-      "pointIndex" : 16674,
+      "pointIndex" : 16673,
       "time" : 1530.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16781,
+      "pointIndex" : 16780,
       "time" : 1540.03,
       "tts" : 199
     },
     {
-      "pointIndex" : 16782,
+      "pointIndex" : 16781,
       "time" : 1540.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 16890,
+      "pointIndex" : 16889,
       "time" : 1550.03,
       "tts" : 184
     },
     {
-      "pointIndex" : 16891,
+      "pointIndex" : 16890,
       "time" : 1550.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 16997,
+      "pointIndex" : 16996,
       "time" : 1560.02,
       "tts" : 0
     },
     {
-      "pointIndex" : 16998,
+      "pointIndex" : 16997,
       "time" : 1560.12
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 17105,
+      "pointIndex" : 17104,
       "time" : 1570.03,
       "tts" : 165
     },
     {
-      "pointIndex" : 17106,
+      "pointIndex" : 17105,
       "time" : 1570.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 17216,
+      "pointIndex" : 17215,
       "time" : 1580.03,
       "tts" : 150
     },
     {
-      "pointIndex" : 17217,
+      "pointIndex" : 17216,
       "time" : 1580.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 17326,
+      "pointIndex" : 17325,
       "time" : 1590.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 17327,
+      "pointIndex" : 17326,
       "time" : 1590.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 17434,
+      "pointIndex" : 17433,
       "time" : 1600.03,
       "tts" : 135
     },
     {
-      "pointIndex" : 17435,
+      "pointIndex" : 17434,
       "time" : 1600.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 17542,
+      "pointIndex" : 17541,
       "time" : 1610.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 17543,
+      "pointIndex" : 17542,
       "time" : 1610.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 17647,
+      "pointIndex" : 17646,
       "time" : 1620.03,
       "tts" : 120
     },
     {
-      "pointIndex" : 17648,
+      "pointIndex" : 17647,
       "time" : 1620.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 17756,
+      "pointIndex" : 17755,
       "time" : 1630.03,
       "tts" : 105
     },
     {
-      "pointIndex" : 17757,
+      "pointIndex" : 17756,
       "time" : 1630.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 17865,
+      "pointIndex" : 17864,
       "time" : 1640.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 17866,
+      "pointIndex" : 17865,
       "time" : 1640.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 17973,
+      "pointIndex" : 17972,
       "time" : 1650.03,
       "tts" : 76
     },
     {
-      "pointIndex" : 17974,
+      "pointIndex" : 17973,
       "time" : 1650.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 18082,
+      "pointIndex" : 18081,
       "time" : 1660.02,
       "tts" : 64
     },
     {
-      "pointIndex" : 18083,
+      "pointIndex" : 18082,
       "time" : 1660.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 18191,
+      "pointIndex" : 18190,
       "time" : 1670.03,
       "tts" : 56
     },
     {
-      "pointIndex" : 18192,
+      "pointIndex" : 18191,
       "time" : 1670.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 18300,
+      "pointIndex" : 18299,
       "time" : 1680.03,
       "tts" : 48
     },
     {
-      "pointIndex" : 18301,
+      "pointIndex" : 18300,
       "time" : 1680.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 18407,
+      "pointIndex" : 18406,
       "time" : 1690.03,
       "tts" : 36
     },
     {
-      "pointIndex" : 18408,
+      "pointIndex" : 18407,
       "time" : 1690.04
     },
     {
       "decoKind" : "decoStop",
       "decoStop" : 3,
       "decoTime" : 0,
-      "pointIndex" : 18514,
+      "pointIndex" : 18513,
       "time" : 1700.03,
       "tts" : 28
     },
     {
-      "pointIndex" : 18515,
+      "pointIndex" : 18514,
       "time" : 1700.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 18605,
+      "pointIndex" : 18604,
       "time" : 1708.55,
       "tts" : 24
     },
     {
-      "pointIndex" : 18606,
+      "pointIndex" : 18605,
       "time" : 1708.59
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 18621,
+      "pointIndex" : 18620,
       "time" : 1710.03,
       "tts" : 24
     },
     {
-      "pointIndex" : 18622,
+      "pointIndex" : 18621,
       "time" : 1710.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 18732,
+      "pointIndex" : 18731,
       "time" : 1720.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 18733,
+      "pointIndex" : 18732,
       "time" : 1720.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 18843,
+      "pointIndex" : 18842,
       "time" : 1730.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 18844,
+      "pointIndex" : 18843,
       "time" : 1730.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 18951,
+      "pointIndex" : 18950,
       "time" : 1740.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 18952,
+      "pointIndex" : 18951,
       "time" : 1740.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19060,
+      "pointIndex" : 19059,
       "time" : 1750.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 19061,
+      "pointIndex" : 19060,
       "time" : 1750.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19169,
+      "pointIndex" : 19168,
       "time" : 1760.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 19170,
+      "pointIndex" : 19169,
       "time" : 1760.11
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19277,
+      "pointIndex" : 19276,
       "time" : 1770.03,
       "tts" : 24
     },
     {
-      "pointIndex" : 19278,
+      "pointIndex" : 19277,
       "time" : 1770.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19387,
+      "pointIndex" : 19386,
       "time" : 1780.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 19388,
+      "pointIndex" : 19387,
       "time" : 1780.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19495,
+      "pointIndex" : 19494,
       "time" : 1790.02,
       "tts" : 24
     },
     {
-      "pointIndex" : 19496,
+      "pointIndex" : 19495,
       "time" : 1790.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19603,
+      "pointIndex" : 19602,
       "time" : 1800.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 19604,
+      "pointIndex" : 19603,
       "time" : 1800.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19714,
+      "pointIndex" : 19713,
       "time" : 1810.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 19715,
+      "pointIndex" : 19714,
       "time" : 1810.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19822,
+      "pointIndex" : 19821,
       "time" : 1820.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 19823,
+      "pointIndex" : 19822,
       "time" : 1820.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 19930,
+      "pointIndex" : 19929,
       "time" : 1830.03,
       "tts" : 24
     },
     {
-      "pointIndex" : 19931,
+      "pointIndex" : 19930,
       "time" : 1830.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20037,
+      "pointIndex" : 20036,
       "time" : 1840.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 20038,
+      "pointIndex" : 20037,
       "time" : 1840.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20146,
+      "pointIndex" : 20145,
       "time" : 1850.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 20147,
+      "pointIndex" : 20146,
       "time" : 1850.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20256,
+      "pointIndex" : 20255,
       "time" : 1860.03,
       "tts" : 16
     },
     {
-      "pointIndex" : 20257,
+      "pointIndex" : 20256,
       "time" : 1860.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20365,
+      "pointIndex" : 20364,
       "time" : 1870.03,
       "tts" : 16
     },
     {
-      "pointIndex" : 20366,
+      "pointIndex" : 20365,
       "time" : 1870.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20473,
+      "pointIndex" : 20472,
       "time" : 1880.03,
       "tts" : 16
     },
     {
-      "pointIndex" : 20474,
+      "pointIndex" : 20473,
       "time" : 1880.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20585,
+      "pointIndex" : 20584,
       "time" : 1890.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 20586,
+      "pointIndex" : 20585,
       "time" : 1890.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20691,
+      "pointIndex" : 20690,
       "time" : 1900.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 20692,
+      "pointIndex" : 20691,
       "time" : 1900.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20785,
+      "pointIndex" : 20784,
       "time" : 1908.8,
       "tts" : 20
     },
     {
-      "pointIndex" : 20786,
+      "pointIndex" : 20785,
       "time" : 1908.87
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20799,
+      "pointIndex" : 20798,
       "time" : 1910.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 20800,
+      "pointIndex" : 20799,
       "time" : 1910.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20895,
+      "pointIndex" : 20894,
       "time" : 1918.82,
       "tts" : 24
     },
     {
-      "pointIndex" : 20896,
+      "pointIndex" : 20895,
       "time" : 1918.92
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 20908,
+      "pointIndex" : 20907,
       "time" : 1920.03,
       "tts" : 24
     },
     {
-      "pointIndex" : 20909,
+      "pointIndex" : 20908,
       "time" : 1920.13
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 21015,
+      "pointIndex" : 21014,
       "time" : 1930.03,
       "tts" : 20
     },
     {
-      "pointIndex" : 21016,
+      "pointIndex" : 21015,
       "time" : 1930.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 21124,
+      "pointIndex" : 21123,
       "time" : 1940.03,
       "tts" : 12
     },
     {
-      "pointIndex" : 21125,
+      "pointIndex" : 21124,
       "time" : 1940.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 6000,
-      "pointIndex" : 21231,
+      "pointIndex" : 21230,
       "time" : 1950.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 21232,
+      "pointIndex" : 21231,
       "time" : 1950.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 21341,
+      "pointIndex" : 21340,
       "time" : 1960.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 21342,
+      "pointIndex" : 21341,
       "time" : 1960.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 21450,
+      "pointIndex" : 21449,
       "time" : 1970.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 21451,
+      "pointIndex" : 21450,
       "time" : 1970.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 21555,
+      "pointIndex" : 21554,
       "time" : 1980.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 21556,
+      "pointIndex" : 21555,
       "time" : 1980.07
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 21667,
+      "pointIndex" : 21640,
       "time" : 1990.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 21668,
+      "pointIndex" : 21641,
       "time" : 1990.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 21779,
+      "pointIndex" : 21716,
       "time" : 2000.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 21780,
+      "pointIndex" : 21717,
       "time" : 2000.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 21890,
+      "pointIndex" : 21793,
       "time" : 2010.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 21891,
+      "pointIndex" : 21794,
       "time" : 2010.09
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22002,
+      "pointIndex" : 21869,
       "time" : 2020.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22003,
+      "pointIndex" : 21870,
       "time" : 2020.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22113,
+      "pointIndex" : 21946,
       "time" : 2030.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22114,
+      "pointIndex" : 21947,
       "time" : 2030.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22225,
+      "pointIndex" : 22025,
       "time" : 2040.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22226,
+      "pointIndex" : 22026,
       "time" : 2040.42
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22335,
+      "pointIndex" : 22103,
       "time" : 2050.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22336,
+      "pointIndex" : 22104,
       "time" : 2050.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22446,
+      "pointIndex" : 22186,
       "time" : 2060.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22447,
+      "pointIndex" : 22187,
       "time" : 2060.08
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22556,
+      "pointIndex" : 22263,
       "time" : 2070.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22557,
+      "pointIndex" : 22264,
       "time" : 2070.42
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22666,
+      "pointIndex" : 22340,
       "time" : 2080.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22667,
+      "pointIndex" : 22341,
       "time" : 2080.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22778,
+      "pointIndex" : 22420,
       "time" : 2090.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 22779,
+      "pointIndex" : 22421,
       "time" : 2090.42
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 22888,
+      "pointIndex" : 22496,
       "time" : 2100.02,
       "tts" : 0
     },
     {
-      "pointIndex" : 22889,
+      "pointIndex" : 22497,
       "time" : 2100.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23000,
+      "pointIndex" : 22577,
       "time" : 2110.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23001,
+      "pointIndex" : 22578,
       "time" : 2110.08
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23111,
+      "pointIndex" : 22657,
       "time" : 2120.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23112,
+      "pointIndex" : 22658,
       "time" : 2120.12
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23221,
+      "pointIndex" : 22746,
       "time" : 2130.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23222,
+      "pointIndex" : 22747,
       "time" : 2130.06
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23332,
+      "pointIndex" : 22832,
       "time" : 2140.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23333,
+      "pointIndex" : 22833,
       "time" : 2140.1
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23441,
+      "pointIndex" : 22914,
       "time" : 2150.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23442,
+      "pointIndex" : 22915,
       "time" : 2150.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23552,
+      "pointIndex" : 23001,
       "time" : 2160.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23553,
+      "pointIndex" : 23002,
       "time" : 2160.08
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23662,
+      "pointIndex" : 23087,
       "time" : 2170.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23663,
+      "pointIndex" : 23088,
       "time" : 2170.12
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23771,
+      "pointIndex" : 23170,
       "time" : 2180.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23772,
+      "pointIndex" : 23171,
       "time" : 2180.06
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23879,
+      "pointIndex" : 23254,
       "time" : 2190.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23880,
+      "pointIndex" : 23255,
       "time" : 2190.09
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 23988,
+      "pointIndex" : 23337,
       "time" : 2200.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 23989,
+      "pointIndex" : 23338,
       "time" : 2200.04
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 24099,
+      "pointIndex" : 23420,
       "time" : 2210.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 24100,
+      "pointIndex" : 23421,
       "time" : 2210.07
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 24210,
+      "pointIndex" : 23505,
       "time" : 2220.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 24211,
+      "pointIndex" : 23506,
       "time" : 2220.12
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 24321,
+      "pointIndex" : 23589,
       "time" : 2230.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 24322,
+      "pointIndex" : 23590,
       "time" : 2230.05
     },
     {
       "decoKind" : "ndl",
       "ndl" : 0,
-      "pointIndex" : 24432,
+      "pointIndex" : 23672,
       "time" : 2240.03,
       "tts" : 0
     },
     {
-      "pointIndex" : 24433,
+      "pointIndex" : 23673,
       "time" : 2240.04
     }
   ],
   "divetime" : 1922,
   "events" : [
-    {
-      "flags" : 1,
-      "pointIndex" : 0,
-      "time" : 0.03,
-      "type" : "gasChange",
-      "value" : 0
-    },
-    {
-      "flags" : 1,
-      "pointIndex" : 743,
-      "time" : 68.76,
-      "type" : "safetyStop",
-      "value" : 6952
-    },
-    {
-      "flags" : 1,
-      "pointIndex" : 4092,
-      "time" : 376.65,
-      "type" : "violation",
-      "value" : 6420
-    },
-    {
-      "flags" : 2,
-      "pointIndex" : 4159,
-      "time" : 382.77,
-      "type" : "violation",
-      "value" : 6420
-    },
-    {
-      "flags" : 2,
-      "pointIndex" : 8940,
-      "time" : 822.15,
-      "type" : "violation",
-      "value" : 6420
-    },
-    {
-      "flags" : 1,
-      "pointIndex" : 8954,
-      "time" : 823.25,
-      "type" : "ceiling",
-      "value" : 6931
-    },
-    {
-      "flags" : 1,
-      "pointIndex" : 8955,
-      "time" : 823.27,
-      "type" : "decoStop",
-      "value" : 6950
-    },
     {
       "flags" : 1,
       "pointIndex" : 11765,
@@ -2817,123 +2768,60 @@
       "value" : 6149
     },
     {
-      "flags" : 2,
-      "pointIndex" : 11778,
-      "time" : 1082.25,
-      "type" : "ascent",
-      "value" : 6149
-    },
-    {
       "flags" : 1,
       "pointIndex" : 14150,
       "time" : 1300.32,
-      "type" : "bookmark",
-      "value" : 6684
-    },
-    {
-      "flags" : 2,
-      "pointIndex" : 14258,
-      "time" : 1310.35,
-      "type" : "bookmark",
+      "type" : "airTime",
       "value" : 6684
     },
     {
       "flags" : 1,
-      "pointIndex" : 14267,
+      "pointIndex" : 14266,
       "time" : 1311.15,
       "type" : "ascent",
       "value" : 6149
     },
     {
-      "flags" : 2,
-      "pointIndex" : 14314,
-      "time" : 1315.25,
-      "type" : "ascent",
-      "value" : 6149
-    },
-    {
       "flags" : 1,
-      "pointIndex" : 15228,
+      "pointIndex" : 15227,
       "time" : 1398.35,
       "type" : "ascent",
       "value" : 6149
     },
     {
-      "flags" : 2,
-      "pointIndex" : 15285,
-      "time" : 1403.45,
-      "type" : "ascent",
-      "value" : 6149
-    },
-    {
       "flags" : 1,
-      "pointIndex" : 15455,
+      "pointIndex" : 15454,
       "time" : 1418.75,
       "type" : "ascent",
       "value" : 6149
     },
     {
-      "flags" : 2,
-      "pointIndex" : 15490,
-      "time" : 1421.85,
-      "type" : "ascent",
-      "value" : 6149
-    },
-    {
       "flags" : 1,
-      "pointIndex" : 16276,
+      "pointIndex" : 16275,
       "time" : 1493.65,
       "type" : "decoStop",
       "value" : 6947
     },
     {
       "flags" : 1,
-      "pointIndex" : 16377,
+      "pointIndex" : 16376,
       "time" : 1502.95,
       "type" : "decoStop",
       "value" : 6947
     },
     {
       "flags" : 1,
-      "pointIndex" : 18605,
+      "pointIndex" : 18604,
       "time" : 1708.55,
       "type" : "safetyStop",
       "value" : 6949
-    },
-    {
-      "flags" : 1,
-      "pointIndex" : 20785,
-      "time" : 1908.8,
-      "type" : "bookmark",
-      "value" : 6697
-    },
-    {
-      "flags" : 2,
-      "pointIndex" : 20894,
-      "time" : 1918.81,
-      "type" : "bookmark",
-      "value" : 6697
-    },
-    {
-      "flags" : 1,
-      "pointIndex" : 24527,
-      "time" : 2248.59,
-      "type" : "bookmark",
-      "value" : 6717
-    },
-    {
-      "flags" : 2,
-      "pointIndex" : 24529,
-      "time" : 2248.68,
-      "type" : "bookmark",
-      "value" : 6684
     }
   ],
   "fieldStats" : {
     "currentGas" : {
       "max" : 0,
       "min" : 0,
-      "nonNilCount" : 24531,
+      "nonNilCount" : 23745,
       "roundedSum" : 0
     },
     "decoStop" : {
@@ -2957,26 +2845,26 @@
     "pressure" : {
       "max" : 225.578,
       "min" : 79.078,
-      "nonNilCount" : 24528,
-      "roundedSum" : 3058058.244
+      "nonNilCount" : 23742,
+      "roundedSum" : 2995537.965
     },
     "rbt" : {
       "max" : 42,
       "min" : 13,
-      "nonNilCount" : 23556,
-      "roundedSum" : 622644
+      "nonNilCount" : 22770,
+      "roundedSum" : 589658
     },
     "tankPressure" : {
       "max" : 225.578,
       "min" : 79.078,
-      "nonNilCount" : 24528,
-      "roundedSum" : 3058058.244
+      "nonNilCount" : 23742,
+      "roundedSum" : 2995537.965
     },
     "temperature" : {
       "max" : 24.3,
       "min" : 20.85,
-      "nonNilCount" : 24449,
-      "roundedSum" : 514991.89
+      "nonNilCount" : 23663,
+      "roundedSum" : 498213.25
     },
     "tts" : {
       "max" : 384,
@@ -2986,20 +2874,26 @@
     }
   },
   "gasMixes" : [
-
+    {
+      "helium" : 0,
+      "oxygen" : 0.21
+    }
   ],
+  "gfHigh" : 85,
+  "gfLow" : 85,
   "maxDepth" : 33.113,
   "maxTemperature" : 24.3,
   "minTemperature" : 20.85,
-  "profileCount" : 24531,
-  "streamSHA256" : "fe90c5a0bdb5ee53d39f58fc31ac378b29ec9c60416b7fe2d109bbf36169e8cd",
+  "profileCount" : 23745,
+  "salinity" : 1.02,
+  "streamSHA256" : "39bced52e5fa90636e283bcb3efbc03c3672d6a7224a4d0b6c3d589859a5f229",
   "strideStep" : 500,
   "stridedPoints" : [
     {
       "currentGas" : 0,
       "depth" : 0,
       "eventTypes" : [
-        "gasChange"
+
       ],
       "index" : 0,
       "tankPressures" : {
@@ -3442,7 +3336,7 @@
         "0" : 98.656
       },
       "temperature" : 20.88,
-      "time" : 1332.05
+      "time" : 1332.15
     },
     {
       "currentGas" : 0,
@@ -3457,7 +3351,7 @@
         "0" : 96.063
       },
       "temperature" : 20.87,
-      "time" : 1377.58
+      "time" : 1377.68
     },
     {
       "currentGas" : 0,
@@ -3472,7 +3366,7 @@
         "0" : 93.297
       },
       "temperature" : 20.87,
-      "time" : 1422.71
+      "time" : 1422.81
     },
     {
       "currentGas" : 0,
@@ -3487,7 +3381,7 @@
         "0" : 91.734
       },
       "temperature" : 20.86,
-      "time" : 1468.55
+      "time" : 1468.65
     },
     {
       "currentGas" : 0,
@@ -3502,7 +3396,7 @@
         "0" : 90.094
       },
       "temperature" : 20.87,
-      "time" : 1514.18
+      "time" : 1514.28
     },
     {
       "currentGas" : 0,
@@ -3517,7 +3411,7 @@
         "0" : 88.906
       },
       "temperature" : 20.91,
-      "time" : 1560.32
+      "time" : 1560.43
     },
     {
       "currentGas" : 0,
@@ -3532,7 +3426,7 @@
         "0" : 88.016
       },
       "temperature" : 20.91,
-      "time" : 1606.04
+      "time" : 1606.06
     },
     {
       "currentGas" : 0,
@@ -3547,7 +3441,7 @@
         "0" : 86.922
       },
       "temperature" : 20.91,
-      "time" : 1652.41
+      "time" : 1652.51
     },
     {
       "currentGas" : 0,
@@ -3562,7 +3456,7 @@
         "0" : 85.906
       },
       "temperature" : 20.92,
-      "time" : 1698.75
+      "time" : 1698.85
     },
     {
       "currentGas" : 0,
@@ -3577,7 +3471,7 @@
         "0" : 84.75
       },
       "temperature" : 20.92,
-      "time" : 1744.59
+      "time" : 1744.69
     },
     {
       "currentGas" : 0,
@@ -3592,7 +3486,7 @@
         "0" : 83.922
       },
       "temperature" : 21.04,
-      "time" : 1790.43
+      "time" : 1790.53
     },
     {
       "currentGas" : 0,
@@ -3607,7 +3501,7 @@
         "0" : 82.891
       },
       "temperature" : 21.06,
-      "time" : 1836.67
+      "time" : 1836.77
     },
     {
       "currentGas" : 0,
@@ -3622,7 +3516,7 @@
         "0" : 82.328
       },
       "temperature" : 20.94,
-      "time" : 1882.41
+      "time" : 1882.51
     },
     {
       "currentGas" : 0,
@@ -3637,7 +3531,7 @@
         "0" : 81.172
       },
       "temperature" : 20.94,
-      "time" : 1928.75
+      "time" : 1928.85
     },
     {
       "currentGas" : 0,
@@ -3652,7 +3546,7 @@
         "0" : 79.625
       },
       "temperature" : 21.01,
-      "time" : 1974.69
+      "time" : 1974.79
     },
     {
       "currentGas" : 0,
@@ -3661,13 +3555,13 @@
 
       ],
       "index" : 22000,
-      "pressure" : 79.078,
+      "pressure" : 79.234,
       "rbt" : 42,
       "tankPressures" : {
-        "0" : 79.078
+        "0" : 79.234
       },
       "temperature" : 21.07,
-      "time" : 2019.92
+      "time" : 2036.86
     },
     {
       "currentGas" : 0,
@@ -3676,31 +3570,28 @@
 
       ],
       "index" : 22500,
-      "pressure" : 79.438,
+      "pressure" : 79.609,
       "rbt" : 42,
       "tankPressures" : {
-        "0" : 79.438
+        "0" : 79.609
       },
       "temperature" : 21.28,
-      "time" : 2064.95
+      "time" : 2100.55
     },
     {
       "currentGas" : 0,
-      "decoKind" : "ndl",
       "depth" : 0,
       "eventTypes" : [
 
       ],
       "index" : 23000,
-      "ndl" : 0,
-      "pressure" : 79.641,
+      "pressure" : 79.703,
       "rbt" : 42,
       "tankPressures" : {
-        "0" : 79.641
+        "0" : 79.703
       },
-      "temperature" : 21.47,
-      "time" : 2110.03,
-      "tts" : 0
+      "temperature" : 21.6,
+      "time" : 2159.97
     },
     {
       "currentGas" : 0,
@@ -3709,51 +3600,21 @@
 
       ],
       "index" : 23500,
-      "pressure" : 79.703,
-      "rbt" : 42,
-      "tankPressures" : {
-        "0" : 79.703
-      },
-      "temperature" : 21.49,
-      "time" : 2155.31
-    },
-    {
-      "currentGas" : 0,
-      "depth" : 0,
-      "eventTypes" : [
-
-      ],
-      "index" : 24000,
       "pressure" : 79.766,
       "rbt" : 42,
       "tankPressures" : {
         "0" : 79.766
       },
       "temperature" : 21.6,
-      "time" : 2201.05
-    },
-    {
-      "currentGas" : 0,
-      "depth" : 0,
-      "eventTypes" : [
-
-      ],
-      "index" : 24500,
-      "pressure" : 79.766,
-      "rbt" : 42,
-      "tankPressures" : {
-        "0" : 79.766
-      },
-      "temperature" : 21.6,
-      "time" : 2246.42
+      "time" : 2219.61
     }
   ],
   "tanks" : [
     {
       "beginPressure" : 225.57812,
-      "endPressure" : 80.51562,
-      "gasMix" : 4294967295,
-      "volume" : 0
+      "endPressure" : 79.76562,
+      "gasMix" : 0,
+      "volume" : 12.000000104308128
     }
   ],
   "vendorSampleCounts" : [

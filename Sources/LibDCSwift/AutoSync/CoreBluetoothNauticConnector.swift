@@ -92,23 +92,34 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
         let devicePtr = DispatchQueue.main.sync { manager.openedDeviceDataPtr }
         guard let devicePtr, let device = devicePtr.pointee.device else {
             DispatchQueue.main.sync { manager.close(clearDevicePtr: true) }
+            // The caller lets go of the link lease once this throws.
+            manager.waitForPendingTeardown()
             throw NauticAutoSyncError.connectFailed("\(name) opened without a device")
         }
         let name = self.name
         return DCDeviceNauticLink(device: device) { closing in
-            let closed: CBPeripheral? = DispatchQueue.main.sync {
-                // The manager holds one open device; never close another session's.
-                guard manager.openedDeviceDataPtr?.pointee.device == closing else {
-                    logWarning("[NauticAutoSync] \(name)'s link was already replaced; not closing the open device")
-                    return nil
-                }
-                let peripheral = manager.peripheral
-                manager.close(clearDevicePtr: true)
-                return peripheral
-            }
-            // close() cancels the link 0.5 s later; a session opened before then loses its link to that cancel.
-            if let closed { CoreBluetoothManager.waitForDisconnect(closed, timeout: 3) }
+            Self.closeSession(of: closing, name: name, on: manager)
         }
+    }
+
+    /// Returns once the device's close has run and the watch has disconnected, so the link lease is let go of only
+    /// then. Call off main.
+    static func closeSession(of device: OpaquePointer, name: String, on manager: CoreBluetoothManager) {
+        var peripheral: CBPeripheral?
+        let closed: Bool = DispatchQueue.main.sync {
+            // The manager holds one open device; never close another session's.
+            guard manager.openedDeviceDataPtr?.pointee.device == device else {
+                logWarning("[NauticAutoSync] \(name)'s link was already replaced; not closing the open device")
+                return false
+            }
+            peripheral = manager.peripheral
+            manager.close(clearDevicePtr: true)
+            return true
+        }
+        guard closed else { return }
+        // close() returns before the device's close and the link's cancel; a session opened sooner loses its link.
+        manager.waitForPendingTeardown()
+        if let peripheral { CoreBluetoothManager.waitForDisconnect(peripheral, timeout: 3) }
     }
 
     /// iOS never times out a pending connect; cancelling it makes the open's wait for the link fail.

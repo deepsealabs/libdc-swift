@@ -66,7 +66,7 @@ public final class NauticAutoSync {
 
     public struct DownloadedDive: Equatable {
         public let id: UInt32
-        /// Decompressed SBEM0103 profile with the /Summary appended, as `SuuntoNauticExplorer.download` returns it.
+        /// The dive as `SuuntoNauticExplorer.download` returns it: SUMMARY_SIZE(4), the /Summary, the decompressed profile.
         public let data: Data
         /// False when the bytes still don't match the listed size after every retry.
         public let isComplete: Bool
@@ -113,6 +113,9 @@ public final class NauticAutoSync {
     public let events: AsyncStream<Event>
     public weak var delegate: NauticAutoSyncDelegate?
     /// Called off the main thread for each dive before it is marked synced; throw to keep it pending.
+    /// The watch lists every activity, so an Ocean's runs and other sports come here too, and
+    /// `GenericParser.parseDiveData` throws `sampleProcessingFailed(DC_STATUS_UNSUPPORTED)` for one.
+    /// Return without throwing for it: a dive given up on is downloaded whole again on the next run.
     public var onDive: ((DownloadedDive) throws -> Void)?
 
     private let connector: NauticSyncConnector

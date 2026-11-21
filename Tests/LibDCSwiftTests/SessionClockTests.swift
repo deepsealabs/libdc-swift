@@ -180,7 +180,7 @@ final class SessionClockTests: XCTestCase {
     }
 
     func testParsersWithoutAClockHookIgnoreIt() throws {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "sbem"))
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
         let bytes = [UInt8](try Data(contentsOf: url))
         let parsed: (GenericParser.DeviceClock?) throws -> DiveData = { clock in
             try bytes.withUnsafeBufferPointer {

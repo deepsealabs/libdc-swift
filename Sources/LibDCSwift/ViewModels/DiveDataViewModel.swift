@@ -33,6 +33,9 @@ public class DiveDataViewModel: ObservableObject {
     /// `useFingerprint: false` tries them again. Their fingerprints, newest
     /// first; empty otherwise.
     @Published public var lastUnreadableDives: [Data] = []
+    /// Suunto Nautic/Ocean only: the logbook entries the most recent download left out because they aren't dives
+    /// (the Ocean also logs runs and other sports). Not failures; 0 otherwise.
+    @Published public var lastNonDivesSkipped: Int = 0
     /// Suunto Nautic/Ocean only: false when the watch never answered the open's
     /// handshake (often asleep), so a failed or empty download may just need a
     /// button press on the watch; nil for other computers.
@@ -472,6 +475,7 @@ public class DiveDataViewModel: ObservableObject {
         status = ""
         lastDownloadInterruption = nil
         lastHandshakeAcknowledged = nil
+        lastNonDivesSkipped = 0
     }
 }
 

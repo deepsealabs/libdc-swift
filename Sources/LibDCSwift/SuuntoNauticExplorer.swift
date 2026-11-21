@@ -134,8 +134,8 @@ public enum SuuntoNauticExplorer {
 
     /// Download and decompress a specific logbook entry, given its
     /// numeric id as it appears in a "/Logbook/byId/<id>/..." path (e.g.
-    /// "1787752091"). Returns the decoded SBEM0103 TLV stream, ready for
-    /// `decode(sbemData:)` below.
+    /// "1787752091"). Returns the dive as the driver stores it, SUMMARY_SIZE(4)
+    /// SUMMARY PROFILE, ready for `decode(sbemData:)` below.
     public static func download(device devicePtr: UnsafeMutablePointer<device_data_t>, logbookID: String) throws -> Data {
         guard let dcDevice = devicePtr.pointee.device else {
             throw ExplorerError.notConnected
@@ -321,8 +321,7 @@ public enum SuuntoNauticExplorer {
 
     /// A decoded dive profile. Populated from the standard dc_parser_t
     /// fields/samples: depth, temperature, tank pressure, and (from the
-    /// appended /Summary section) gradient factors and gas mix. See
-    /// suunto_nautic.h for what's still missing (dive events, datetime).
+    /// /Summary section in front of the profile) gradient factors and gas mix.
     public struct DecodedProfile {
         public struct DepthSample { public let time: TimeInterval; public let depth: Double }
         public struct TemperatureSample { public let time: TimeInterval; public let temperature: Double }
@@ -383,7 +382,8 @@ public enum SuuntoNauticExplorer {
         }
         /// Real-time gradient factors (percent). No standard libdivecomputer
         /// channel, so carried via DC_SAMPLE_VENDOR.
-        public struct GradientFactorSample { public let time: TimeInterval; public let gf99: Int; public let gfSurface: Int; public let gfLeading: Int }
+        /// `gfLeading` is nil when the record carries only GF99 and the surface GF, as the current parser emits it.
+        public struct GradientFactorSample { public let time: TimeInterval; public let gf99: Int; public let gfSurface: Int; public let gfLeading: Int? }
         public struct Event {
             public let time: TimeInterval
             public let type: UInt32
@@ -463,8 +463,8 @@ public enum SuuntoNauticExplorer {
         public var gradientFactorProfile: [GradientFactorSample]
     }
 
-    /// Decode a downloaded (and already decompressed) SBEM0103 stream
-    /// into a real dive profile. Calls the same dc_parser_t machinery
+    /// Decode a downloaded dive (SUMMARY_SIZE(4) SUMMARY PROFILE, as the driver
+    /// stores it) into a real dive profile. Calls the same dc_parser_t machinery
     /// GenericParser uses, but directly — see the type-level doc comment
     /// for why this bypasses GenericParser.parseDiveData.
     ///
@@ -580,8 +580,8 @@ public enum SuuntoNauticExplorer {
                                                 mx: i16(13), my: i16(15), mz: i16(17)))
                 case 4 where size >= 11: // DiveRouteFeatures: 5x uint16 (algo inputs, not the track)
                     collector.diveRouteFeatures.append(.init(time: t, features: [u16(1), u16(3), u16(5), u16(7), u16(9)]))
-                case 5 where size >= 7: // real-time gradient factors
-                    collector.gf.append(.init(time: t, gf99: i16(1), gfSurface: i16(3), gfLeading: i16(5)))
+                case 5 where size >= 5: // real-time gradient factors
+                    collector.gf.append(.init(time: t, gf99: i16(1), gfSurface: i16(3), gfLeading: size >= 7 ? i16(5) : nil))
                 default:
                     break
                 }
