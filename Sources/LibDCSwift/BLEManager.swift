@@ -311,6 +311,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// an unrecoverable I/O error.
     /// A cancelled write (`isIOCancelled()`) returns 2; `ble_write` reports `DC_STATUS_CANCELLED`.
     @objc public func write(_ data: Data!) -> Int {
+        warnIfOnMainThread("write")
         if isIOCancelled() || isLinkLost() { return 2 }
         guard let peripheral = self.peripheral,
               let characteristic = self.writeCharacteristic else { return 2 }
@@ -411,6 +412,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     }
 
     @objc public func readDataPartial(_ requested: Int32) -> Data? {
+        warnIfOnMainThread("readDataPartial")
         let requestedInt = Int(requested)
         let startTime = Date()
         // Honor the timeout the backend requested via dc_iostream_set_timeout; fall back to 3s
@@ -509,6 +511,11 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     /// True while a close waits for a download to stop; link I/O then answers `DC_STATUS_CANCELLED`.
     @objc public func isIOCancelled() -> Bool {
         retrievalClose.isCancelRequested
+    }
+
+    /// For the ObjC bridge's blocking calls.
+    @objc public func warnIfOnMainThread(_ caller: String) {
+        LibDCSwift.warnIfOnMainThread(caller)
     }
 
     /// So close() waits for this download instead of freeing the device under it.
@@ -1353,6 +1360,13 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     @objc public func close() {
         close(clearDevicePtr: false)
     }
+}
+
+/// Link I/O waits on CoreBluetooth callbacks, which are delivered on main, so on main it stalls the app.
+func warnIfOnMainThread(_ caller: String) {
+    guard Thread.isMainThread else { return }
+    logWarning("\(caller) ran on the main thread, where the BLE callbacks it waits for are delivered")
+    assertionFailure("\(caller) must not run on the main thread")
 }
 
 // MARK: - Extensions
