@@ -198,6 +198,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// Set `ioCancelled` once this many bytes of the next /Data stream have been read.
         var cancelIOAfterStreamBytes: Int?
         private var streamBytesRead: Int?
+        /// /Info's product: "Ocean" on an Ocean, "Nautic" on a Nautic.
+        var product = "Ocean"
         /// Value resources the watch can be subscribed to.
         var unsyncedCount: UInt16 = 0
         var busy: UInt8 = 0
@@ -412,15 +414,15 @@ final class SuuntoNauticTransportTests: XCTestCase {
         }
 
         /// /Info as the watch serves it: TYPE(2) SIZE(2) ?(2), then a struct led by the offsets of its eight strings.
-        private static let info: [UInt8] = {
-            let strings = ["Suunto", "Ocean", "Porvoo", "T", "2604C3003306", "01385D425091602000000100034252D12543", "2.51.28", "4252D1"]
+        private var info: [UInt8] {
+            let strings = ["Suunto", product, "Porvoo", "T", "2604C3003306", "01385D425091602000000100034252D12543", "2.51.28", "4252D1"]
             var offsets: [UInt8] = [], text: [UInt8] = []
             for string in strings {
-                offsets += u32(UInt32(strings.count * 4 + text.count))
+                offsets += Self.u32(UInt32(strings.count * 4 + text.count))
                 text += Array(string.utf8) + [0x00]
             }
             return [0x02, 0x2F, 0x19, 0x25, 0x01, 0x00] + offsets + text
-        }()
+        }
 
         private var sortedDives: [FakeDive] { dives.sorted { $0.id < $1.id } }
 
@@ -617,7 +619,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     let header: [UInt8] = [0x0D, 0x00, 0x02, len[0], len[1], 0x00, len[0], len[1], 0x00, len[0], len[1]]
                     send(dataFrame(msgid: msgid, handle: h, status: end < content.count ? 100 : 200, body: header + data))
                 } else if path == "/Info" {
-                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: Self.info))
+                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: info))
                 } else {
                     send(dataFrame(msgid: msgid, handle: h, status: 404, body: []))
                 }
@@ -1967,6 +1969,77 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(got.map(\.data), newestFirst.map { $0.blob })
         XCTAssertEqual(watch.streamedPaths, newestFirst.map { "/Logbook/byId/\($0.id)/Data" })
         XCTAssertEqual(watch.heldIdHandles, [])
+    }
+
+    // MARK: - #29: DEVINFO names the model from /Info's product
+
+    private final class DevinfoEvents {
+        var devinfo: dc_event_devinfo_t?
+    }
+
+    /// The DEVINFO a download of `watch` reports.
+    private func devinfo(of watch: FakeWatch) throws -> dc_event_devinfo_t {
+        let device = try open(watch, logging: true)
+        let events = DevinfoEvents()
+        XCTAssertEqual(dc_device_set_events(device, DC_EVENT_DEVINFO.rawValue, { _, event, data, userdata in
+            guard event == DC_EVENT_DEVINFO, let data, let userdata else { return }
+            Unmanaged<DevinfoEvents>.fromOpaque(userdata).takeUnretainedValue().devinfo =
+                data.assumingMemoryBound(to: dc_event_devinfo_t.self).pointee
+        }, Unmanaged.passUnretained(events).toOpaque()), DC_STATUS_SUCCESS)
+        XCTAssertEqual(foreach(device).0, DC_STATUS_SUCCESS)
+        return try XCTUnwrap(events.devinfo)
+    }
+
+    private func oceanOrNautic(_ product: String) -> FakeWatch {
+        let watch = FakeWatch(dives: [FakeDive(id: 1_789_100_000, profileBytes: 600, summaryBytes: 100)])
+        watch.product = product
+        return watch
+    }
+
+    func testDevinfoReportsAnOceanAsModel1AndANauticAsModel0() throws {
+        captureSink()
+        for (product, model) in [("Ocean", UInt32(1)), ("Nautic", 0), ("Nautic S", 0)] {
+            let info = try devinfo(of: oceanOrNautic(product))
+            XCTAssertEqual(info.model, model, product)
+            XCTAssertEqual(info.serial, 0xC300_3306, product)
+            XCTAssertEqual(info.firmware, 2 << 16 | 51 << 8 | 28, product)
+        }
+        XCTAssertEqual(Self.sinkLines.filter { $0.level == "WARN" }.map(\.message), [])
+    }
+
+    func testAnUnknownProductIsReportedAsANauticWithAWarning() throws {
+        captureSink()
+        XCTAssertEqual(try devinfo(of: oceanOrNautic("Race")).model, 0)
+        XCTAssertEqual(Self.sinkLines.filter { $0.level == "WARN" }.map { $0.message.components(separatedBy: "(): ").last },
+                       ["Unknown product 'Race' in the device info."])
+    }
+
+    /// Build 32's log: "Updating stored device from suuntoNautic model 1 to suuntoNautic model 0 for Suunto Ocean". The
+    /// Explorer's download stores DEVINFO's model as it comes, and the driver reported 0 for both watches.
+    func testTheExplorersDownloadKeepsAStoredOceanAtModel1() throws {
+        let suiteName = "com.libdcswift.tests.nautic-model.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = DeviceStorage(userDefaults: defaults)
+        let ptr = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        ptr.initialize(to: device_data_t())
+        defer { ptr.deallocate() }
+        ptr.pointee.have_devinfo = 1
+
+        func download(_ product: String, stored: UInt32, session: Bool = false) throws -> UInt32? {
+            storage.storeDevice(uuid: "WATCH", name: "Suunto \(product) Test", family: .suuntoNautic, model: stored)
+            ptr.pointee.devinfo = try devinfo(of: oceanOrNautic(product))
+            DeviceConfiguration.updateDeviceConfigurationFromHardware(
+                deviceAddress: "WATCH", deviceDataPtr: ptr, deviceName: "Suunto \(product) Test", storage: storage,
+                requireKnownModel: session)
+            return storage.getStoredDevice(uuid: "WATCH")?.model
+        }
+
+        XCTAssertEqual(try download("Ocean", stored: 1), 1)
+        XCTAssertEqual(try download("Ocean", stored: 0), 1, "an Ocean an earlier build stored as model 0 is put right")
+        XCTAssertEqual(try download("Nautic", stored: 0), 0)
+        XCTAssertEqual(try download("Ocean", stored: 0, session: true), 1, "a session download puts it right too")
+        XCTAssertEqual(try download("Nautic", stored: 0, session: true), 0)
     }
 
     // MARK: - Full logging

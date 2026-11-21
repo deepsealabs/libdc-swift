@@ -519,7 +519,8 @@ public class DiveLogRetriever {
         // 2. Stored/Forced Configuration (What the user selected)
         // 3. Name-based Detection (Fallback)
         
-        if context.detectedModel != 0 {
+        // Without a descriptor there's no family to read a reported model under, so it goes by the stored one.
+        if context.detectedModel != 0, context.detectedFamily != DC_FAMILY_NULL {
             familyToUse = context.detectedFamily
             modelToUse = context.detectedModel
         } else if let stored = context.deviceStorage.getStoredDevice(uuid: context.deviceUUID) {

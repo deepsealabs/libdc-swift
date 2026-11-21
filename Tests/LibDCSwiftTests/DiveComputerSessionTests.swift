@@ -260,6 +260,8 @@ final class DiveComputerSessionTests: XCTestCase {
 
     func testAFirstParseRejectionHoldsTheFingerprintAndReportsTheCount() throws {
         let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
+        // A product the driver doesn't know, so DEVINFO has no model that would replace the stored one.
+        watch.product = "Unknown"
         let stores = stores()
         // A stored model no descriptor knows: every dive downloads, and none can be parsed.
         stores.devices.storeDevice(uuid: "FAKE-UUID", name: "Suunto Ocean 123456", family: .suuntoNautic, model: 99)
