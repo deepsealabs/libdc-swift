@@ -53,7 +53,8 @@ let package = Package(
                 .define("ENABLE_LOGGING"),
                 // Never HAVE_CONFIG_H (a local ./configure leaves an untracked config.h); other feature macros stay unset.
                 customBaudDefine,
-                .define("HAVE_CLOCK_GETTIME", .when(platforms: [.macOS]))
+                // Without it, timer.c falls back to the wall clock, and a clock change breaks driver deadlines.
+                .define("HAVE_CLOCK_GETTIME")
             ]
         ),
         .target(
