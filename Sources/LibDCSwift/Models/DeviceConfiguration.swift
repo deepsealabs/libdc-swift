@@ -336,6 +336,7 @@ import LibDCBridge
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)? = nil
     ) -> Bool {
+        warnIfOnMainThread("openBLEDevice")
         connectionLock.lock()
         defer { connectionLock.unlock() }
         return openBLEDeviceLocked(name: name, deviceAddress: deviceAddress, forcedModel: forcedModel)
@@ -344,9 +345,10 @@ import LibDCBridge
     /// The manager holds one open device on one link. Opening another on top
     /// of it leaves the old link up and its state behind, so the new open can
     /// talk to the old watch (libdc-swift#75). Close it and wait for the
-    /// disconnect first, the same handoff auto download makes. While an auto
-    /// download or a `DiveComputerSession` holds its lease, the device is that
-    /// session's to close.
+    /// device's close and the disconnect first, the same handoff auto download
+    /// makes. While an auto download or a `DiveComputerSession` holds its lease,
+    /// the device is that session's to close; the connect still waits for a
+    /// close running on the old link (`connect(toDevice:)`).
     private static func closeOpenDeviceFirst(opening name: String) {
         guard !Thread.isMainThread else {
             logWarning("openBLEDevice called on main; not closing the open device first")
