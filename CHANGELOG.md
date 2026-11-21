@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `connect(toDevice:)`, and so every BLE open, waits off main (at most 30 s) for a close still running on the old link, so a new link never starts under the old device's quit command, with or without an auto download or session lease held. `closeAndWaitForDisconnect` (the close `openBLEDevice` makes of a device that's still open) and the Nautic/Ocean auto download session's close wait for the device's close before they wait for the disconnect, so the auto download lets go of its link lease only after it
 - A close during a download (a user or App Intent cancel) clears the cancel it set on the device before the device's close runs. Left set, the Shearwater, Oceanic/Aqualung and OSTC3 drivers return `DC_STATUS_CANCELLED` before sending their shutdown or quit, so the computer stayed on "WAIT CMD" or "Sending Dive"
 - In debug builds, `write`, `readDataPartial`, `ble_sleep` and `openBLEDevice` assert that they aren't running on the main thread; release builds log a warning instead
+- DC Tester: turning Auto download on from a connected watch's device screen opens the live log, not a blank page with only a back button. The device screen's pop and the live log's push landed on two `navigationDestination(isPresented:)` in the same update; both screens now share one navigation path, so the handoff is a single swap. The Auto download card also names the watch next to its status while it runs (#110)
 
 ## [1.22.0] - 2026-11-17
 ### Added
