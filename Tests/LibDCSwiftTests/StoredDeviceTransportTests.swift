@@ -173,6 +173,64 @@ final class StoredDeviceTransportTests: XCTestCase {
         XCTAssertFalse(storage.reconcileUUID(name: "Perdix Test", newUUID: "PERIPHERAL"))
     }
 
+#if os(macOS)
+    func testACableRecordFollowsTheFamilyThatOpenedThroughTheCable() throws {
+        let storage = DeviceStorage(userDefaults: isolatedSuite("cable-family"))
+        let locator = Self.adapter("ADAPTER-9")
+        storage.storeDevice(uuid: "serial:cable", name: "Suunto D9", family: .suuntoD9, model: 0x0E, transport: .serial, locator: locator)
+        var descriptor: OpaquePointer?
+        XCTAssertEqual(find_descriptor_by_model(&descriptor, DC_FAMILY_SUUNTO_VYPER, 0x0A), DC_STATUS_SUCCESS)
+        defer { dc_descriptor_free(descriptor) }
+        let ptr = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        ptr.initialize(to: device_data_t())
+        defer { ptr.deallocate() }
+        ptr.pointee.descriptor = descriptor
+        ptr.pointee.have_devinfo = 1
+        ptr.pointee.devinfo.model = 0x0A
+        DeviceConfiguration.updateDeviceConfigurationFromHardware(
+            deviceAddress: "serial:cable", deviceDataPtr: ptr, deviceName: "Suunto Vyper", storage: storage,
+            requireKnownModel: true, transport: .serial, locator: locator)
+        var stored = try XCTUnwrap(storage.getStoredDevice(uuid: "serial:cable"))
+        XCTAssertEqual(stored.family, .suuntoVyper, "a Vyper came through the cable a D9 used")
+        XCTAssertEqual(stored.model, 0x0A)
+
+        storage.storeDevice(uuid: "serial:cable", name: "Suunto D9", family: .suuntoD9, model: 0x0A, transport: .serial, locator: locator)
+        DeviceConfiguration.updateDeviceConfigurationFromHardware(
+            deviceAddress: "serial:cable", deviceDataPtr: ptr, deviceName: "Suunto Vyper", storage: storage,
+            requireKnownModel: true, transport: .serial, locator: locator)
+        XCTAssertEqual(storage.getStoredDevice(uuid: "serial:cable")?.family, .suuntoVyper, "the same model number, another family")
+
+        storage.storeDevice(uuid: "serial:cable", name: "Suunto D9", family: .suuntoD9, model: 0x0E, transport: .serial, locator: locator)
+        ptr.pointee.devinfo.model = 0
+        DeviceConfiguration.updateDeviceConfigurationFromHardware(
+            deviceAddress: "serial:cable", deviceDataPtr: ptr, deviceName: "Suunto Vyper", storage: storage,
+            requireKnownModel: true, transport: .serial, locator: locator)
+        stored = try XCTUnwrap(storage.getStoredDevice(uuid: "serial:cable"))
+        XCTAssertEqual(stored.family, .suuntoVyper)
+        XCTAssertEqual(stored.model, 0x0A, "no model reported: the opened descriptor's")
+    }
+
+    func testABLERecordKeepsItsStoredFamily() throws {
+        let storage = DeviceStorage(userDefaults: isolatedSuite("ble-family"))
+        storage.storeDevice(uuid: "PERIPHERAL", name: "Perdix", family: .shearwaterPetrel, model: 5)
+        var descriptor: OpaquePointer?
+        XCTAssertEqual(find_descriptor_by_model(&descriptor, DC_FAMILY_SUUNTO_VYPER, 0x0A), DC_STATUS_SUCCESS)
+        defer { dc_descriptor_free(descriptor) }
+        let ptr = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        ptr.initialize(to: device_data_t())
+        defer { ptr.deallocate() }
+        ptr.pointee.descriptor = descriptor
+        ptr.pointee.have_devinfo = 1
+        ptr.pointee.devinfo.model = 6
+        DeviceConfiguration.updateDeviceConfigurationFromHardware(
+            deviceAddress: "PERIPHERAL", deviceDataPtr: ptr, deviceName: "Perdix", storage: storage,
+            requireKnownModel: true, transport: .ble)
+        let stored = try XCTUnwrap(storage.getStoredDevice(uuid: "PERIPHERAL"))
+        XCTAssertEqual(stored.family, .shearwaterPetrel)
+        XCTAssertEqual(stored.model, 6)
+    }
+#endif
+
     // MARK: - Fingerprint key
 
     func testASerialZeroCableRecordKeysItsFingerprintByItsAdapter() {

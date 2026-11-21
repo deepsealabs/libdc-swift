@@ -1,0 +1,229 @@
+#if os(macOS)
+import XCTest
+import Clibdivecomputer
+import LibDCBridge
+@testable import LibDCSwift
+
+/// How errno, libdivecomputer statuses and download outcomes become `CableError`s, and what they say.
+final class CableErrorTests: XCTestCase {
+
+    func testOpenErrnoSplitsBusyFromNotPermitted() {
+        XCTAssertEqual(CableError(openErrno: EBUSY), .busy)
+        XCTAssertEqual(CableError(openErrno: EPERM), .permissionDenied, "a sandbox without device.serial")
+        XCTAssertEqual(CableError(openErrno: EACCES), .permissionDenied)
+        XCTAssertEqual(CableError(openErrno: ENOENT), .notFound)
+        XCTAssertEqual(CableError(openErrno: ENXIO), .notFound)
+        XCTAssertEqual(CableError(openErrno: ENODEV), .notFound)
+        XCTAssertEqual(CableError(openErrno: ENOTCONN, transport: .classicBTSerial), .bluetoothNotConnected)
+        XCTAssertEqual(CableError(openErrno: ENOTCONN), .portError(errno: ENOTCONN), "a USB-serial port says nothing about Bluetooth")
+        XCTAssertEqual(CableError(openErrno: EIO), .portError(errno: EIO))
+    }
+
+    func testThePreflightReportsErrno() throws {
+        XCTAssertEqual(SerialPortPreflight.check("/dev/cu.libdcswift-no-such-port"), .notFound)
+        try XCTSkipIf(getuid() == 0, "root opens anything")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("libdcswift-preflight-\(UUID().uuidString)")
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0]))
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(SerialPortPreflight.check(url.path), .permissionDenied)
+        // A path that opens has nothing to add to dc_serial_open's own status.
+        XCTAssertEqual(chmod(url.path, 0o600), 0)
+        XCTAssertNil(SerialPortPreflight.check(url.path))
+    }
+
+    func testTheErrnoProbeRunsOnlyForAFailedPortOpen() throws {
+        let missing = "/dev/cu.libdcswift-no-such-port"
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NODEVICE, path: missing), .notFound)
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_IO, path: missing), .notFound, "serial_posix maps EPERM, among others, to IO")
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NOACCESS, path: "/dev/null"), .busy, "it opens now: the race went the other way")
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NOMEMORY, path: missing), .protocolError(DC_STATUS_NOMEMORY))
+        try XCTSkipIf(getuid() == 0, "root opens anything")
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("libdcswift-probe-\(UUID().uuidString)")
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil, attributes: [.posixPermissions: 0]))
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(SerialPortPreflight.explain(DC_STATUS_NOACCESS, path: url.path), .permissionDenied)
+    }
+
+    func testAPortOpenFailureAfterThePreflight() {
+        XCTAssertEqual(CableError.portOpenFailed(DC_STATUS_NOACCESS), .busy)
+        XCTAssertEqual(CableError.portOpenFailed(DC_STATUS_NODEVICE), .notFound)
+        XCTAssertEqual(CableError.portOpenFailed(DC_STATUS_CANCELLED), .cancelled)
+        XCTAssertEqual(CableError.portOpenFailed(DC_STATUS_IO), .protocolError(DC_STATUS_IO))
+    }
+
+    func testADeviceFailureOnAnOpenPort() {
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_TIMEOUT, family: .suuntoD9, portPresent: true), .noResponse(.suuntoD9))
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_CANCELLED, family: .suuntoD9, portPresent: true), .cancelled)
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_IO, family: .suuntoD9, portPresent: false), .unplugged)
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_NODEVICE, family: .suuntoD9, portPresent: false), .unplugged)
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_IO, family: .suuntoD9, portPresent: true), .protocolError(DC_STATUS_IO))
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_NODEVICE, family: .suuntoEonSteel, portPresent: true), .unplugged,
+                       "a USB HID write that found the device gone before the registry did")
+        XCTAssertEqual(CableError.deviceFailed(DC_STATUS_PROTOCOL, family: .suuntoD9, portPresent: true),
+                       .protocolError(DC_STATUS_PROTOCOL))
+    }
+
+    func testAGonePortIsAnUnplugWhateverTheStatus() {
+        // serial_posix reads a vanished node as end of file, and a short read is TIMEOUT.
+        for status in [DC_STATUS_TIMEOUT, DC_STATUS_IO, DC_STATUS_NODEVICE, DC_STATUS_PROTOCOL, DC_STATUS_CANCELLED] {
+            XCTAssertEqual(CableError.deviceFailed(status, family: .suuntoD9, portPresent: false), .unplugged, "\(status)")
+        }
+    }
+
+    // MARK: - Download outcomes
+
+    private func session(path: String) throws -> DiveComputerSession {
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let stream = try DCCustomStream.open(backend: ProbeBackend(), transport: DC_TRANSPORT_SERIAL, context: context)
+        let session = try DiveComputerSession.open(
+            iostream: stream, context: try XCTUnwrap(context), family: DC_FAMILY_REEFNET_SENSUS, model: 1,
+            displayName: "Reefnet Sensus", storageKey: "serial:test",
+            locator: .serial(path: path, usbSerial: nil, vid: nil, pid: nil),
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
+        addTeardownBlock { session.close() }
+        return session
+    }
+
+    private func result(_ outcome: DiveDownloadResult.Outcome, dives: Int = 0) -> DiveDownloadResult {
+        DiveDownloadResult(outcome: outcome, divesDownloaded: dives)
+    }
+
+    func testDownloadOutcomesThatAreTheCables() throws {
+        let present = try session(path: "/dev/null")
+        XCTAssertNil(CableError(download: result(.completed, dives: 2), session: present))
+        XCTAssertNil(CableError(download: result(.noNewDives), session: present))
+        XCTAssertNil(CableError(download: result(.emptyRead), session: present))
+        XCTAssertNil(CableError(download: result(.parseRejected(count: 1, status: DC_STATUS_DATAFORMAT), dives: 3), session: present))
+        XCTAssertEqual(CableError(download: result(.cancelled), session: present), .cancelled)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: present), .noResponse(.reefnetSensus))
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 2), session: present),
+                       .protocolError(DC_STATUS_TIMEOUT), "a link that stalled after answering")
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_IO)), session: present), .protocolError(DC_STATUS_IO))
+
+        let gone = try session(path: "/dev/cu.libdcswift-no-such-port")
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_IO), dives: 1), session: gone), .unplugged)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: gone), .unplugged,
+                       "an end of file on a gone node, before discovery saw the removal")
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 2), session: gone), .unplugged,
+                       "checked before the stalled-link rule")
+        XCTAssertEqual(CableError(download: result(.cancelled), session: gone), .cancelled, "a cancel stays the user's")
+    }
+
+    func testAUSBHIDDownloadOnAGoneRegistryEntryIsAnUnplug() throws {
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let stream = try DCCustomStream.open(backend: ProbeBackend(), transport: DC_TRANSPORT_USBHID, context: context)
+        let session = try DiveComputerSession.open(
+            iostream: stream, context: try XCTUnwrap(context), family: DC_FAMILY_REEFNET_SENSUS, model: 1,
+            displayName: "Reefnet Sensus", storageKey: "usbhid:test",
+            locator: .usbHID(vid: 0x1493, pid: 0x0030, registryID: 0xFFFF_FFFF_FFFF_FFF0),
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
+        addTeardownBlock { session.close() }
+        // The registry says the device went, ahead of a removal callback still queued.
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_IO), dives: 1), session: session), .unplugged)
+        session.setPresenceCheck { true }
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_IO), dives: 1), session: session),
+                       .protocolError(DC_STATUS_IO), "the opener's check comes first")
+    }
+
+    func testAClosedSessionStillNamesItsFamily() throws {
+        let session = try session(path: "/dev/null")
+        session.close()
+        XCTAssertTrue(session.isClosed)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: session), .noResponse(.reefnetSensus),
+                       "read from the session, not the freed descriptor")
+    }
+
+    func testAnUnpluggedSessionReadsAsUnplugged() throws {
+        let session = try session(path: "/dev/null")
+        session.markUnplugged()
+        XCTAssertTrue(session.isCancelled)
+        XCTAssertTrue(session.wasUnplugged)
+        XCTAssertEqual(CableError(download: result(.cancelled), session: session), .unplugged)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_IO)), session: session), .unplugged)
+        XCTAssertNil(CableError(download: result(.completed, dives: 1), session: session), "it finished first")
+    }
+
+    private func pairedSession(receivedBytes: Bool) throws -> DiveComputerSession {
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let stream = try DCCustomStream.open(backend: ProbeBackend(), transport: DC_TRANSPORT_SERIAL, context: context)
+        let session = try DiveComputerSession.open(
+            iostream: stream, context: try XCTUnwrap(context), family: DC_FAMILY_SHEARWATER_PETREL, model: 3,
+            displayName: "Shearwater Petrel", storageKey: "btserial:test", locator: .classicBTSerial(path: "/dev/null"),
+            deviceStorage: DeviceStorage(userDefaults: isolatedDefaults("dev")), lease: DiveComputerSessionLease())
+        session.setBytesProbe { receivedBytes }
+        addTeardownBlock { session.close() }
+        return session
+    }
+
+    func testAClassicBluetoothLinkThatNeverAnsweredOrDroppedSaysSo() throws {
+        let silent = try pairedSession(receivedBytes: false)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: silent), .bluetoothNotConnected)
+        let dropped = try pairedSession(receivedBytes: true)
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 2), session: dropped), .bluetoothLinkLost)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_IO)), session: dropped), .bluetoothLinkLost,
+                       "the paired port stays, so it never reads as an unplug")
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_PROTOCOL)), session: dropped), .protocolError(DC_STATUS_PROTOCOL))
+        XCTAssertNil(CableError(download: result(.parseRejected(count: 1, status: DC_STATUS_DATAFORMAT)), session: dropped))
+        XCTAssertEqual(CableError(download: result(.interrupted(DC_STATUS_TIMEOUT), dives: 1), session: silent), .bluetoothLinkLost,
+                       "a dive arrived, so the computer answered")
+    }
+
+    func testTheLinkLostVerdictOutlivesTheClose() throws {
+        final class Tap { var bytesRead = 0 }
+        let session = try pairedSession(receivedBytes: false)
+        var tap: Tap? = Tap()
+        weak var released = tap
+        tap?.bytesRead = 12
+        // Wired as SerialTapFactory.attach does: the probe reads a tap that only the device's close holds.
+        session.onClosing { [tap] in _ = tap }
+        session.setBytesProbe { (released?.bytesRead ?? 0) > 0 }
+        tap = nil
+        XCTAssertTrue(session.cableReceivedBytes)
+        session.close()
+        XCTAssertNil(released, "the close let go of the tap")
+        XCTAssertTrue(session.cableReceivedBytes)
+        XCTAssertEqual(CableError(download: result(.failed(DC_STATUS_TIMEOUT)), session: session), .bluetoothLinkLost)
+    }
+
+    // MARK: - Messages
+
+    func testEveryErrorSaysSomething() {
+        let all: [CableError] = [
+            .unsupportedTransport(.classicBTSerial), .driverMissing, .bluetoothNotConnected, .bluetoothLinkLost, .permissionDenied, .busy, .sessionInProgress,
+            .notFound, .unplugged, .noResponse(.suuntoVyper), .cancelled, .portError(errno: EIO), .protocolError(DC_STATUS_PROTOCOL),
+        ]
+        for error in all {
+            XCTAssertFalse(error.message.isEmpty, "\(error)")
+            XCTAssertEqual(error.errorDescription, error.message)
+        }
+        XCTAssertEqual(Set(all.map(\.message)).count, all.count)
+        XCTAssertTrue(CableError.noResponse(.suuntoVyper).message.hasSuffix(DeviceCatalog.cableConnectInstructions(for: .suuntoVyper)))
+    }
+
+    func testEverySerialFamilyHasConnectInstructions() {
+        let fallback = DeviceCatalog.cableConnectInstructions(for: .atomicsCobalt)
+        let families = Set(DeviceCatalog.models(for: .serial).map(\.family))
+        for family in families {
+            XCTAssertFalse(DeviceCatalog.cableConnectInstructions(for: family).isEmpty, family.rawValue)
+        }
+        for family: DeviceConfiguration.DeviceFamily in [.suuntoVyper, .suuntoD9, .oceanicAtom2, .maresIconHD, .cressiLeonardo,
+                                                         .hwOstc, .reefnetSensus, .uwatecMemomouse] {
+            XCTAssertNotEqual(DeviceCatalog.cableConnectInstructions(for: family), fallback, "\(family) has its own")
+        }
+        XCTAssertTrue(DeviceCatalog.cableConnectInstructions(for: .suuntoVyper).contains("Suunto"))
+    }
+
+    func testShearwaterClassicBTHasItsOwnConnectInstructionsWithNoCable() {
+        for family: DeviceConfiguration.DeviceFamily in [.shearwaterPredator, .shearwaterPetrel] {
+            let message = DeviceCatalog.cableConnectInstructions(for: family)
+            XCTAssertTrue(message.contains("Bluetooth"), family.rawValue)
+            XCTAssertTrue(message.contains("Upload Log"), family.rawValue)
+            XCTAssertFalse(message.contains("cable"), family.rawValue)
+            XCTAssertFalse(CableError.noResponse(family).message.contains("cable"), family.rawValue)
+        }
+    }
+}
+#endif

@@ -4,7 +4,7 @@
 ![GitHub stars](https://img.shields.io/github/stars/deepsealabs/libdc-swift?style=social)
 ![License](https://img.shields.io/github/license/deepsealabs/libdc-swift)
 
-A Swift framework for communicating with dive computers via Bluetooth Low Energy (BLE). Built on top of [libdivecomputer](https://www.libdivecomputer.org/), this package provides a modern Swift API for iOS and macOS applications to interact with various dive computers.
+A Swift framework for communicating with dive computers via Bluetooth Low Energy (BLE), and on macOS over cables too. Built on top of [libdivecomputer](https://www.libdivecomputer.org/), this package provides a modern Swift API for iOS and macOS applications to interact with various dive computers.
 
 ## Features
 
@@ -16,9 +16,11 @@ A Swift framework for communicating with dive computers via Bluetooth Low Energy
 - ⏱ **Progress Tracking & Background Support:** Integrated progress updates, and background execution for iOS.
 - 🔄 **Seamless SwiftUI Integration:** Designed to work naturally with SwiftUI for real-time UI updates.
 
+On macOS it also downloads over cables: USB-serial cables, USB HID computers (Suunto EON, Uwatec Smart), raw USB (Atomic Aquatics Cobalt, Beta) and paired classic-Bluetooth ports (Shearwater, Beta). None of these paths has been confirmed on hardware yet. A sandboxed app needs `com.apple.security.device.serial` (USB-serial and paired classic-Bluetooth ports) and `com.apple.security.device.usb` (USB HID and raw USB), plus `com.apple.security.device.bluetooth` for BLE. See [Docs/MACOS_SERIAL_CABLES.md](Docs/MACOS_SERIAL_CABLES.md), [Docs/MACOS_USB_HID.md](Docs/MACOS_USB_HID.md) and [Docs/MACOS_USB.md](Docs/MACOS_USB.md).
+
 ## Requirements
 
-- iOS 15.0+ / macOS 12.0+
+- iOS 16.0+ / macOS 13.0+
 - Swift 5.10+
 - Xcode 15.0+
 

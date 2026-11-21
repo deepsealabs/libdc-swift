@@ -27,7 +27,8 @@ macros only change which branches inside it are built.
   `HAVE_STRUCT_TM_TM_GMTOFF`): unset on both platforms, so `datetime.c` converts dive times with the
   same code on iOS and macOS and a dive parses to the same date on either.
 - **`HAVE_HIDAPI` and `HAVE_LIBUSB`**: unset, so `usbhid.c` and `usb.c` stay stubs and no third-party
-  USB library is bundled.
+  USB library is bundled. On macOS, `HIDStream` and `USBStream` (LibDCBridge) stand in for them through
+  `dc_custom_open` (see `MACOS_USB_HID.md` and `MACOS_USB.md`).
 
 Mac Catalyst hasn't been built or tested with these macros.
 

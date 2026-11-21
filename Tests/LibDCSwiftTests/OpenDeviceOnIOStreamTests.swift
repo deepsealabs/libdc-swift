@@ -332,7 +332,9 @@ final class OpenDeviceOnIOStreamTests: XCTestCase {
 
     func testCableTransportsMatchThePlatform() {
         #if os(macOS)
-        XCTAssertEqual(libdc_cable_transports(), DC_TRANSPORT_SERIAL.rawValue | DC_TRANSPORT_USBHID.rawValue)
+        XCTAssertEqual(libdc_cable_transports(),
+                       DC_TRANSPORT_SERIAL.rawValue | DC_TRANSPORT_USBHID.rawValue | DC_TRANSPORT_USB.rawValue,
+                       "the transports with an opener")
         #else
         XCTAssertEqual(libdc_cable_transports(), 0)
         #endif

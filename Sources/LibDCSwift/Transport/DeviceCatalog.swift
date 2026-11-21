@@ -28,7 +28,7 @@ public enum DeviceCatalog {
         return entries.compactMap { entry in
             guard let family = entry.family else { return nil }
             return DCModel(vendor: entry.vendor, product: entry.product, family: family, model: entry.model,
-                           transports: transports(mask: entry.mask, family: family),
+                           transports: transports(mask: entry.mask, family: family, model: entry.model),
                            canonicalName: canonicalName(family: family, model: entry.model,
                                                         descriptors: entries.lazy.map { ($0.family, $0.model, $0.name) }))
         }
@@ -39,6 +39,56 @@ public enum DeviceCatalog {
         all.filter { $0.transports.contains(transport) }
     }
 
+    /// Shearwater's classic-Bluetooth names and the products each can be. Both the Petrel and the Petrel 2 call themselves
+    /// "Petrel", so the newer goes first (Subsurface's btdiscovery does the same).
+    static let bluetoothNames: [(name: String, products: [String])] = [
+        ("Perdix", ["Perdix"]), ("Petrel", ["Petrel 2", "Petrel"]), ("Nerd", ["Nerd"]), ("Predator", ["Predator"]),
+    ]
+
+    /// What macOS appends to a paired device's name for its port: "Petrel-SerialPort", "Petrel-SPPDev-1".
+    static let bluetoothPortSuffixes = ["-SerialPort", "-SPPDev", "-SPP", "-Port"]
+
+    /// The paired device's own name in a port's base name, with macOS's suffix (and any "-1" after it) taken off.
+    static func bluetoothDeviceName(portName: String) -> String {
+        var name = portName
+        if let dash = name.range(of: #"-\d+$"#, options: .regularExpression) { name.removeSubrange(dash) }
+        for suffix in bluetoothPortSuffixes where name.lowercased().hasSuffix(suffix.lowercased()) {
+            name.removeLast(suffix.count)
+            break
+        }
+        return name
+    }
+
+    /// The `.classicBTSerial` models for a paired port named `portName`. libdivecomputer's own Bluetooth name filter decides
+    /// whether the name is one of these computers at all, on the device's name, else on its first word ("Petrel 1234"); a port
+    /// nothing passes (a GPS, a phone, another maker's computer) gets no models. A name the filter passes is then narrowed to the
+    /// products it names, else all of them with the Petrel family first and the Predator, a different driver, last.
+    public static func pairedBluetoothCandidates(portName: String) -> [DCModel] {
+        let paired = models(for: .classicBTSerial)
+        let device = bluetoothDeviceName(portName: portName)
+        let firstWord = device.split(whereSeparator: { $0 == " " || $0 == "-" || $0 == "_" }).first.map(String.init)
+        guard let name = [device, firstWord].compactMap({ $0 }).first(where: { passesBluetoothFilter($0, among: paired) }) else {
+            return []
+        }
+        if let match = bluetoothNames.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            let named = match.products.compactMap { product in paired.first { $0.product.caseInsensitiveCompare(product) == .orderedSame } }
+            if !named.isEmpty { return named }
+        }
+        return paired.filter { $0.family != .shearwaterPredator } + paired.filter { $0.family == .shearwaterPredator }
+    }
+
+    /// Whether `dc_descriptor_filter(DC_TRANSPORT_BLUETOOTH, name)` passes any of `models`' descriptors.
+    static func passesBluetoothFilter(_ name: String, among models: [DCModel]) -> Bool {
+        let ids = Set(models.map(\.id))
+        var passes = false
+        forEachDescriptor { descriptor in
+            guard !passes, let entry = Entry(descriptor), let family = entry.family,
+                  ids.contains(DCModel.id(family: family, model: entry.model, name: entry.name)) else { return }
+            passes = name.withCString { dc_descriptor_filter(descriptor, DC_TRANSPORT_BLUETOOTH, $0) } != 0
+        }
+        return passes
+    }
+
     /// First `supportedModels` match, else first descriptor, else "<family> model <n>", since family and model don't name one product (see Docs/DEVICE_IDENTITY.md).
     public static func canonicalName(family: DeviceConfiguration.DeviceFamily, model: UInt32) -> String {
         canonicalName(family: family, model: model, descriptors: all.lazy.map { (Optional($0.family), $0.model, $0.name) })
@@ -46,6 +96,27 @@ public enum DeviceCatalog {
 
     /// The models a USB or USB HID device can be: libdivecomputer's family filter, narrowed by `usbModels`; empty on other transports.
     public static func candidates(vid: UInt16, pid: UInt16, transport: DCTransport) -> [DCModel] {
+        let matches = filterMatches(vid: vid, pid: pid, transport: transport)
+        guard let names = usbModels[usbKey(vid: vid, pid: pid)] else { return matches }
+        return matches.filter { names.contains($0.name) }
+    }
+
+    /// Whether a session may open `model` on this device: one of its `candidates`, or a model the family filter passes whose
+    /// DEVINFO names the computer itself, though no PID is known for it (`usbOpenableUnlisted`).
+    static func canOpen(_ model: DCModel, vid: UInt16, pid: UInt16, transport: DCTransport) -> Bool {
+        if candidates(vid: vid, pid: pid, transport: transport).contains(model) { return true }
+        guard usbOpenableUnlisted[model.family]?.contains(model.name) == true else { return false }
+        return filterMatches(vid: vid, pid: pid, transport: transport).contains(model)
+    }
+
+    /// Uwatec's DEVINFO model comes from the computer's own CMD_MODEL, so a host that picked the G3 (learned over BLE, say) opens it;
+    /// the EON Steel reports the opened descriptor's model, so it gets no such entry.
+    static let usbOpenableUnlisted: [DeviceConfiguration.DeviceFamily: Set<String>] = [
+        .uwatecSmart: ["Scubapro G3"],
+    ]
+
+    /// libdivecomputer's family filter alone, which accepts any PID of the family for any of its models.
+    static func filterMatches(vid: UInt16, pid: UInt16, transport: DCTransport) -> [DCModel] {
         guard transport == .usbHID || transport == .usb else { return [] }
         let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var matches: [DCModel] = []
@@ -62,8 +133,7 @@ public enum DeviceCatalog {
                   let model = byID[DCModel.id(family: family, model: entry.model, name: entry.name)] else { return }
             matches.append(model)
         }
-        guard let names = usbModels[usbKey(vid: vid, pid: pid)] else { return matches }
-        return matches.filter { names.contains($0.name) }
+        return matches
     }
 
     /// The products each VID:PID is: the family filters accept any PID of the family, and EON Steel reports the descriptor's model as its own.
@@ -97,8 +167,13 @@ public enum DeviceCatalog {
         name.lowercased().trimmingCharacters(in: .whitespaces)
     }
 
+    /// SERIAL|BLUETOOTH models with no cable: their SERIAL flag is the RFCOMM tty a Linux host binds.
+    static let noCableModels: [DeviceConfiguration.DeviceFamily: Set<UInt32>] = [
+        .hwOstc3: [0x43, 0x44], // OSTC 4, OSTC 5
+    ]
+
     // Shearwater has no cable: its SERIAL descriptors are the paired classic-Bluetooth SPP port.
-    private static func transports(mask: UInt32, family: DeviceConfiguration.DeviceFamily) -> Set<DCTransport> {
+    private static func transports(mask: UInt32, family: DeviceConfiguration.DeviceFamily, model: UInt32) -> Set<DCTransport> {
         var transports = Set<DCTransport>()
         func has(_ transport: dc_transport_t) -> Bool { mask & transport.rawValue != 0 }
         if has(DC_TRANSPORT_BLE) { transports.insert(.ble) }
@@ -106,7 +181,11 @@ public enum DeviceCatalog {
         if has(DC_TRANSPORT_USB) { transports.insert(.usb) }
         if has(DC_TRANSPORT_SERIAL) {
             let pairedPort = has(DC_TRANSPORT_BLUETOOTH) && (family == .shearwaterPetrel || family == .shearwaterPredator)
-            transports.insert(pairedPort ? .classicBTSerial : .serial)
+            if pairedPort {
+                transports.insert(.classicBTSerial)
+            } else if !(has(DC_TRANSPORT_BLUETOOTH) && noCableModels[family]?.contains(model) == true) {
+                transports.insert(.serial)
+            }
         }
         return transports
     }
@@ -167,3 +246,22 @@ extension DCModel {
         "\(family.rawValue):\(model):\(name)"
     }
 }
+
+#if os(macOS)
+extension DeviceCatalog {
+    /// The families a cable transport reaches through a stream with no upstream-proven transport behind it (the Cobalt's
+    /// IOUSBLib stream in place of libusb, a paired port's RFCOMM pseudo-serial link in place of a socket); hosts label them
+    /// "Beta" there. No cable path has run on a real computer yet.
+    public static let betaFamilies: [DCTransport: Set<DeviceConfiguration.DeviceFamily>] = [
+        .usb: [.atomicsCobalt],
+        .classicBTSerial: [.shearwaterPetrel, .shearwaterPredator],
+    ]
+}
+
+extension DCModel {
+    /// This model's path over `transport` has no upstream-proven transport behind it (`DeviceCatalog.betaFamilies`), so hosts label it "Beta" there.
+    public func isBeta(on transport: DCTransport) -> Bool {
+        DeviceCatalog.betaFamilies[transport]?.contains(family) ?? false
+    }
+}
+#endif

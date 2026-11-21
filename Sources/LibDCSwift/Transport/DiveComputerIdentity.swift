@@ -63,7 +63,13 @@ extension DiveComputerIdentity {
         let dcFamily = opened?.family ?? data.device.map { dc_device_get_type($0) } ?? DC_FAMILY_NULL
         guard let family = DeviceConfiguration.DeviceFamily(dcFamily: dcFamily) else { return nil }
         let reported = data.devinfo.model
-        let model = reported != 0 && DeviceConfiguration.hasDescriptor(family: dcFamily, model: reported)
+#if os(macOS)
+        // The Cobalt's driver reads the model off the computer, where 0 is the Cobalt 1, not an unreported model.
+        let named = reported != 0 || family == .atomicsCobalt
+#else
+        let named = reported != 0
+#endif
+        let model = named && DeviceConfiguration.hasDescriptor(family: dcFamily, model: reported)
             ? reported : (opened?.model ?? reported)
         self.init(family: family, model: model, serialNumber: data.devinfo.serial, firmware: data.devinfo.firmware,
                   transport: transport)
