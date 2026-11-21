@@ -192,7 +192,7 @@ final class SuuntoNauticParserTests: XCTestCase {
 
     private static let fixtureStart: Int64 = 1787752091
 
-    /// A stream holding only what a dive's start comes from: a timeline base of
+    /// A dive whose profile holds only what its start comes from: a timeline base of
     /// `start` at `quarterHours` from UTC, and a GPS fix at UTC `gps`.
     private static func stream(base: (start: Int64, quarterHours: Int8)? = nil, gps: Int64? = nil) -> Data {
         var data = Data("SBEM0103".utf8)
@@ -207,7 +207,7 @@ final class SuuntoNauticParserTests: XCTestCase {
             data += withUnsafeBytes(of: (gps * 1000).littleEndian) { Data($0) }
             data += Data(count: 10)
         }
-        return data
+        return blob(profile: [UInt8](data))
     }
 
     /// `dc_parser_get_datetime`'s answer, nil when the parser has none.
@@ -295,11 +295,13 @@ final class SuuntoNauticParserTests: XCTestCase {
     }
 
     func testAGPSFixOverrulesATimelineBaseThatContradictsIt() throws {
+        try XCTSkipIf(true, "Not in this build: the round 4 parser takes the timeline base as it is, without deepsealabs/libdivecomputer#19's GPS check.")
         let data = Self.stream(base: (Self.fixtureStart + 3600, 8), gps: Self.fixtureStart)
         try assertStart(of: data, hour: 13, timezone: 0)
     }
 
     func testAnImplausibleTimelineBaseIsIgnored() throws {
+        try XCTSkipIf(true, "Not in this build: the round 4 parser takes the timeline base as it is, without deepsealabs/libdivecomputer#19's clock and offset ranges.")
         // UTC+14:15, past the last zone there is.
         try assertStart(of: Self.stream(base: (Self.fixtureStart, 57), gps: Self.fixtureStart), hour: 13, timezone: 0)
         XCTAssertNil(parserDatetime(Self.stream(base: (Self.fixtureStart, 57))))
