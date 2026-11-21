@@ -29,6 +29,73 @@ struct FullLoggingToggle: View {
     }
 }
 
+/// Every DC Tester log line starts with its local date and time to the millisecond, so a line kept from an earlier
+/// session can't pass for one of this run's.
+enum LogStamp {
+    /// Put before a line DC Tester 32 or before wrote, with the time only, when it's read back.
+    static let undated = "undated "
+
+    private static let formatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = .autoupdatingCurrent
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return f
+    }()
+    private static let pattern = Array("0000-00-00 00:00:00.000".utf8)
+
+    static func string(_ date: Date) -> String {
+        formatter.string(from: date)
+    }
+
+    /// `text` as log lines stamped with `date`, one for each of its lines, so a multi-line message has no line without one.
+    static func lines(_ text: String, at date: Date) -> [String] {
+        let stamp = string(date)
+        guard text.contains("\n") else { return ["\(stamp) \(text)"] }
+        var parts = text.split(separator: "\n", omittingEmptySubsequences: false)
+        if parts.count > 1, parts.last?.isEmpty == true { parts.removeLast() }
+        return parts.map { "\(stamp) \($0)" }
+    }
+
+    static func isStamped<C: Collection>(_ bytes: C) -> Bool where C.Element == UInt8 {
+        var index = bytes.startIndex
+        for expected in pattern {
+            guard index != bytes.endIndex else { return false }
+            let byte = bytes[index]
+            guard expected == UInt8(ascii: "0") ? (0x30...0x39).contains(byte) : byte == expected else { return false }
+            index = bytes.index(after: index)
+        }
+        return true
+    }
+
+    /// A line read back from disk: as it is once stamped or marked, else marked undated.
+    static func restored(_ line: String) -> String {
+        isStamped(line.utf8) || line.hasPrefix(undated) ? line : undated + line
+    }
+
+    /// `restored(_:)` for each line of a file, leaving out blank ones.
+    static func restored(_ data: Data) -> Data {
+        let mark = Data(undated.utf8)
+        var out = Data(capacity: data.count + data.count / 16)
+        for line in data.split(separator: 0x0A) {
+            if !isStamped(line) && !line.starts(with: mark) { out.append(mark) }
+            out.append(line)
+            out.append(0x0A)
+        }
+        return out
+    }
+
+    /// The first line of a session: the build, and the time zone its lines are in.
+    static func sessionStart(at date: Date) -> String {
+        let os = ProcessInfo.processInfo.operatingSystemVersion
+        let offset = TimeZone.current.secondsFromGMT(for: date)
+        let zone = String(format: "UTC%@%02d:%02d", offset < 0 ? "-" : "+", abs(offset) / 3600, abs(offset) % 3600 / 60)
+        return "===== Session started: DC Tester \(AutoDownloadController.appVersion), LibDCSwift \(libDCSwiftBuildTag), "
+            + "iOS \(os.majorVersion).\(os.minorVersion).\(os.patchVersion), times in \(zone). Lines above are from earlier sessions. ====="
+    }
+}
+
 /// The Explorer's connects, commands and results, kept for pasting into a GitHub issue. Safe from any thread: the
 /// libdivecomputer sink appends from the download thread, where a full log's many lines a second would swamp main.
 final class ExplorerLog: ObservableObject {
@@ -40,6 +107,8 @@ final class ExplorerLog: ObservableObject {
     // A full log's whole copy is on disk in `fullLog`, so memory only keeps a window of it.
     private let buffer = BoundedLogBuffer(maxBytes: 4 * 1024 * 1024)
     private let lock = NSLock()
+    private let launched = Date()
+    private var sessionMarked = false
     private var lastText: String?
     private var lastDevice: String?
     private var fullLoggingSince: Date?
@@ -53,32 +122,30 @@ final class ExplorerLog: ObservableObject {
     private var fileBytes = 0
     private var recentlyWritten: [String] = []
     private let fullLog: FullLogStore
+    // One share at a time, as each clears the last one's files.
+    private let shareQueue = DispatchQueue(label: "dctester.explorer-log.share")
+    private let shareDirectory: URL
 
     private static let restoredLines = 500
     private static let maxFileBytes = 4 * 1024 * 1024
     private static let publishDelay = 0.25
     private let file: URL
-    private static let timestamp: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
-        return f
-    }()
-    private static let dateTime: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-        return f
-    }()
 
-    init(directory: URL) {
+    init(directory: URL, shareDirectory: URL = FileManager.default.temporaryDirectory.appendingPathComponent("share-log"),
+         fullLogMaxBytes: Int = FullLogStore.defaultMaxBytes, fullLogSegmentBytes: Int = FullLogStore.defaultSegmentBytes) {
         file = directory.appendingPathComponent("explorer.log")
-        fullLog = FullLogStore(directory: directory.appendingPathComponent("full-log"))
-        let restored = Self.lastLines(of: file, count: Self.restoredLines)
+        self.shareDirectory = shareDirectory
+        fullLog = FullLogStore(directory: directory.appendingPathComponent("full-log"), maxBytes: fullLogMaxBytes,
+                               segmentBytes: fullLogSegmentBytes)
+        let restored = Self.lastLines(of: file, count: Self.restoredLines).map(LogStamp.restored)
         buffer.append(contentsOf: restored)
         recentlyWritten = restored
         fileBytes = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int) ?? 0
         fullLoggingSince = fullLog.meta?.since
         lastDevice = fullLog.meta?.device
         _lineCount = Published(initialValue: buffer.lineCount)
+        // Queued first, so it runs before any line of this session reaches the full log.
+        fileQueue.async { [fullLog] in fullLog.markUndatedLines() }
     }
 
     func append(_ text: String) {
@@ -122,6 +189,7 @@ final class ExplorerLog: ObservableObject {
             recentlyWritten.removeAll()
             try? FileManager.default.removeItem(at: file)
             fullLog.removeAll()
+            try? FileManager.default.removeItem(at: shareDirectory)
         }
         lock.unlock()
         lineCount = 0
@@ -132,30 +200,50 @@ final class ExplorerLog: ObservableObject {
         return fullLoggingSince != nil
     }
 
+    /// Writes the lines not on disk yet and waits for them, as the next publish would.
+    func flush() {
+        lock.lock()
+        flushLocked()
+        lock.unlock()
+        fileQueue.sync {}
+    }
+
     /// The lines kept in memory; for a full log, only its newest (Share log has all of it).
     func text(device: String? = nil) -> String {
         memoryText(device: device, fullLogNote: "Newest lines only: Share log has the whole full log.")
     }
 
-    /// What Share log hands the share sheet, on main: the text, or once full logging was on, the full log as a .txt file.
+    /// What Share log hands the share sheet, on main: see `makeShareItems(device:)`.
     func shareItems(device: String? = nil, completion: @escaping ([Any]) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            let item = shareItem(device: device)
-            DispatchQueue.main.async { completion([item]) }
+        shareQueue.async { [self] in
+            let items = makeShareItems(device: device)
+            DispatchQueue.main.async { completion(items) }
         }
     }
 
-    /// Blocks on the file queue, so call it off main. A full log comes from disk, all of it, across relaunches.
-    func shareItem(device: String? = nil) -> Any {
+    /// The text, or once full logging was on, the whole full log from disk, across relaunches: a .zip of a header and the
+    /// log's parts, or the parts themselves if the zip can't be made. Blocks on the file queue, so call it off main.
+    func makeShareItems(device: String? = nil) -> [Any] {
         lock.lock()
         flushLocked()
         let full = fullLoggingSince != nil
         lock.unlock()
-        guard full else { return text(device: device) }
-        let header = headerLines(device: device).joined(separator: "\n") + "\n"
-        let url = shareURL()
-        let exported = fileQueue.sync { fullLog.export(to: url, header: header) }
-        return exported ? url : memoryText(device: device, fullLogNote: "The full log file couldn't be written, so newest lines only.")
+        guard full else { return [text(device: device)] }
+
+        let fileManager = FileManager.default
+        try? fileManager.removeItem(at: shareDirectory)
+        Self.removeOldExports()
+        let name = shareName()
+        let folder = shareDirectory.appendingPathComponent(name)
+        let header = Array(headerLines(device: device).dropLast())
+        guard let parts = fileQueue.sync(execute: { fullLog.exportParts(to: folder, header: header) }) else {
+            try? fileManager.removeItem(at: folder)
+            return [memoryText(device: device, fullLogNote: "The full log couldn't be written out, so newest lines only.")]
+        }
+        let zip = shareDirectory.appendingPathComponent(name + ".zip")
+        guard Self.zip(folder, to: zip) else { return parts }
+        try? fileManager.removeItem(at: folder)
+        return [zip]
     }
 
     private func memoryText(device: String?, fullLogNote: String) -> String {
@@ -172,20 +260,42 @@ final class ExplorerLog: ObservableObject {
         let versions = "DC Tester \(AutoDownloadController.appVersion), LibDCSwift \(libDCSwiftBuildTag), libdivecomputer \(LibDCLogging.libdivecomputerVersion)"
         return [
             "DC Tester \(AutoDownloadController.appVersion) explorer log",
-            since.map { "Full logging ON (DC_LOGLEVEL_ALL) from \(Self.dateTime.string(from: $0)): \(versions)" }
+            since.map { "Full logging ON (DC_LOGLEVEL_ALL) from \(LogStamp.string($0)): \(versions)" }
                 ?? "Full logging off: \(versions)",
             "iOS \(UIDevice.current.systemVersion), \(UIDevice.current.model)",
             "Device: \(device ?? "none")",
+            "This session started \(LogStamp.string(launched)); each session's first line is \"===== Session started\".",
             ""
         ]
     }
 
-    private func shareURL() -> URL {
+    private func shareName() -> String {
         let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
         stamp.dateFormat = "yyyyMMdd-HHmmss"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
-        return FileManager.default.temporaryDirectory
-            .appendingPathComponent("DC-Tester-\(build)-full-log-\(stamp.string(from: Date())).txt")
+        return "DC-Tester-\(build)-full-log-\(stamp.string(from: Date()))"
+    }
+
+    /// Build 32 left each shared full log in the temporary directory.
+    private static func removeOldExports() {
+        let directory = FileManager.default.temporaryDirectory
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        for name in names where name.hasPrefix("DC-Tester-") && name.contains("-full-log-") && name.hasSuffix(".txt") {
+            try? FileManager.default.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
+    /// `folder` as a zip at `destination`, the folder at its root. The system zips it, streaming from disk.
+    static func zip(_ folder: URL, to destination: URL) -> Bool {
+        var coordination: NSError?
+        var made = false
+        NSFileCoordinator().coordinate(readingItemAt: folder, options: .forUploading, error: &coordination) { zipped in
+            try? FileManager.default.removeItem(at: destination)
+            made = (try? FileManager.default.moveItem(at: zipped, to: destination)) != nil
+                || (try? FileManager.default.copyItem(at: zipped, to: destination)) != nil
+        }
+        return coordination == nil && made
     }
 
     private func markFullLocked() {
@@ -200,13 +310,21 @@ final class ExplorerLog: ObservableObject {
 
     private func appendLocked(_ text: String) {
         lastText = text
-        let line = "\(Self.timestamp.string(from: Date())) \(text)"
-        buffer.append(line)
-        unwritten.append(line)
-        if fullLoggingSince != nil { unwrittenFull.append(line) }
+        let now = Date()
+        if !sessionMarked {
+            sessionMarked = true
+            addLocked(LogStamp.lines(LogStamp.sessionStart(at: launched), at: now))
+        }
+        addLocked(LogStamp.lines(text, at: now))
         guard !publishScheduled else { return }
         publishScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.publishDelay) { [self] in publish() }
+    }
+
+    private func addLocked(_ lines: [String]) {
+        buffer.append(contentsOf: lines)
+        unwritten.append(contentsOf: lines)
+        if fullLoggingSince != nil { unwrittenFull.append(contentsOf: lines) }
     }
 
     private func publish() {
@@ -268,48 +386,54 @@ final class ExplorerLog: ObservableObject {
     }
 }
 
-/// A full log on disk, so a crash, an eviction or a relaunch doesn't lose it. Lines go into segment files; past
-/// `maxBytes` it keeps the first quarter's segments (the handshake and dive list) and the newest, as `BoundedLogBuffer`
-/// does, with a marker where it dropped some. Not thread-safe: `ExplorerLog` uses it on its file queue.
+/// A full log on disk, so a crash, an eviction or a relaunch doesn't lose it. Lines go into segment files of about
+/// `segmentBytes`. Past `maxBytes` in all it keeps the segments in its first quarter (the handshake and dive list) and
+/// the newest, as `BoundedLogBuffer` does, and counts what it dropped for a marker. Share log hands over every segment.
+/// Not thread-safe: `ExplorerLog` uses it on its file queue.
 final class FullLogStore {
     struct Meta: Codable {
         var since: Date
         var device: String?
         var droppedLines = 0
         var droppedBytes = 0
+        /// nil for a log DC Tester 32 wrote, whose lines have the time only.
+        var format: Int?
     }
+
+    /// About 40 Suunto Nautic dives at full logging (about 3 MB each), so a long download fits whole.
+    static let defaultMaxBytes = 128 * 1024 * 1024
+    static let defaultSegmentBytes = 4 * 1024 * 1024
+    private static let format = 1
 
     private(set) var meta: Meta?
     let maxBytes: Int
+    private let headBytes: Int
     private let directory: URL
     private let segmentBytes: Int
-    private let maxSegments: Int
-    private let headSegments: Int
     private var segments: [Int] = []
+    private var sizes: [Int] = []
+    private(set) var byteCount = 0
     private var handle: FileHandle?
-    private var currentBytes = 0
 
-    init(directory: URL, maxBytes: Int = BoundedLogBuffer.defaultMaxBytes, segmentBytes: Int = 4 * 1024 * 1024) {
+    init(directory: URL, maxBytes: Int = FullLogStore.defaultMaxBytes, segmentBytes: Int = FullLogStore.defaultSegmentBytes) {
         self.directory = directory
         self.maxBytes = maxBytes
         self.segmentBytes = max(1, segmentBytes)
-        maxSegments = max(2, maxBytes / self.segmentBytes)
-        headSegments = maxSegments / 4
+        headBytes = maxBytes / 4
         guard let data = try? Data(contentsOf: metaURL),
               let meta = try? JSONDecoder().decode(Meta.self, from: data) else { return }
         self.meta = meta
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         segments = names.compactMap(Self.segmentIndex).sorted()
-        if let last = segments.last {
-            currentBytes = (try? FileManager.default.attributesOfItem(atPath: segmentURL(last).path)[.size] as? Int) ?? 0
-        }
+        sizes = segments.map { (try? FileManager.default.attributesOfItem(atPath: segmentURL($0).path)[.size] as? Int) ?? 0 }
+        byteCount = sizes.reduce(0, +)
     }
 
     /// Starts a new full log, replacing any earlier one.
     func start(since: Date, device: String?, seed: [String]) {
         removeAll()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        meta = Meta(since: since, device: device)
+        meta = Meta(since: since, device: device, format: Self.format)
         saveMeta()
         append(seed)
     }
@@ -318,7 +442,9 @@ final class FullLogStore {
         guard meta != nil, !lines.isEmpty, let handle = openSegment() else { return }
         let data = Data((lines.joined(separator: "\n") + "\n").utf8)
         guard (try? handle.write(contentsOf: data)) != nil else { return }
-        currentBytes += data.count
+        sizes[sizes.count - 1] += data.count
+        byteCount += data.count
+        dropOverflow()
     }
 
     func setDevice(_ device: String) {
@@ -327,32 +453,69 @@ final class FullLogStore {
         saveMeta()
     }
 
-    /// Writes `header`, then the kept lines, to `url`.
-    func export(to url: URL, header: String) -> Bool {
-        guard let meta,
-              FileManager.default.createFile(atPath: url.path, contents: Data(header.utf8)),
-              let out = try? FileHandle(forWritingTo: url) else { return false }
-        defer { try? out.close() }
-        do {
-            _ = try out.seekToEnd()
-            for (position, index) in segments.enumerated() {
-                if position == headSegments, meta.droppedLines > 0 {
-                    try out.write(contentsOf: Data((marker(meta) + "\n").utf8))
-                }
-                guard let data = try? Data(contentsOf: segmentURL(index), options: .mappedIfSafe) else { continue }
-                try out.write(contentsOf: data)
-            }
-            return true
-        } catch {
-            return false
+    /// Marks each line of a log DC Tester 32 wrote as undated, once.
+    func markUndatedLines() {
+        guard var meta, meta.format == nil else { return }
+        try? handle?.close()
+        handle = nil
+        for (position, index) in segments.enumerated() {
+            let url = segmentURL(index)
+            guard let data = try? Data(contentsOf: url) else { continue }
+            let marked = LogStamp.restored(data)
+            guard (try? marked.write(to: url, options: .atomic)) != nil else { continue }
+            byteCount += marked.count - sizes[position]
+            sizes[position] = marked.count
         }
+        meta.format = Self.format
+        self.meta = meta
+        saveMeta()
+    }
+
+    /// Writes the log to `folder` as `part-000-header.txt` (`header`, then what the parts are), then a part for each
+    /// segment in order, and where the cap dropped some, a part with the marker; joined in name order they're the log.
+    /// Closed segments are hard-linked and the open one copied, so it takes no memory. nil when there's no log or a part
+    /// can't be written.
+    func exportParts(to folder: URL, header: [String]) -> [URL]? {
+        guard let meta else { return nil }
+        let fileManager = FileManager.default
+        try? fileManager.removeItem(at: folder)
+        guard (try? fileManager.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { return nil }
+
+        let head = gap
+        let truncated = meta.droppedLines > 0 && head != nil
+        let partCount = segments.count + (truncated ? 1 : 0)
+        var summary = partCount == 0 ? "Full log: no lines yet."
+            : "Full log: \(partCount) part(s) after this header, \(Self.mb(byteCount)), part-001.txt to "
+                + String(format: "part-%03d.txt", partCount) + ". Joined in name order they're the whole log (cat part-*.txt)."
+        if truncated { summary += " " + marker(meta) + ", at the -truncated part." }
+        let headerURL = folder.appendingPathComponent("part-000-header.txt")
+        guard fileManager.createFile(atPath: headerURL.path, contents: Data(((header + [summary, ""]).joined(separator: "\n") + "\n").utf8)) else {
+            return nil
+        }
+
+        var urls = [headerURL]
+        for (position, index) in segments.enumerated() {
+            if truncated, position == head {
+                let url = folder.appendingPathComponent(String(format: "part-%03d-truncated.txt", urls.count))
+                guard fileManager.createFile(atPath: url.path, contents: Data((marker(meta) + "\n").utf8)) else { return nil }
+                urls.append(url)
+            }
+            let url = folder.appendingPathComponent(String(format: "part-%03d.txt", urls.count))
+            let source = segmentURL(index)
+            // Only the last segment is written to again.
+            let linked = position < segments.count - 1 && (try? fileManager.linkItem(at: source, to: url)) != nil
+            guard linked || (try? fileManager.copyItem(at: source, to: url)) != nil else { return nil }
+            urls.append(url)
+        }
+        return urls
     }
 
     func removeAll() {
         try? handle?.close()
         handle = nil
         segments.removeAll()
-        currentBytes = 0
+        sizes.removeAll()
+        byteCount = 0
         meta = nil
         try? FileManager.default.removeItem(at: directory)
     }
@@ -368,42 +531,72 @@ final class FullLogStore {
         return Int(name.dropFirst("segment-".count).dropLast(".log".count))
     }
 
+    private static func mb(_ bytes: Int) -> String {
+        String(format: "%.1f MB", Double(bytes) / 1_048_576)
+    }
+
     private func marker(_ meta: Meta) -> String {
-        let mb = { (bytes: Int) in String(format: "%.1f MB", Double(bytes) / 1_048_576) }
-        return "[log truncated: \(meta.droppedLines) lines (\(mb(meta.droppedBytes))) dropped here to stay within \(mb(maxBytes))]"
+        "[log truncated: \(meta.droppedLines) lines (\(Self.mb(meta.droppedBytes))) dropped here to stay within \(Self.mb(maxBytes))]"
+    }
+
+    /// Where segments were dropped: the position of the first one after missing numbers. Build 32's cap left its gap
+    /// after the first 8 MiB, so a log it truncated keeps its gap there.
+    private var gap: Int? {
+        segments.indices.dropFirst().first { segments[$0] != segments[$0 - 1] + 1 }
+    }
+
+    /// The segments that are never dropped: those before the gap, else the leading ones within `headBytes`, at least the
+    /// first. Drops are taken right after them, so the gap stays where it is.
+    private var headCount: Int {
+        if let gap { return gap }
+        var count = 0
+        var bytes = 0
+        for size in sizes {
+            guard count == 0 || bytes + size <= headBytes else { break }
+            bytes += size
+            count += 1
+        }
+        return count
     }
 
     private func openSegment() -> FileHandle? {
-        if let handle, currentBytes < segmentBytes { return handle }
+        if let handle, let size = sizes.last, size < segmentBytes { return handle }
         try? handle?.close()
         handle = nil
         // After a relaunch, carry on in the last segment while it has room.
-        if let last = segments.last, currentBytes < segmentBytes,
+        if let last = segments.last, let size = sizes.last, size < segmentBytes,
            let reopened = try? FileHandle(forWritingTo: segmentURL(last)) {
             _ = try? reopened.seekToEnd()
             handle = reopened
             return reopened
         }
         let next = (segments.last ?? -1) + 1
-        guard FileManager.default.createFile(atPath: segmentURL(next).path, contents: nil) else { return nil }
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        guard FileManager.default.createFile(atPath: segmentURL(next).path, contents: nil),
+              let opened = try? FileHandle(forWritingTo: segmentURL(next)) else { return nil }
         segments.append(next)
-        currentBytes = 0
-        dropOverflow()
-        handle = try? FileHandle(forWritingTo: segmentURL(next))
-        return handle
+        sizes.append(0)
+        handle = opened
+        return opened
     }
 
     private func dropOverflow() {
-        guard segments.count > maxSegments else { return }
-        while segments.count > maxSegments {
-            let url = segmentURL(segments.remove(at: headSegments))
+        guard byteCount > maxBytes else { return }
+        let head = headCount
+        var dropped = false
+        // Never the open segment, which is the last.
+        while byteCount > maxBytes, segments.count > head + 1 {
+            let url = segmentURL(segments.remove(at: head))
+            let size = sizes.remove(at: head)
             if let data = try? Data(contentsOf: url) {
                 meta?.droppedLines += data.reduce(0) { $1 == 0x0A ? $0 + 1 : $0 }
-                meta?.droppedBytes += data.count
             }
+            meta?.droppedBytes += size
+            byteCount -= size
             try? FileManager.default.removeItem(at: url)
+            dropped = true
         }
-        saveMeta()
+        if dropped { saveMeta() }
     }
 
     private func saveMeta() {

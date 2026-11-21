@@ -32,10 +32,12 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
     private static let maxLines = 3000
     private let logFile = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("auto-download.log")
+    private let launched = Date()
+    private var sessionMarked = false
 
     init() {
         if let saved = try? String(contentsOf: logFile, encoding: .utf8) {
-            log = saved.split(separator: "\n").suffix(500).map { LogLine(date: .distantPast, text: String($0)) }
+            log = saved.split(separator: "\n").suffix(500).map { LogLine(date: .distantPast, text: LogStamp.restored(String($0))) }
         }
         // Resume after a relaunch (including a background relaunch through BLE state restoration).
         if let name = defaults.string(forKey: Self.enabledKey), let device = Self.storedDevice(named: name) {
@@ -165,18 +167,22 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
     }
 
     private func append(_ text: String) {
-        let stamp = Self.timestamp.string(from: Date())
-        let line = "\(stamp) \(text)"
-        log.append(LogLine(date: Date(), text: line))
+        let now = Date()
+        var lines: [String] = []
+        if !sessionMarked {
+            sessionMarked = true
+            lines = LogStamp.lines(LogStamp.sessionStart(at: launched), at: now)
+        }
+        lines += LogStamp.lines(text, at: now)
+        log += lines.map { LogLine(date: now, text: $0) }
         if log.count > Self.maxLines { log.removeFirst(log.count - Self.maxLines) }
-        if let data = (line + "\n").data(using: .utf8) {
-            if let handle = try? FileHandle(forWritingTo: logFile) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try? handle.close()
-            } else {
-                try? data.write(to: logFile)
-            }
+        let data = Data((lines.joined(separator: "\n") + "\n").utf8)
+        if let handle = try? FileHandle(forWritingTo: logFile) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: logFile)
         }
     }
 
@@ -198,12 +204,6 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         let total = Int(seconds)
         return String(format: "%d:%02d", total / 60, total % 60)
     }
-
-    private static let timestamp: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f
-    }()
 
     static var appVersion: String {
         let info = Bundle.main.infoDictionary
