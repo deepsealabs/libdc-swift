@@ -173,7 +173,9 @@ emulators built from libdivecomputer's protocol code, and through recorded excha
 
 With `set_ble_debug_logging(1)`, the port itself logs on a context of its own that passes only WARNING and
 ERROR (serial_posix's errno lines), kept in `device_data_t.stream_context`. The driver's calls are logged once,
-by the tap's stream, instead of again for each 50 ms slice the tap polls or sleeps in.
+by the tap's stream, instead of again for each 50 ms slice the tap polls or sleeps in. At full logging
+(`LibDCLogging.level` `.debug` or `.all`) the port's context gets that level too, so the log has the port's own
+reads, writes, polls and sleeps as well.
 
 The session's `storageKey` is the endpoint's `locatorKey`. It is never the computer's identity, which DEVINFO
 gives during the download. Fingerprints are keyed by identity (see `DEVICE_IDENTITY.md`). For a computer that
