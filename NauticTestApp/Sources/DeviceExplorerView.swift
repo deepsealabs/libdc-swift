@@ -130,8 +130,9 @@ struct DeviceExplorerView: View {
     private var explorerLogSection: some View {
         Section {
             let device = deviceName
+            FullLoggingToggle()
             Button {
-                shareItems = [log.text(device: device)]
+                log.shareItems(device: device) { shareItems = $0 }
             } label: {
                 Label("Share log", systemImage: "square.and.arrow.up")
             }
@@ -144,7 +145,7 @@ struct DeviceExplorerView: View {
         } header: {
             Text("Explorer log")
         } footer: {
-            Text("\(log.lines.count) line(s): connects, commands and their results, for a GitHub report.")
+            Text("\(log.lineCount) line(s): connects, commands and their results, for a GitHub report. \(FullLogging.footer)")
         }
     }
 
@@ -351,6 +352,8 @@ struct DeviceExplorerView: View {
         ) { success in
             DispatchQueue.main.async {
                 busy = false
+                let nonDives = viewModel.lastNonDivesSkipped
+                let skipped = nonDives > 0 ? " Skipped \(DiveLogRetriever.nonDivesSkippedText(nonDives))." : ""
                 if !success {
                     let hint = handshakeMissing && viewModel.lastDownloadStatus == "TIMEOUT" ? "\n\(Self.sleepingHint)" : ""
                     // `status` is empty on most failures; the reason lives in `progress`.
@@ -360,12 +363,12 @@ struct DeviceExplorerView: View {
                     } else {
                         reason = viewModel.status.isEmpty ? viewModel.progress.description : viewModel.status
                     }
-                    statusMessage = "Download failed: \(reason) [DC_STATUS_\(viewModel.lastDownloadStatus)]\(hint)"
+                    statusMessage = "Download failed: \(reason) [DC_STATUS_\(viewModel.lastDownloadStatus)]\(skipped)\(hint)"
                 } else if viewModel.progress == .noNewDives {
-                    statusMessage = "No new dives since the last download. Turn on Download all to fetch every dive again."
+                    statusMessage = "No new dives since the last download.\(skipped) Turn on Download all to fetch every dive again."
                 } else {
                     // This run's dives, not the session's.
-                    statusMessage = "Downloaded \(max(0, viewModel.dives.count - divesBefore)) dive(s)."
+                    statusMessage = "Downloaded \(max(0, viewModel.dives.count - divesBefore)) dive(s).\(skipped)"
                 }
             }
         }

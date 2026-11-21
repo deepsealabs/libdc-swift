@@ -3,17 +3,32 @@
 LibDCSwift builds libdivecomputer from source as the `Clibdivecomputer` target, without running its
 `./configure`. Every feature macro that `configure` would normally detect is set by hand in
 `Package.swift`. This page lists the macros that differ between iOS and macOS, what each one changes,
-and how to check that iOS builds stay the same.
+and how to check that iOS builds stay the same. It also covers `HAVE_CLOCK_GETTIME`, which started out
+macOS-only and is now set on every platform.
 
 ## What macOS adds
 
-Both macros are set with `.when(platforms: [.macOS])`, so iOS (device and Simulator) is compiled exactly
-as before.
+`HAVE_IOKIT_SERIAL_IOSS_H` is set with `.when(platforms: [.macOS])`, so iOS (device and Simulator)
+doesn't get it. `HAVE_CLOCK_GETTIME` was too at first, but is now set on every platform (see below).
 
 | Macro | Where libdivecomputer uses it | Effect on macOS |
 |---|---|---|
 | `HAVE_IOKIT_SERIAL_IOSS_H` | `serial_posix.c` includes `<IOKit/serial/ioss.h>` | Serial rates with no `Bxxx` constant are set with the `IOSSIOSPEED` ioctl instead of failing with `DC_STATUS_UNSUPPORTED`. That covers the Sporasub SP2 (460800) and the Cochran EMC models (850000). `DC_IOCTL_SERIAL_SET_LATENCY` also sets the receive latency with `IOSSDATALAT` instead of doing nothing; no driver in the bundled libdivecomputer calls it. Header only: nothing new is linked. |
-| `HAVE_CLOCK_GETTIME` | `timer.c` | Serial read timeouts are measured with `clock_gettime(CLOCK_MONOTONIC)` instead of `gettimeofday`, so a wall-clock change can't stretch or cut a timeout. |
+| `HAVE_CLOCK_GETTIME` | `timer.c` | Serial read timeouts are measured with `clock_gettime(CLOCK_MONOTONIC)` instead of `gettimeofday`, so a wall-clock change can't stretch or cut a timeout. Set on iOS too now. |
+
+### `HAVE_CLOCK_GETTIME` on every platform
+
+`dc_timer_t` isn't only for serial reads. The Suunto Nautic driver measures how long it has been skipping
+another app's packets with it, and gives up after 15 s (`TIMEOUT_SKIP`). Without `HAVE_CLOCK_GETTIME`,
+`timer.c` uses `gettimeofday` on iOS, so a wall-clock step back wraps the unsigned difference and the next
+skipped packet times out at once, and a step forward can end the wait early. `clock_gettime(CLOCK_MONOTONIC)`
+exists on iOS 10 and later, so the macro is now set without a platform condition. `timer.c` is the only
+file that reads it. On iOS, the other users of `dc_timer` that can run are the Nautic driver and the log
+timestamps in `context.c`; `serial_posix.c` and `suunto_vyper2.c` are compiled but need a serial port.
+
+Checked for `arm64-apple-ios16.0` with the package's flags: `timer.c` preprocesses to the `clock_gettime`
+branch, compiles without warnings under `-Wunguarded-availability`, and `nm -u` on the object lists
+`_clock_gettime` where it listed `_gettimeofday` before.
 
 `dc_serial_open` and the rest of `serial_posix.c` were already compiled on every platform; these
 macros only change which branches inside it are built.

@@ -44,14 +44,14 @@ extension DiveComputerSession {
             _ = hid.close()
             throw CableError.protocolError(DC_STATUS_NOMEMORY)
         }
-        // The inner stream logs WARNING and up on its own context, so a debug log has each driver call once, from the tap's stream.
+        // The inner stream logs WARNING and up on its own context unless full logging is on, so a debug log has each driver call once, from the tap's stream.
         guard dc_context_new(&innerContext) == DC_STATUS_SUCCESS, let innerContext else {
             _ = hid.close()
             dc_context_free(context)
             throw CableError.protocolError(DC_STATUS_NOMEMORY)
         }
         attach_libdc_log(innerContext)
-        dc_context_set_loglevel(innerContext, DC_LOGLEVEL_WARNING)
+        dc_context_set_loglevel(innerContext, libdc_stream_log_level())
         hid.setCancellation { cancellation.isCancelled }
         let inner: OpaquePointer
         do {
