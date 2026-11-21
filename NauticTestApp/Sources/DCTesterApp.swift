@@ -11,9 +11,8 @@ struct DCTesterApp: App {
         // libdivecomputer's lines into Share log, so a tester's log says why a download failed (e.g. "Invalid logbook
         // end pointer"), not just the status code; at full logging, every byte too. Appended here, on the download's thread.
         set_libdc_log_sink { level, message in
-            let line = "[libdc \(level.map { String(cString: $0) } ?? "?")] \(message.map { String(cString: $0) } ?? "")"
-            // The parser runs twice on a dive it rejects (for the date, then the samples), so its line comes twice.
-            ExplorerLog.shared.appendUnlessRepeated(line)
+            ExplorerLog.shared.appendLibdc(level: level.map { String(cString: $0) } ?? "?",
+                                           message: message.map { String(cString: $0) } ?? "")
         }
         // LibDCSwift's own lines too, such as which dive a parser line was about, and what was skipped.
         Logger.shared.onLog = { event in

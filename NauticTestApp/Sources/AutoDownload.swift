@@ -254,7 +254,7 @@ struct AutoDownloadView: View {
                     LabeledContent("Watch", value: name)
                 }
                 if fullLogging {
-                    Text("Full logging is on: the protocol log is in Share log under Log on the first screen.")
+                    Text("Full logging starts from the next connection: turn auto download off and on (or quit and reopen DC Tester) to start one now. Its log is in Share log under Log on the first screen.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }

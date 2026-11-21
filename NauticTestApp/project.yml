@@ -50,6 +50,21 @@ targets:
           - bluetooth-central
         ITSAppUsesNonExemptEncryption: false
 
+  NauticTestAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: NauticTestApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.deepsealabs.NauticTestAppTests
+        SWIFT_VERSION: "5.10"
+        GENERATE_INFOPLIST_FILE: YES
+        DEVELOPMENT_TEAM: "4X7MY69TG5"
+        CODE_SIGN_STYLE: Automatic
+
   # Sandboxed probe (Docs/MAC_SANDBOX_PROBE.md), ad-hoc signed so it builds headless on any Mac.
   DC Tester Mac:
     type: application
