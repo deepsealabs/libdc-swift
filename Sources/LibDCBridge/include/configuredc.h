@@ -162,7 +162,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr,
  *       them with the device, descriptor and "Vendor Product" model string, and subscribes
  *       to DEVINFO, PROGRESS and CLOCK events, recorded in devinfo, progress and clock (each
  *       with its have_ flag). On failure both are released and data is zeroed.
- * @note Sets the bridge's log callback and level (set_ble_debug_logging) on data->context.
+ * @note Sets the bridge's log callback and level (libdc_configure_context_logging) on data->context.
  */
 dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream,
     dc_family_t family, unsigned int model, unsigned int attempts, unsigned int retry_ms);
@@ -218,33 +218,62 @@ dc_status_t create_parser_for_device(dc_parser_t **parser, dc_context_t *context
  *------------------------------------------------------------------*/
 /**
  * Toggle verbose BLE/protocol debug logging (off by default). When enabled,
- * the libdivecomputer context runs at DC_LOGLEVEL_DEBUG (surfacing protocol
- * hexdumps) and extra C-side traces print. Enable only when diagnosing a
- * device; leave off for normal use.
+ * a context the bridge sets up runs at least at DC_LOGLEVEL_DEBUG (surfacing
+ * protocol hexdumps on the console) and extra C-side traces print. Its DEBUG
+ * lines stay on the console; set_libdc_log_level sends them to the host sink.
+ * Enable only when diagnosing a device; leave off for normal use.
  * @param enabled: non-zero to enable, 0 to disable
  */
 void set_ble_debug_logging(int enabled);
 
 /**
- * Receives libdivecomputer's ERROR/WARN/INFO lines (DEBUG hexdumps stay on the
- * console) so a host app can show them in its own log, e.g. the
- * "Invalid logbook end pointer" behind a bare DC_STATUS_DATAFORMAT.
+ * Receives libdivecomputer's log lines so a host app can show them in its own
+ * log, e.g. the "Invalid logbook end pointer" behind a bare DC_STATUS_DATAFORMAT.
+ * ERROR, WARN and INFO lines come from every context the bridge logs for; DEBUG
+ * and ALL lines (the drivers' own protocol dumps) only from a context set up
+ * while set_libdc_log_level was DEBUG or ALL. The iostream Read/Write hexdumps
+ * are INFO lines. A line is never cut short.
  * Called on whatever thread libdivecomputer is running on.
- * @param level: "ERROR", "WARN" or "INFO"
+ * @param level: "ERROR", "WARN", "INFO", "DEBUG" or "ALL"
  * @param message: "file.c:line function(): message"
  */
 typedef void (*libdc_log_sink_t)(const char *level, const char *message);
 
 /**
- * Sets (or clears, with NULL) the host log sink. Off by default.
+ * Sets (or clears, with NULL) the host log sink. Off by default. Safe from any thread.
  */
 void set_libdc_log_sink(libdc_log_sink_t sink);
 
 /**
+ * Sets the level the bridge gives each context it sets up from now on: open_ble_device's,
+ * open_device_on_iostream's, a cable open's, and any passed to attach_libdc_log or
+ * libdc_configure_context_logging. A context already set up keeps its level, so a change
+ * applies from the next connection. DC_LOGLEVEL_WARNING by default. At DC_LOGLEVEL_DEBUG
+ * or DC_LOGLEVEL_ALL every line reaches the host sink, the protocol hexdumps included.
+ * Safe from any thread.
+ */
+void set_libdc_log_level(dc_loglevel_t level);
+
+/** The level set_libdc_log_level last set (DC_LOGLEVEL_WARNING by default). */
+dc_loglevel_t libdc_log_level(void);
+
+/**
+ * The level for a wrapped stream's own context (a cable's port under its tap): DC_LOGLEVEL_WARNING,
+ * since its INFO lines repeat every call the wrapper logs, or libdc_log_level() once that is DEBUG or ALL.
+ */
+dc_loglevel_t libdc_stream_log_level(void);
+
+/**
  * Routes a context's libdivecomputer logging through the bridge (console plus
- * the host sink). open_ble_device does this for its own context.
+ * the host sink), leaving its level as it is. open_ble_device does this for its own context.
  */
 void attach_libdc_log(dc_context_t *context);
+
+/**
+ * attach_libdc_log, plus the level: libdc_log_level(), raised to DEBUG while
+ * set_ble_debug_logging is on. open_device_on_iostream does this for data->context.
+ */
+void libdc_configure_context_logging(dc_context_t *context);
 
 /**
  * Whether the serial driver can set non-standard baud rates (IOSSIOSPEED).
