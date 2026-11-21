@@ -177,6 +177,13 @@ dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream
 dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback, void *userdata);
 
 /**
+ * Whether the device's cancel check asks it to stop, as the drivers read it before each transfer
+ * @param device: An open device; NULL answers 0
+ * @return Non-zero when cancelled
+ */
+int libdc_device_is_cancelled(dc_device_t *device);
+
+/**
  * Releases everything a successful open left in data: the device, iostream, context,
  * descriptor, model string and fingerprint buffer, and clears the fingerprint lookup
  * @param data: Device data structure; NULL is ignored. Every pointer field is NULL afterwards
