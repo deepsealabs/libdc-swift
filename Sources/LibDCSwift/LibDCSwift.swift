@@ -2,4 +2,4 @@
 
 /// Build tag logged on device open so a tester's log proves which commit
 /// produced it. Bump on any push that needs hardware verification.
-public let libDCSwiftBuildTag = "2026-11-21-close-off-main-v2-1"
+public let libDCSwiftBuildTag = "2026-11-21-close-off-main-v2-2"
