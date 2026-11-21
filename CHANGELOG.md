@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A close during a download (a user or App Intent cancel) clears the cancel it set on the device before the device's close runs. Left set, the Shearwater, Oceanic/Aqualung and OSTC3 drivers return `DC_STATUS_CANCELLED` before sending their shutdown or quit, so the computer stayed on "WAIT CMD" or "Sending Dive"
 - In debug builds, `write`, `readDataPartial`, `ble_sleep` and `openBLEDevice` assert that they aren't running on the main thread; release builds log a warning instead
 - DC Tester: turning Auto download on from a connected watch's device screen opens the live log, not a blank page with only a back button. The device screen's pop and the live log's push landed on two `navigationDestination(isPresented:)` in the same update; both screens now share one navigation path, so the handoff is a single swap. The Auto download card also names the watch next to its status while it runs (#110)
+- Suunto Nautic/Ocean: a `suunto_nautic_device_wait_notification` that times out with nothing received no longer logs "Failed to receive the packet." at ERROR. `NauticAutoSync` waits a second at a time while it listens for sync triggers, so a quiet watch logged that line once a second. The wait still returns `DC_STATUS_TIMEOUT`, and a link lost or a frame cut off during it, like any failed read of a download, still logs the ERROR (libdivecomputer submodule)
 
 ## [1.22.0] - 2026-11-17
 ### Added

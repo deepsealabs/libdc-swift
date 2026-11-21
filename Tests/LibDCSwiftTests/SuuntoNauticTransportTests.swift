@@ -302,6 +302,17 @@ final class SuuntoNauticTransportTests: XCTestCase {
             send(Self.packet(0x01, [0x00, 0x00], h + [0x01, 0x80, 0x00] + body + [0x00]))
         }
 
+        /// The first half of that push, then nothing: a frame the link cut off.
+        func notifyCutOff(_ path: String) {
+            lock.lock(); defer { lock.unlock() }
+            guard let h = subscribed[path] else { return }
+            let frame = Self.packet(0x01, [0x00, 0x00], h + [0x01, 0x80, 0x00] + value(for: path) + [0x00])
+            rx.append(0x7E)
+            for b in frame.prefix(frame.count / 2) {
+                if b == 0x7E || b == 0x7D { rx.append(0x7D); rx.append(b ^ 0x20) } else { rx.append(b) }
+            }
+        }
+
         private func value(for path: String) -> [UInt8] {
             path == "/Sync/BusyState" ? [0x03, 0x00, busy] : [0x05, 0x00] + Self.u16(Int(unsyncedCount))
         }
@@ -1662,6 +1673,80 @@ final class SuuntoNauticTransportTests: XCTestCase {
         defer { dc_buffer_free(buffer) }
         var handle: [UInt8] = [0, 0, 0]
         XCTAssertEqual(suunto_nautic_device_subscribe(device, "/Sync/BusyState", &handle, buffer), DC_STATUS_UNSUPPORTED)
+    }
+
+    // MARK: - Waiting for a notification: a quiet watch is no error, a failed read still is
+
+    private static var sinkLines: [(level: String, message: String)] = []
+
+    private func captureSink() {
+        Self.sinkLines = []
+        set_libdc_log_sink { level, message in
+            SuuntoNauticTransportTests.sinkLines.append((String(cString: level!), String(cString: message!)))
+        }
+        addTeardownBlock { set_libdc_log_sink(nil) }
+    }
+
+    private static var receiveErrors: Int {
+        sinkLines.filter { $0.level == "ERROR" && $0.message.contains("Failed to receive the packet.") }.count
+    }
+
+    private func subscribeToUnsynced(_ device: OpaquePointer) {
+        let buffer = dc_buffer_new(0)
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        XCTAssertEqual(suunto_nautic_device_subscribe(device, "/Logbook/UnsynchronisedLogs", &handle, buffer), DC_STATUS_SUCCESS)
+    }
+
+    private func waitForNotification(_ device: OpaquePointer) -> (dc_status_t, [UInt8]) {
+        let buffer = dc_buffer_new(0)!
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        let status = suunto_nautic_device_wait_notification(device, 1000, &handle, buffer)
+        return (status, Array(UnsafeBufferPointer(start: dc_buffer_get_data(buffer), count: dc_buffer_get_size(buffer))))
+    }
+
+    func testAnIdleWaitTimesOutWithoutAnErrorAndADownloadsUnansweredRequestStillLogsOne() throws {
+        let dive = FakeDive(id: 1_789_312_850, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        captureSink()
+        let device = try open(watch, logging: true)
+        subscribeToUnsynced(device)
+
+        for _ in 0..<5 { XCTAssertEqual(waitForNotification(device).0, DC_STATUS_TIMEOUT) }
+        XCTAssertEqual(Self.sinkLines.filter { $0.level == "ERROR" }.map(\.message), [], "a quiet watch is the usual outcome of a wait")
+
+        watch.mutate { $0.unsyncedCount = 1 }
+        watch.notify("/Logbook/UnsynchronisedLogs")
+        let (status, value) = waitForNotification(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(value, [0x05, 0x00, 0x01, 0x00, 0x00])
+
+        watch.mutate { $0.unansweredSummaryGets = 1 }
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(Self.receiveErrors, 1, "the download's timeout is still an error: \(Self.sinkLines)")
+    }
+
+    func testALinkLostWhileWaitingIsStillAnError() throws {
+        let watch = FakeWatch(dives: [])
+        captureSink()
+        let device = try open(watch, logging: true)
+        subscribeToUnsynced(device)
+
+        watch.dropLink()
+        XCTAssertEqual(waitForNotification(device).0, DC_STATUS_IO)
+        XCTAssertEqual(Self.receiveErrors, 1)
+    }
+
+    func testANotificationCutOffWhileWaitingIsStillAnError() throws {
+        let watch = FakeWatch(dives: [])
+        captureSink()
+        let device = try open(watch, logging: true)
+        subscribeToUnsynced(device)
+
+        watch.notifyCutOff("/Logbook/UnsynchronisedLogs")
+        XCTAssertEqual(waitForNotification(device).0, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(Self.receiveErrors, 1, "a timeout with part of a frame received isn't a quiet watch")
     }
 
     func testShortDownloadStopsForeach() throws {
