@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 import CoreBluetooth
 import Clibdivecomputer
 import LibDCBridge
@@ -259,7 +260,7 @@ final class CloseOffMainTests: XCTestCase {
     func testDeviceOpenedDuringTeardownIsClosedAfterItWithoutAnEarlyCancel() {
         let events = EventLog()
         let release = DispatchSemaphore(value: 0)
-        let (manager, _) = makeLinkedManager(events: events, release: release)
+        let (manager, peripheral) = makeLinkedManager(events: events, release: release)
 
         manager.close(clearDevicePtr: true)
         spinMain(until: { events.contains("close: link up") })
@@ -271,12 +272,80 @@ final class CloseOffMainTests: XCTestCase {
 
         release.signal()
         release.signal()
-        spinMain(until: { events.count(of: "close returned") == 2 })
+        spinMain(until: { events.count(of: "close: link up") == 2 })
+        XCTAssertTrue(manager.peripheral === peripheral, "the first teardown leaves the link to the second device's close")
+        XCTAssertTrue(manager.isDisconnecting)
         spinMain(until: { !manager.isTearingDown })
-        let all = events.all
-        XCTAssertEqual(all.filter { $0 == "cancel" }.count, 1)
-        XCTAssertEqual(Array(all.prefix(2)), ["close: link up", "close returned"],
-                       "the link is cancelled after the first device's close, not before")
+        spinMain(for: 0.1)
+        XCTAssertEqual(events.all, ["close: link up", "close returned", "close: link up", "close returned", "cancel"],
+                       "each device's quit goes out on the live link, and one cancel follows the last")
+        if let returned = events.time(of: "close returned"), let cancelled = events.time(of: "cancel") {
+            XCTAssertGreaterThanOrEqual(cancelled.timeIntervalSince(returned), 0.45, "the second quit gets its settle too")
+        }
+        XCTAssertNil(manager.peripheral)
+        XCTAssertFalse(manager.isDisconnecting)
+    }
+
+    /// A connect that didn't wait (on main, or past its 30 s cap) makes a newer link; the old teardown skips its cancel.
+    func testDeviceOnALinkConnectedDuringTeardownGetsItsOwnCloseAndCancel() {
+        let events = EventLog()
+        let release = DispatchSemaphore(value: 0)
+        let (manager, _) = makeLinkedManager(events: events, release: release)
+
+        manager.close(clearDevicePtr: true)
+        spinMain(until: { events.contains("close: link up") })
+        manager.linkState.start()
+        openDevice(on: manager)
+        manager.close(clearDevicePtr: true)
+
+        release.signal()
+        release.signal()
+        spinMain(until: { !manager.isTearingDown })
+        spinMain(for: 0.1)
+        XCTAssertEqual(events.all, ["close: link up", "close returned", "close: link up", "close returned", "cancel"])
+        XCTAssertNil(manager.peripheral, "nothing is left holding connectedDevice for a host's next scan")
+        XCTAssertFalse(manager.isDisconnecting)
+    }
+
+    /// `connectToBLEDevice` closes a link whose open failed; iOS never times out its pending connect.
+    func testFailedConnectDuringTeardownStillHasItsLinkCancelled() {
+        let events = EventLog()
+        let release = DispatchSemaphore(value: 0)
+        let (manager, _) = makeLinkedManager(events: events, release: release)
+
+        manager.close(clearDevicePtr: true)
+        spinMain(until: { events.contains("close: link up") })
+        manager.linkState.start()
+        manager.close()
+        spinMain(for: 0.2)
+        XCTAssertEqual(events.all, ["close: link up"], "not before the running close's quit is out")
+
+        release.signal()
+        spinMain(until: { !manager.isTearingDown })
+        spinMain(for: 0.1)
+        XCTAssertEqual(events.all, ["close: link up", "close returned", "cancel"])
+        XCTAssertNil(manager.peripheral)
+    }
+
+    /// A driver's `ble_close` belongs to the old device, not to a link a connect has made since.
+    func testDriverClosingItsIostreamAfterAConnectLeavesTheNewLinkAlone() {
+        let events = EventLog()
+        let release = DispatchSemaphore(value: 0)
+        let (manager, peripheral) = makeLinkedManager(events: events, release: release)
+        manager.closeDevice = { [unowned manager] _ in
+            events.append("quit sent")
+            manager.linkState.start()
+            manager.close()
+            _ = release.wait(timeout: .now() + 3)
+            events.append("close returned")
+        }
+
+        manager.close(clearDevicePtr: true)
+        release.signal()
+        spinMain(until: { !manager.isTearingDown })
+        spinMain(for: 0.2)
+        XCTAssertEqual(events.all, ["quit sent", "close returned"], "no cancel on the new link")
+        XCTAssertTrue(manager.peripheral === peripheral)
     }
 
     func testCloseWithNoLinkStillPublishesDisconnected() {
@@ -298,9 +367,9 @@ final class CloseOffMainTests: XCTestCase {
         let closed = Flag()
         let closedOnMain = Flag()
         let cancelledDuringClose = Flag()
-        manager.closeDevice = { [unowned manager] _ in
+        manager.closeDevice = { [unowned manager] device in
             closedOnMain.set(Thread.isMainThread)
-            cancelledDuringClose.set(manager.isIOCancelled())
+            cancelledDuringClose.set(manager.isIOCancelled() || libdc_device_is_cancelled(device) != 0)
             Thread.sleep(forTimeInterval: 3)
             closed.set(true)
         }
@@ -309,6 +378,7 @@ final class CloseOffMainTests: XCTestCase {
         manager.close(clearDevicePtr: true)
         XCTAssertTrue(manager.openedDeviceDataPtr == devicePtr, "held back while the download uses the device")
         XCTAssertTrue(manager.isIOCancelled())
+        XCTAssertNotEqual(libdc_device_is_cancelled(devicePtr.pointee.device), 0, "drivers polling the cancel stop too")
 
         let start = Date()
         manager.endRetrieval(devicePtr)
@@ -318,7 +388,7 @@ final class CloseOffMainTests: XCTestCase {
         spinMain(until: { !manager.isTearingDown }, timeout: 6)
         XCTAssertTrue(closed.value)
         XCTAssertFalse(closedOnMain.value)
-        XCTAssertFalse(cancelledDuringClose.value, "the quit command goes out with I/O no longer cancelled")
+        XCTAssertFalse(cancelledDuringClose.value, "the driver sends its quit; a set cancel makes it skip it")
     }
 
     // MARK: - close(clearDevicePtr:completion:)
@@ -391,6 +461,37 @@ final class CloseOffMainTests: XCTestCase {
         }
         spinMain(for: 0.3)
         XCTAssertFalse(connected.value, "a connect waits while the old device's close is still on the link")
+
+        release.signal()
+        spinMain(until: { connected.value })
+        XCTAssertEqual(events.all, ["close: link up", "close returned", "cancel", "connect"])
+    }
+
+    /// A connect on another thread that starts its wait just as the close begins, before the device's close is queued.
+    func testConnectWaitingAsTheCloseBeginsWaitsForTheDeviceClose() {
+        let events = EventLog()
+        let release = DispatchSemaphore(value: 0)
+        let (manager, _) = makeLinkedManager(events: events, release: release)
+        let connectStarted = Flag()
+        let connected = Flag()
+        let sink = manager.$isDisconnecting.sink { disconnecting in
+            guard disconnecting, !connectStarted.value else { return }
+            connectStarted.set(true)
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = manager.connect(toDevice: UUID().uuidString)
+                events.append("connect")
+                connected.set(true)
+            }
+            // Main is held here, inside close(), so the connect's wait starts before the device's close is queued.
+            Thread.sleep(forTimeInterval: 0.2)
+        }
+        defer { sink.cancel() }
+
+        manager.close(clearDevicePtr: true)
+        XCTAssertTrue(connectStarted.value)
+        spinMain(until: { events.contains("close: link up") })
+        spinMain(for: 0.3)
+        XCTAssertFalse(connected.value, "the connect waits for the close that began under it")
 
         release.signal()
         spinMain(until: { connected.value })

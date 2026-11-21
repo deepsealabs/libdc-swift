@@ -6,6 +6,7 @@
 #include <libdivecomputer/iostream.h>
 #include <libdivecomputer/parser.h>
 #include "iostream-private.h"
+#include "device-private.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -553,6 +554,10 @@ dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback,
         return DC_STATUS_INVALIDARGS;
     }
     return dc_device_set_cancel(data->device, callback, userdata);
+}
+
+int libdc_device_is_cancelled(dc_device_t *device) {
+    return device_is_cancelled(device);
 }
 
 /*--------------------------------------------------------------------
