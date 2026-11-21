@@ -365,6 +365,7 @@ import LibDCBridge
     ) -> Bool {
         logDebug("LibDCSwift build \(libDCSwiftBuildTag) -- attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
+        CoreBluetoothManager.sharedManager.beginOpenAttempt()
         closeOpenDeviceFirst(opening: name)
 
         // Set connecting flag to prevent auto-reconnect during connection attempt
@@ -563,26 +564,54 @@ import LibDCBridge
         let actualModel = deviceDataPtr.pointee.devinfo.model
         func storable(_ family: DeviceFamily) -> Bool {
             guard requireKnownModel else { return true }
-            guard actualModel != 0, hasDescriptor(family: family.asDCFamily, model: actualModel) else {
+#if os(macOS)
+            // As in DiveComputerIdentity: the Cobalt 1 reports model 0.
+            let named = actualModel != 0 || family == .atomicsCobalt
+#else
+            let named = actualModel != 0
+#endif
+            guard named, hasDescriptor(family: family.asDCFamily, model: actualModel) else {
                 logWarning("Hardware reports model \(actualModel) for \(deviceName), which no descriptor knows; keeping the stored model")
                 return false
             }
             return true
         }
+
+        /// A cable's family and model as opened: its name is the catalog's, which a BLE name pattern can match to another family,
+        /// and its record is keyed by the cable, which another family's computer can come through next.
+        func openedDescriptor() -> (family: DeviceFamily, model: UInt32)? {
+#if os(macOS)
+            if let transport, transport != .ble, let descriptor = deviceDataPtr.pointee.descriptor,
+               let family = DeviceFamily(dcFamily: dc_descriptor_get_type(descriptor)) {
+                return (family, dc_descriptor_get_model(descriptor))
+            }
+#endif
+            return nil
+        }
+
+        func unstoredGuess() -> (family: DeviceFamily, model: UInt32)? {
+            openedDescriptor() ?? fromName(deviceName)
+        }
         
         if let storedDevice = storage.getStoredDevice(uuid: deviceAddress) {
-            if storedDevice.model != actualModel, storable(storedDevice.family) {
-                logInfo("🔄 Updating stored device model from \(storedDevice.model) to actual model \(actualModel) for \(deviceName)")
+            let opened = openedDescriptor()
+            let family = opened?.family ?? storedDevice.family
+            let familyChanged = family != storedDevice.family
+            guard familyChanged || storedDevice.model != actualModel else { return }
+            // A computer of another family with no usable reported model takes the opened descriptor's.
+            let model: UInt32? = storable(family) ? actualModel : (familyChanged ? opened?.model : nil)
+            if let model {
+                logInfo("🔄 Updating stored device from \(storedDevice.family.rawValue) model \(storedDevice.model) to \(family.rawValue) model \(model) for \(deviceName)")
                 storage.storeDevice(
                     uuid: deviceAddress,
                     name: deviceName,
-                    family: storedDevice.family,
-                    model: actualModel,
+                    family: family,
+                    model: model,
                     transport: transport,
                     locator: locator
                 )
             }
-        } else if let deviceInfo = fromName(deviceName) {
+        } else if let deviceInfo = unstoredGuess() {
             if deviceInfo.model != actualModel, storable(deviceInfo.family) {
                 logInfo("🔄 Storing device with actual model \(actualModel) (name suggested \(deviceInfo.model)) for \(deviceName)")
                 storage.storeDevice(

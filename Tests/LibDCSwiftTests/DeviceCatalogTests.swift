@@ -46,7 +46,8 @@ final class DeviceCatalogTests: XCTestCase {
     func testCableCatalogCounts() {
         let serialDescriptors = Self.rawDescriptors.filter { $0.transports & DC_TRANSPORT_SERIAL.rawValue != 0 }
         XCTAssertEqual(serialDescriptors.count, 288)
-        XCTAssertEqual(DeviceCatalog.models(for: .serial).count, 283, "288 SERIAL descriptors less Shearwater's 5 paired-Bluetooth ports")
+        XCTAssertEqual(DeviceCatalog.models(for: .serial).count, 281,
+                       "288 SERIAL descriptors less Shearwater's 5 paired-Bluetooth ports and the cable-less OSTC 4 and 5")
         XCTAssertEqual(DeviceCatalog.models(for: .usbHID).count, 10)
         XCTAssertEqual(DeviceCatalog.models(for: .usb).count, 2)
         XCTAssertEqual(DeviceCatalog.models(for: .classicBTSerial).count, 5)
@@ -64,6 +65,18 @@ final class DeviceCatalogTests: XCTestCase {
         // Other SERIAL | BLUETOOTH descriptors have a cable.
         XCTAssertTrue(serial.contains("Heinrichs Weikamp OSTC 3"))
         XCTAssertTrue(serial.contains("Ratio iX3M GPS Easy"))
+    }
+
+    func testTheOSTC4And5HaveNoCable() {
+        let serial = Set(names(DeviceCatalog.models(for: .serial)))
+        for name in ["Heinrichs Weikamp OSTC 4", "Heinrichs Weikamp OSTC 5"] {
+            XCTAssertFalse(serial.contains(name), "\(name)'s SERIAL flag is a Linux RFCOMM tty")
+            XCTAssertEqual(DeviceCatalog.all.first { $0.name == name }?.transports.contains(.ble), true)
+        }
+        #if os(macOS)
+        let ostcFirst = CableHints.hint(vendorID: 0x0403, productID: 0x6015)?.candidates.prefix(12).map(\.name) ?? []
+        XCTAssertFalse(ostcFirst.contains("Heinrichs Weikamp OSTC 4"), "no phantom choice on an OSTC cable")
+        #endif
     }
 
     func testIrDAOnlyModelsHaveNoTransport() {
@@ -124,6 +137,22 @@ final class DeviceCatalogTests: XCTestCase {
             XCTAssertEqual(names(DeviceCatalog.candidates(vid: vid, pid: pid, transport: .usbHID)), models,
                            String(format: "%04x:%04x", vid, pid))
         }
+    }
+
+    func testAUwatecPIDOpensAHostChosenG3ButAnEONSteelPIDOnlyItsOwnModel() throws {
+        func model(_ name: String) throws -> DCModel {
+            try XCTUnwrap(DeviceCatalog.models(for: .usbHID).first { $0.name == name }, name)
+        }
+        let g3 = try model("Scubapro G3")
+        for pid: UInt16 in [0x3201, 0x3211, 0x4201] {
+            XCTAssertTrue(DeviceCatalog.canOpen(g3, vid: 0x2e6c, pid: pid, transport: .usbHID), "DEVINFO names a uwatec computer")
+            XCTAssertFalse(DeviceCatalog.candidates(vid: 0x2e6c, pid: pid, transport: .usbHID).contains(g3), "not offered")
+        }
+        XCTAssertTrue(DeviceCatalog.canOpen(try model("Scubapro G2 TEK"), vid: 0x2e6c, pid: 0x3201, transport: .usbHID))
+        XCTAssertFalse(DeviceCatalog.canOpen(try model("Scubapro G2 Console"), vid: 0x2e6c, pid: 0x3201, transport: .usbHID))
+        XCTAssertFalse(DeviceCatalog.canOpen(try model("Suunto EON Core"), vid: 0x1493, pid: 0x0030, transport: .usbHID),
+                       "the EON Steel stores the opened model as its own")
+        XCTAssertFalse(DeviceCatalog.canOpen(g3, vid: 0x1493, pid: 0x0030, transport: .usbHID))
     }
 
     func testTheFamilyFilterAloneMatchesTheWholeFamily() {
@@ -197,7 +226,7 @@ final class DeviceCatalogTests: XCTestCase {
 
     func testCableSupportFollowsThePlatform() {
         #if os(macOS)
-        XCTAssertEqual(CableSupport.transports, [.serial, .usbHID])
+        XCTAssertEqual(CableSupport.transports, [.serial, .classicBTSerial, .usbHID, .usb], "a paired Bluetooth port is a serial port")
         #else
         XCTAssertEqual(CableSupport.transports, [])
         #endif

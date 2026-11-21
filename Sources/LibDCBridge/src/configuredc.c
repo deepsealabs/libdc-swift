@@ -1,5 +1,6 @@
 #include "configuredc.h"
 #include "BLEBridge.h"
+#include "bridge_private.h"
 #include <libdivecomputer/device.h>
 #include <libdivecomputer/descriptor.h>
 #include <libdivecomputer/iostream.h>
@@ -323,6 +324,11 @@ static void close_device_data(device_data_t *data) {
         dc_iostream_close(data->iostream);
         data->iostream = NULL;
     }
+    // After the iostream: closing a wrapping stream closes the port it wraps.
+    if (data->stream_context) {
+        dc_context_free(data->stream_context);
+        data->stream_context = NULL;
+    }
     if (data->context) {
         dc_context_free(data->context);
         data->context = NULL;
@@ -383,6 +389,13 @@ static void configure_context_logging(dc_context_t *context) {
     dc_context_set_loglevel(context,
         g_ble_debug_logging ? DC_LOGLEVEL_DEBUG : DC_LOGLEVEL_WARNING);
 }
+
+#if TARGET_OS_OSX
+// A cable open logs the port's own failure (dc_serial_open's errno) before open_device_on_iostream sets this up.
+void libdc_configure_context_logging(dc_context_t *context) {
+    configure_context_logging(context);
+}
+#endif
 
 /*--------------------------------------------------------------------
  * Opens the device on data->iostream; releases everything on failure

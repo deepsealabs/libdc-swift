@@ -6,6 +6,15 @@ import Clibdivecomputer
 public final class TapStream: DCIOStreamBackend {
     /// The longest a blocked read, poll or sleep waits between cancel checks; half of 100 ms so a cancel lands within 100 ms.
     public static let cancelCheckMilliseconds: Int32 = 50
+    /// While closing after a cancel or a timed-out read, the longest one read or poll waits, so a computer that stopped answering
+    /// can't hold a driver's close for its full timeout.
+    public static let closingReadLimitMilliseconds: Int32 = 500
+    /// Before the close of a serial session a cancel cut a read short: the quiet that ends the drain, and the longest it runs.
+    static let drainSilenceMilliseconds: Int32 = 100
+    static let drainLimitMilliseconds: Int32 = 1000
+    /// A paired classic-Bluetooth link's floor for a driver's positive read timeout: Subsurface's libdivecomputer gives Shearwater
+    /// 12 s where upstream gives 3 s, and the RFCOMM link can still be settling when the first request goes out.
+    public static let bluetoothReadTimeoutFloorMilliseconds: Int32 = 12_000
 
     /// The inner stream's transport, to open the tap's own stream with.
     public let transport: dc_transport_t
@@ -16,14 +25,27 @@ public final class TapStream: DCIOStreamBackend {
     private var inner: OpaquePointer?
     private let cancelLock = NSLock()
     private var cancelCheck: (() -> Bool)?
+    private var closing = false
+    private var closingLimit: Int32?
+    private var readCancelled = false
+    private var readTimedOut = false
+    private let readTimeoutFloor: Int32?
+    private let coalescesInboundLog: Bool
+    private var pendingInbound: [UInt8] = []
+    private var received = 0
     private var timeout: Int32?
     private var innerTimeout: Int32?
     private var slicedReads = true
 
-    /// Takes ownership of `inner`: `close()` closes it, and so does deinit if `close()` never ran.
+    /// Takes ownership of `inner`: `close()` closes it, and so does deinit if `close()` never ran. A positive timeout the driver
+    /// sets is raised to `readTimeoutFloor` on the inner stream; recordings keep the driver's own value. With
+    /// `coalescesInboundLog`, the packet log gets one inbound line per SLIP frame end (0xC0), 256 bytes, or the next write or
+    /// close, instead of one per read (off BLE, Shearwater reads 1 byte a call); a recording still gets every read.
     public init(inner: OpaquePointer, channel: String? = nil, recorder: DCStreamRecorder? = nil,
-                isCancelled: (() -> Bool)? = nil) {
+                isCancelled: (() -> Bool)? = nil, readTimeoutFloor: Int32? = nil, coalescesInboundLog: Bool = false) {
         self.inner = inner
+        self.readTimeoutFloor = readTimeoutFloor
+        self.coalescesInboundLog = coalescesInboundLog
         transport = dc_iostream_get_transport(inner)
         self.channel = channel ?? DCRecording.name(of: transport)
         self.recorder = recorder
@@ -46,20 +68,60 @@ public final class TapStream: DCIOStreamBackend {
         cancelCheck = isCancelled
     }
 
+    /// For a driver's close: the cancel check is ignored and sleeps and writes run in full, as upstream never interrupts a close
+    /// (Cressi Goa needs its 100 ms sleep for the quit to land). Once the session was cancelled or a read timed out, each read or
+    /// poll waits at most `readLimit` ms; a clean close keeps the driver's own timeouts. On a serial port, when a cancel ended a
+    /// read, the line is drained first (until 100 ms pass with nothing, for at most 1 s) and input purged, so the driver's quit
+    /// isn't answered by the rest of a dump. `sessionCancelled` is whether the session was cancelled as its close began; nil
+    /// asks the cancel check now, which a check on a session already released answers wrongly.
+    public func beginClosing(sessionCancelled: Bool? = nil, readLimit: Int32 = TapStream.closingReadLimitMilliseconds) {
+        let sessionCancelled = sessionCancelled ?? cancelled
+        cancelLock.lock()
+        closing = true
+        closingLimit = sessionCancelled || readCancelled || readTimedOut ? max(readLimit, 1) : nil
+        let drain = readCancelled && transport == DC_TRANSPORT_SERIAL
+        cancelLock.unlock()
+        if drain { drainInput() }
+    }
+
+    /// Bytes the inner stream has handed back so far: a link that never answered reads 0.
+    public var bytesRead: Int {
+        cancelLock.lock(); defer { cancelLock.unlock() }
+        return received
+    }
+
     private var cancelled: Bool {
         cancelLock.lock()
-        let check = cancelCheck
+        let check = closing ? nil : cancelCheck
         cancelLock.unlock()
         return check?() ?? false
+    }
+
+    private func note(_ status: dc_status_t) {
+        guard status == DC_STATUS_CANCELLED || status == DC_STATUS_TIMEOUT else { return }
+        cancelLock.lock(); defer { cancelLock.unlock() }
+        if status == DC_STATUS_CANCELLED { readCancelled = true } else { readTimedOut = true }
+    }
+
+    /// `timeout` capped by the closing limit: blocking becomes the limit, 0 stays a no-wait read.
+    private func limited(_ timeout: Int32?) -> Int32? {
+        cancelLock.lock()
+        let limit = closingLimit
+        cancelLock.unlock()
+        guard let limit else { return timeout }
+        guard let timeout else { return limit }
+        if timeout == 0 { return 0 }
+        return timeout < 0 ? limit : min(timeout, limit)
     }
 
     // MARK: - DCIOStreamBackend
 
     public func setTimeout(_ timeout: Int32) -> dc_status_t {
-        let status = inner.map { dc_iostream_set_timeout($0, timeout) } ?? DC_STATUS_IO
+        let effective = readTimeoutFloor.map { timeout > 0 ? max(timeout, $0) : timeout } ?? timeout
+        let status = inner.map { dc_iostream_set_timeout($0, effective) } ?? DC_STATUS_IO
         if status == DC_STATUS_SUCCESS {
-            self.timeout = timeout
-            innerTimeout = timeout
+            self.timeout = effective
+            innerTimeout = effective
         }
         recorder?.append(.setTimeout(timeout, status: status))
         return status
@@ -119,14 +181,21 @@ public final class TapStream: DCIOStreamBackend {
         let status: dc_status_t
         if inner == nil {
             status = DC_STATUS_IO
-        } else if cancelled {
+        } else if cancelled, transport != DC_TRANSPORT_USB {
             status = DC_STATUS_CANCELLED
         } else {
+            // A raw USB stream takes its own cancel, after the rest of a dive it is mid-way through.
             status = cancellableRead(buffer, &actual)
+        }
+        note(status)
+        if actual > 0 {
+            cancelLock.lock()
+            received += actual
+            cancelLock.unlock()
         }
         if wantsBytes {
             let bytes = Array(UnsafeRawBufferPointer(rebasing: buffer[0..<actual]))
-            logPacket(.inbound, bytes)
+            logInbound(bytes, ended: status != DC_STATUS_SUCCESS)
             recorder?.append(.read(size: buffer.count, data: bytes, status: status))
         }
         return status
@@ -138,6 +207,7 @@ public final class TapStream: DCIOStreamBackend {
         actual = written
         if wantsBytes {
             let bytes = Array(data)
+            flushInboundLog()
             logPacket(.outbound, Array(bytes.prefix(written)))
             recorder?.append(.write(data: bytes, actual: written, status: status))
         }
@@ -174,6 +244,7 @@ public final class TapStream: DCIOStreamBackend {
 
     public func close() -> dc_status_t {
         guard let inner else { return DC_STATUS_SUCCESS }
+        flushInboundLog()
         self.inner = nil
         let status = dc_iostream_close(inner)
         recorder?.append(.close(status: status))
@@ -187,6 +258,22 @@ public final class TapStream: DCIOStreamBackend {
     private func logPacket(_ direction: PacketDirection, _ bytes: [UInt8]) {
         guard !bytes.isEmpty else { return }
         Logger.shared.logPacket(direction: direction, data: Data(bytes), channel: channel)
+    }
+
+    static let slipEnd: UInt8 = 0xC0
+    static let coalescedLogLimit = 256
+
+    private func logInbound(_ bytes: [UInt8], ended: Bool) {
+        guard coalescesInboundLog else { return logPacket(.inbound, bytes) }
+        pendingInbound += bytes
+        if ended || bytes.contains(Self.slipEnd) || pendingInbound.count >= Self.coalescedLogLimit { flushInboundLog() }
+    }
+
+    private func flushInboundLog() {
+        guard !pendingInbound.isEmpty else { return }
+        let bytes = pendingInbound
+        pendingInbound = []
+        logPacket(.inbound, bytes)
     }
 
     private static func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
@@ -231,8 +318,9 @@ public final class TapStream: DCIOStreamBackend {
     // Keeps serial_posix's rules: -1 blocks, 0 takes what is there, N ms is a deadline, a timeout keeps the partial count.
     private func cancellableRead(_ buffer: UnsafeMutableRawBufferPointer, _ actual: inout Int) -> dc_status_t {
         guard let inner else { return DC_STATUS_IO }
-        guard slicedReads, let timeout, timeout != 0, buffer.count > 0 else {
-            return directRead(inner, buffer, from: 0, timeout: timeout, &actual)
+        let readTimeout = limited(timeout)
+        guard slicedReads, let timeout = readTimeout, timeout != 0, buffer.count > 0 else {
+            return directRead(inner, buffer, from: 0, timeout: readTimeout, &actual)
         }
         let deadline = Self.deadline(after: timeout)
         while true {
@@ -268,9 +356,10 @@ public final class TapStream: DCIOStreamBackend {
         deadline.map(Self.millisecondsLeft) ?? -1
     }
 
-    private func cancellablePoll(_ timeout: Int32) -> dc_status_t {
+    private func cancellablePoll(_ requested: Int32) -> dc_status_t {
         guard let inner else { return DC_STATUS_IO }
         if cancelled { return DC_STATUS_CANCELLED }
+        let timeout = limited(requested) ?? requested
         if timeout == 0 { return dc_iostream_poll(inner, 0) }
         let deadline = Self.deadline(after: timeout)
         while true {
@@ -279,6 +368,23 @@ public final class TapStream: DCIOStreamBackend {
             if cancelled { return DC_STATUS_CANCELLED }
             if Self.expired(deadline) { return DC_STATUS_TIMEOUT }
         }
+    }
+
+    /// Reads and drops what the computer still sends, then purges input; not recorded, since no driver asked for it.
+    private func drainInput() {
+        guard let inner, let deadline = Self.deadline(after: Self.drainLimitMilliseconds) else { return }
+        var scratch = [UInt8](repeating: 0, count: 1024)
+        var dropped = 0
+        while !Self.expired(deadline) {
+            let quiet = min(Self.drainSilenceMilliseconds, max(Self.millisecondsLeft(deadline), 1))
+            guard dc_iostream_poll(inner, quiet) == DC_STATUS_SUCCESS, setInnerTimeout(inner, 0) == DC_STATUS_SUCCESS else { break }
+            var count = 0
+            let status = scratch.withUnsafeMutableBytes { dc_iostream_read(inner, $0.baseAddress, $0.count, &count) }
+            dropped += count
+            if count == 0 || (status != DC_STATUS_SUCCESS && status != DC_STATUS_TIMEOUT) { break }
+        }
+        let purged = dc_iostream_purge(inner, DC_DIRECTION_INPUT)
+        logInfo("\(channel): dropped \(dropped) byte(s) a cancelled read left on the line before the driver's close (purge \(purged.rawValue))")
     }
 
     private func cancellableSleep(_ milliseconds: UInt32) -> dc_status_t {
