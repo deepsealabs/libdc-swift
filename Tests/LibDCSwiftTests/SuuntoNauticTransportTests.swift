@@ -150,6 +150,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// Served for any /Logbook/byId/<id>/Descriptors, paged like /Summary.
         var descriptors: [UInt8] = []
         var mdsPayloadSize = 278
+        /// Most bytes one read returns, as a BLE notification caps it (60 in #29's Nautic capture); nil for no cap.
+        var maxReadSize: Int?
         /// Stale 0x01 chunks emitted just before the next /Summary GET's ACK.
         var leftoverChunksBeforeSummaryAck = 0
         /// Streams to refuse with 423 before accepting.
@@ -342,7 +344,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         // Watch -> host bytes; nil once the link is down and nothing is left in flight.
         func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int? {
             lock.lock(); defer { lock.unlock() }
-            let n = min(size, rx.count - rxIndex)
+            let n = min(size, rx.count - rxIndex, maxReadSize ?? Int.max)
             guard n > 0 else { return linkUp ? 0 : nil }
             rx.withUnsafeBufferPointer { buffer.copyMemory(from: $0.baseAddress! + rxIndex, byteCount: n) }
             rxIndex += n
@@ -712,12 +714,14 @@ final class SuuntoNauticTransportTests: XCTestCase {
         Unmanaged<FakeWatch>.fromOpaque(userdata!).takeUnretainedValue()
     }
 
-    private func open(_ watch: FakeWatch, resume: SuuntoNauticResume? = nil) throws -> OpaquePointer {
+    /// `logging`: the context logs through the bridge at `LibDCLogging.level`, as a connect's does.
+    private func open(_ watch: FakeWatch, resume: SuuntoNauticResume? = nil, logging: Bool = false) throws -> OpaquePointer {
         let s = Session(watch: watch)
         sessionsLock.lock()
         sessions.append(s)
         sessionsLock.unlock()
         XCTAssertEqual(dc_context_new(&s.context), DC_STATUS_SUCCESS)
+        if logging, let context = s.context { LibDCLogging.configure(context) }
 
         var cbs = dc_custom_cbs_t()
         cbs.set_timeout = { _, _ in DC_STATUS_SUCCESS }
@@ -1878,6 +1882,55 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(got.map(\.data), newestFirst.map { $0.blob })
         XCTAssertEqual(watch.streamedPaths, newestFirst.map { "/Logbook/byId/\($0.id)/Data" })
         XCTAssertEqual(watch.heldIdHandles, [])
+    }
+
+    // MARK: - Full logging
+
+    private static let fullLog = BoundedLogBuffer()
+    private static let fullLogClock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
+    /// What DC Tester's Share log holds after a full-logging download: four dives the size of #29's 1787752091, read 60 bytes
+    /// at a time. The fake sends each as 843,681 bytes of heatshrink literals (673,907 compressed on the real watch), so this
+    /// logs more than a real download: about 13 MB here, 6.0 MB for the real two-dive capture in the same line format.
+    func testAFullLoggingDownloadOfFourRealSizeDivesFitsTheDefaultLogBuffer() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
+        let fixture = [UInt8](try Data(contentsOf: url))
+        let summarySize = Int(Self.le32(fixture, 0))
+        let summary = Array(fixture[4..<(4 + summarySize)])
+        let profile = Array(fixture[(4 + summarySize)...])
+        let dives = (0..<4).map { FakeDive(id: 1_787_752_091 + UInt32($0) * 86_400, summary: summary, profile: profile) }
+        let watch = FakeWatch(dives: dives)
+        watch.maxReadSize = 60
+
+        Self.fullLog.removeAll()
+        LibDCLogging.level = .all
+        set_libdc_log_sink { level, message in
+            let stamp = SuuntoNauticTransportTests.fullLogClock.string(from: Date())
+            SuuntoNauticTransportTests.fullLog.append(
+                "\(stamp) [libdc \(String(cString: level!))] \(String(cString: message!))")
+        }
+        defer {
+            set_libdc_log_sink(nil)
+            LibDCLogging.level = .warning
+        }
+        let device = try open(watch, logging: true)
+
+        let (status, got) = foreach(device)
+
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(got.count, 4)
+        let wire = dives.reduce(0) { $0 + $1.compressed.count + $1.summary.count }
+        let logged = Self.fullLog.byteCount
+        let perByte = Double(logged) / Double(wire)
+        print(String(format: "Full log: %d lines, %d bytes for %d bytes on the wire (%.2f per byte); a 673,907-byte dive logs ~%.1f MB",
+                     Self.fullLog.lineCount, logged, wire, perByte, perByte * 673_907 / 1_048_576))
+        XCTAssertEqual(Self.fullLog.droppedLineCount, 0, "four dives fit the default buffer")
+        XCTAssertGreaterThan(Self.fullLog.lines().filter { $0.contains("Read: size=60, data=") }.count, wire / 60 * 9 / 10)
+        Self.fullLog.removeAll()
     }
 
     // MARK: - Auto download: reconnect, resume, no duplicates

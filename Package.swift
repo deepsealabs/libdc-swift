@@ -90,6 +90,8 @@ let package = Package(
             sources: [
                 "LibDCSwift.swift",
                 "Logger.swift",
+                "LibDCLogging.swift",
+                "BoundedLogBuffer.swift",
                 "BLEManager.swift",
                 "BLELinkState.swift",
                 "BLEConnectionFailure.swift",
