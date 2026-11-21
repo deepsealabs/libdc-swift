@@ -5,9 +5,15 @@ import LibDCBridge
 import Clibdivecomputer
 
 struct ContentView: View {
+    private enum Screen: Hashable {
+        case explorer
+        case autoDownload
+    }
+
     @StateObject private var bluetoothManager = CoreBluetoothManager.sharedManager
     @EnvironmentObject private var autoDownload: AutoDownloadController
-    @State private var showAutoDownload = false
+    // One path: a pop and a push on two isPresented destinations in the same update draw a blank page.
+    @State private var path: [Screen] = []
 
     @State private var isConnecting = false
     @State private var connectError: String?
@@ -16,7 +22,7 @@ struct ContentView: View {
     @State private var explorerDeviceName: String?
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             VStack(spacing: 0) {
                 experimentalBanner
 
@@ -65,20 +71,26 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationDestination(isPresented: explorerBinding) {
-                if let devicePtr = bluetoothManager.openedDeviceDataPtr, let explorerDeviceName {
-                    DeviceExplorerView(devicePtr: devicePtr, deviceName: explorerDeviceName, bluetoothManager: bluetoothManager)
+            .navigationDestination(for: Screen.self) { screen in
+                switch screen {
+                case .explorer:
+                    if let devicePtr = bluetoothManager.openedDeviceDataPtr, let explorerDeviceName {
+                        DeviceExplorerView(devicePtr: devicePtr, deviceName: explorerDeviceName, bluetoothManager: bluetoothManager)
+                    }
+                case .autoDownload:
+                    AutoDownloadView(controller: autoDownload)
                 }
-            }
-            .navigationDestination(isPresented: $showAutoDownload) {
-                AutoDownloadView(controller: autoDownload)
             }
             .onChange(of: autoDownload.deviceName) { name in
-                // Turning it on from the device screen pops that screen; land on the live log instead.
-                if name != nil {
-                    explorerDeviceName = nil
-                    showAutoDownload = true
-                }
+                // Turning it on from the device screen closes that device; swap the screen for the live log in one write.
+                if name != nil { path = [.autoDownload] }
+            }
+            .onChange(of: bluetoothManager.hasValidDeviceDataPtr()) { open in
+                // A closed device (e.g. a lost link) pops its screen; auto download's handoff is handled above.
+                if !open && !autoDownload.isActive { path.removeAll { $0 == .explorer } }
+            }
+            .onChange(of: path) { path in
+                if !path.contains(.explorer) { explorerDeviceName = nil }
             }
             .onChange(of: bluetoothManager.hasLostLink) { lost in
                 // The device screen closes the device and pops back here; say why and what to do.
@@ -87,13 +99,6 @@ struct ContentView: View {
                 }
             }
         }
-    }
-
-    private var explorerBinding: Binding<Bool> {
-        Binding(
-            get: { explorerDeviceName != nil && bluetoothManager.hasValidDeviceDataPtr() && !autoDownload.isActive },
-            set: { if !$0 { explorerDeviceName = nil } }
-        )
     }
 
     @ViewBuilder
@@ -109,7 +114,7 @@ struct ContentView: View {
                 AutoDownloadToggle(device: device, controller: autoDownload)
             }
             Button {
-                showAutoDownload = true
+                path = [.autoDownload]
             } label: {
                 Label("Live log and actions", systemImage: "list.bullet.rectangle")
             }
@@ -189,6 +194,9 @@ struct ContentView: View {
                 connectingPeripheralID = nil
                 if success {
                     explorerDeviceName = name
+                    if bluetoothManager.hasValidDeviceDataPtr() && !autoDownload.isActive {
+                        path = [.explorer]
+                    }
                 } else {
                     connectError = "Couldn't connect to \(name). Check it's awake (press a button) and in range, then try again."
                     ExplorerLog.shared.append("Connect to \(name) failed")
