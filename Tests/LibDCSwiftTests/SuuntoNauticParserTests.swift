@@ -162,6 +162,50 @@ final class SuuntoNauticParserTests: XCTestCase {
         data.dropFirst(8).range(of: Data("SBEM0103".utf8)) != nil
     }
 
+    private static let fixtureStart: Int64 = 1787752091
+
+    /// A stream holding only what a dive's start comes from: a timeline base of
+    /// `start` at `quarterHours` from UTC, and a GPS fix at UTC `gps`.
+    private static func stream(base: (start: Int64, quarterHours: Int8)? = nil, gps: Int64? = nil) -> Data {
+        var data = Data("SBEM0103".utf8)
+        if let base {
+            let clockMs = (base.start + Int64(base.quarterHours) * 900) * 1000
+            data += [0x01, 0x08]
+            data += withUnsafeBytes(of: clockMs.littleEndian) { Data($0.prefix(7)) }
+            data.append(UInt8(bitPattern: base.quarterHours))
+        }
+        if let gps {
+            data += [0x0B, 20, 0, 0]
+            data += withUnsafeBytes(of: (gps * 1000).littleEndian) { Data($0) }
+            data += Data(count: 10)
+        }
+        return data
+    }
+
+    /// `dc_parser_get_datetime`'s answer, nil when the parser has none.
+    private func parserDatetime(_ data: Data) -> dc_datetime_t? {
+        var parser: OpaquePointer?
+        let status = data.withUnsafeBytes { raw -> dc_status_t in
+            create_parser_for_device(&parser, nil, DC_FAMILY_SUUNTO_NAUTIC, 0,
+                                     raw.bindMemory(to: UInt8.self).baseAddress, data.count)
+        }
+        guard status == DC_STATUS_SUCCESS, let parser else { return nil }
+        defer { dc_parser_destroy(parser) }
+        var datetime = dc_datetime_t()
+        return dc_parser_get_datetime(parser, &datetime) == DC_STATUS_SUCCESS ? datetime : nil
+    }
+
+    /// The parser reports the fixture's start, as `hour`:48:11 at `timezone`.
+    private func assertStart(of data: Data, hour: Int32, timezone: Int32, line: UInt = #line) throws {
+        let datetime = try XCTUnwrap(parserDatetime(data), line: line)
+        XCTAssertEqual(datetime.hour, hour, line: line)
+        XCTAssertEqual(datetime.minute, 48, line: line)
+        XCTAssertEqual(datetime.second, 11, line: line)
+        XCTAssertEqual(datetime.timezone, timezone, line: line)
+        XCTAssertEqual(GenericParser.instant(of: datetime)?.timeIntervalSince1970,
+                       TimeInterval(Self.fixtureStart), line: line)
+    }
+
     // MARK: - Tests
 
     func testDecodeProfileFields() throws {
@@ -207,6 +251,30 @@ final class SuuntoNauticParserTests: XCTestCase {
         let local = dc_datetime_t(year: 2026, month: 8, day: 26, hour: 15, minute: 48, second: 11, timezone: 7200)
         let expected = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 8, day: 26, hour: 15, minute: 48, second: 11))
         XCTAssertEqual(GenericParser.startDate(of: local, dcFamily: DC_FAMILY_SHEARWATER_PETREL), expected)
+    }
+
+    func testTheParserReportsTheWallClockADiveLogged() throws {
+        try assertStart(of: loadFixture(), hour: 15, timezone: 7200)
+        try assertStart(of: Self.stream(base: (Self.fixtureStart, 8), gps: Self.fixtureStart), hour: 15, timezone: 7200)
+        try assertStart(of: Self.stream(base: (Self.fixtureStart, -16), gps: Self.fixtureStart), hour: 9, timezone: -14400)
+    }
+
+    func testADiveWithNoGPSFixStartsFromItsTimelineBase() throws {
+        let data = Self.stream(base: (Self.fixtureStart, 8))
+        try assertStart(of: data, hour: 15, timezone: 7200)
+        XCTAssertEqual(try parse(data).datetime.timeIntervalSince1970, TimeInterval(Self.fixtureStart))
+        XCTAssertEqual(SuuntoNauticExplorer.owningLogbookID(of: data, among: [1787752091]), 1787752091)
+    }
+
+    func testAGPSFixOverrulesATimelineBaseThatContradictsIt() throws {
+        let data = Self.stream(base: (Self.fixtureStart + 3600, 8), gps: Self.fixtureStart)
+        try assertStart(of: data, hour: 13, timezone: 0)
+    }
+
+    func testAnImplausibleTimelineBaseIsIgnored() throws {
+        // UTC+14:15, past the last zone there is.
+        try assertStart(of: Self.stream(base: (Self.fixtureStart, 57), gps: Self.fixtureStart), hour: 13, timezone: 0)
+        XCTAssertNil(parserDatetime(Self.stream(base: (Self.fixtureStart, 57))))
     }
 
     func testOwningLogbookIDNamesTheDiveTheBytesBelongTo() throws {
