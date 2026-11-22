@@ -354,7 +354,10 @@ struct DeviceExplorerView: View {
                 busy = false
                 let nonDives = viewModel.lastNonDivesSkipped
                 let skipped = nonDives > 0 ? " Skipped \(DiveLogRetriever.nonDivesSkippedText(nonDives))." : ""
-                if !success {
+                if !success && viewModel.lastDownloadStatus == DiveLogRetriever.otherAppActiveStatus {
+                    statusMessage = "The Suunto app started using the watch, so the download stepped aside. "
+                        + "Once it's done, reconnect and download again to carry on.\(skipped)"
+                } else if !success {
                     let hint = handshakeMissing && viewModel.lastDownloadStatus == "TIMEOUT" ? "\n\(Self.sleepingHint)" : ""
                     // `status` is empty on most failures; the reason lives in `progress`.
                     let reason: String
@@ -546,6 +549,12 @@ struct DeviceExplorerView: View {
     /// half-finished), which a reconnect clears. Only call the dive gone when
     /// /Logbook/Entries no longer lists it.
     private func describeDownloadFailure(id: String, error: Error) -> String {
+        if case SuuntoNauticExplorer.ExplorerError.otherAppActive = error {
+            // Every request on this connection fails from here on, so don't list or fetch anything more.
+            let kept = resumableBytes(of: id).map { " The \($0) bytes received are kept." } ?? ""
+            return "The Suunto app started using the watch, so DC Tester stepped aside from dive \(id).\(kept) "
+                + "Once the Suunto app is done, reconnect and download it again to carry on."
+        }
         var statusText = "\(error)"
         if case SuuntoNauticExplorer.ExplorerError.requestFailed(let st) = error {
             statusText = "status \(st.rawValue)"

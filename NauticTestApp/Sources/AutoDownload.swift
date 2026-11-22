@@ -144,7 +144,7 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         case .state(let newState):
             state = newState
             switch newState {
-            case .listing, .downloading, .watching, .watchBusy, .stopped: unreachableHint = nil
+            case .listing, .downloading, .watching, .watchBusy, .waitingForSuuntoApp, .stopped: unreachableHint = nil
             default: break
             }
             append("State: \(Self.describe(newState))")
@@ -197,6 +197,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         case .watchBusy: return "connected, watch busy"
         case .reconnecting(let attempt, let delay): return "reconnecting (attempt \(attempt), in \(Int(delay)) s)"
         case .coolingDown(let until): return "paused after repeated failures, retrying at \(until.formatted(date: .omitted, time: .shortened))"
+        case .waitingForSuuntoApp(let until):
+            return "paused, the Suunto app is syncing the watch; trying again at \(until.formatted(date: .omitted, time: .standard))"
         }
     }
 

@@ -205,20 +205,25 @@ struct ContentView: View {
                 ? DeviceConfiguration.DeviceFamily(dcFamily: dcFamily).map { ($0, dcModel) }
                 : nil
             let forcedModel = detected ?? (.suuntoNautic, UInt32(0))
-            let success = DeviceConfiguration.openBLEDevice(
+            let status = DeviceConfiguration.openBLEDeviceStatus(
                 name: name,
                 deviceAddress: address,
                 forcedModel: forcedModel
             )
+            // The Nautic driver's open fails with TIMEOUT only after waiting for the Suunto app to finish with the watch.
+            let suuntoAppBusy = status == DC_STATUS_TIMEOUT && forcedModel.0 == .suuntoNautic
 
             DispatchQueue.main.async {
                 isConnecting = false
                 connectingPeripheralID = nil
-                if success {
+                if status == DC_STATUS_SUCCESS {
                     explorerDeviceName = name
                     if bluetoothManager.hasValidDeviceDataPtr() && !autoDownload.isActive {
                         path = [.explorer]
                     }
+                } else if suuntoAppBusy {
+                    connectError = "The Suunto app is syncing \(name). Try again once it's done."
+                    ExplorerLog.shared.append("Connect to \(name) failed: the Suunto app is using the watch")
                 } else {
                     connectError = "Couldn't connect to \(name). Check it's awake (press a button) and in range, then try again."
                     ExplorerLog.shared.append("Connect to \(name) failed")
