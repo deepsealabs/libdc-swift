@@ -130,7 +130,10 @@ dc_status_t get_device_info_from_name(const char *name, dc_family_t *family, uns
  */
 char* get_formatted_device_name(const char *name);
 
-/** dc_device_open attempts open_ble_device makes on one BLE link, and the wait between them */
+/**
+ * dc_device_open attempts open_ble_device makes on one BLE link, and the wait between them. A lost link,
+ * a cancel and a Suunto Nautic/Ocean's DC_STATUS_TIMEOUT (another app is using the watch) end them early.
+ */
 #define LIBDC_BLE_OPEN_ATTEMPTS 5
 #define LIBDC_BLE_OPEN_RETRY_MS 3000
 
@@ -198,7 +201,8 @@ void libdc_close_device_data(device_data_t *data);
  * @param address: BLE device address
  * @param stored_family: Optional stored family (DC_FAMILY_NULL if none)
  * @param stored_model: Optional stored model (0 if none)
- * @return DC_STATUS_SUCCESS on success
+ * @return DC_STATUS_SUCCESS on success, else the status of the last open tried: the stored model's when
+ *         the name resolves to the same family, so a Suunto Nautic/Ocean's DC_STATUS_TIMEOUT comes through
  */
 dc_status_t open_ble_device_with_identification(device_data_t **out_data, 
     const char *name, const char *address,

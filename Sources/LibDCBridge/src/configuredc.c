@@ -470,6 +470,10 @@ static dc_status_t open_device_with_descriptor(device_data_t *data, dc_descripto
         if (rc == DC_STATUS_NODEVICE || rc == DC_STATUS_CANCELLED) {
             break;
         }
+        // A Suunto Nautic/Ocean already waited about 20 s for another app (the Suunto app) to finish with the watch.
+        if (rc == DC_STATUS_TIMEOUT && dc_descriptor_get_type(descriptor) == DC_FAMILY_SUUNTO_NAUTIC) {
+            break;
+        }
     }
     if (rc != DC_STATUS_SUCCESS) {
         printf("Failed to open device after %u attempts, rc=%d\n", attempts, rc);
@@ -952,12 +956,14 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     // Try stored configuration first if provided. Model 0 is legitimate for
     // families without sub-models (e.g. Suunto Nautic is forced as
     // (suuntoNautic, 0)); guarding on stored_model != 0 here would skip them.
+    dc_status_t stored_rc = DC_STATUS_IO;
     if (stored_family != DC_FAMILY_NULL) {
         rc = open_ble_device(data, address, stored_family, stored_model);
         if (rc == DC_STATUS_SUCCESS) {
             *out_data = data;
             return DC_STATUS_SUCCESS;
         }
+        stored_rc = rc;
     }
     
     // Fall back to identification if stored config failed or wasn't provided
@@ -970,10 +976,10 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     // Skip if name-based detection resolves to the same device family we
     // already tried -- retrying the same protocol family with a slightly
     // different model number can't help (same wire protocol, same
-    // handshake) and creates BLE races.
+    // handshake) and creates BLE races. The stored open's status says why it failed.
     if (stored_family != DC_FAMILY_NULL && family == stored_family) {
         free(data);
-        return DC_STATUS_IO;
+        return stored_rc;
     }
 
     rc = open_ble_device(data, address, family, model);

@@ -336,6 +336,17 @@ import LibDCBridge
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)? = nil
     ) -> Bool {
+        openBLEDeviceStatus(name: name, deviceAddress: deviceAddress, forcedModel: forcedModel) == DC_STATUS_SUCCESS
+    }
+
+    /// `openBLEDevice` with the open's status, `DC_STATUS_SUCCESS` once the device is open. From a Suunto
+    /// Nautic/Ocean, `DC_STATUS_TIMEOUT` means another app (the Suunto app) is using the watch: the open waited
+    /// about 20 s for it and isn't retried; try again later.
+    public static func openBLEDeviceStatus(
+        name: String,
+        deviceAddress: String,
+        forcedModel: (family: DeviceFamily, model: UInt32)? = nil
+    ) -> dc_status_t {
         warnIfOnMainThread("openBLEDevice")
         connectionLock.lock()
         defer { connectionLock.unlock() }
@@ -364,7 +375,7 @@ import LibDCBridge
         name: String,
         deviceAddress: String,
         forcedModel: (family: DeviceFamily, model: UInt32)?
-    ) -> Bool {
+    ) -> dc_status_t {
         logDebug("LibDCSwift build \(libDCSwiftBuildTag) -- attempting to open BLE device: \(name) at address: \(deviceAddress)")
 
         CoreBluetoothManager.sharedManager.beginOpenAttempt()
@@ -446,10 +457,10 @@ import LibDCBridge
                     manager.isConnecting = false // Clear connecting flag on success
                 }
             }
-            return true
+            return DC_STATUS_SUCCESS
         }
 
-        logError("Failed to open device (status: \(status))")
+        logError("Failed to open device (status: DC_STATUS_\(DiveLogRetriever.statusName(status)))")
         // Clear connecting flag on failure
         DispatchQueue.main.async {
             if let manager = CoreBluetoothManager.shared() as? CoreBluetoothManager {
@@ -459,7 +470,7 @@ import LibDCBridge
         if let data = deviceData {
             data.deallocate()
         }
-        return false
+        return status == DC_STATUS_SUCCESS ? DC_STATUS_IO : status
     }
     
     /// Fetches device info (serial, model, firmware) by starting and immediately stopping dive enumeration

@@ -3069,4 +3069,26 @@ extension SuuntoNauticTransportTests {
         XCTAssertEqual(watch.streamUnsubscribes, [200, 200], "the left-over stream's, then ours at the end")
         XCTAssertEqual(watch.heldIdHandles, [])
     }
+
+    // MARK: Bridge and explorer
+
+    /// The bridge retried a failed open 5 times, 3 s apart: on a busy Nautic each retry waited for the app again.
+    func testTheBridgeDoesntRetryANauticOpenThatFoundTheLinkBusy() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appBusyAfterHello = true
+        watch.pushAppReplies(5)
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let iostream = try stream(watch, context: context)
+        let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        data.initialize(to: device_data_t())
+        defer { data.deallocate() }
+        data.pointee.context = context
+
+        let started = Date()
+        let status = open_device_on_iostream(data, iostream, DC_FAMILY_SUUNTO_NAUTIC, 0, UInt32(LIBDC_BLE_OPEN_ATTEMPTS), 0)
+        XCTAssertEqual(status, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(watch.hellosReceived, 1, "one open")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "not four more waits of 20 s")
+    }
 }
