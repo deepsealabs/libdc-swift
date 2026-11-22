@@ -122,6 +122,12 @@ public struct DiveSyncPlan: Equatable {
         return n
     }
 
+    /// Takes back an attempt that ended because the Suunto app started using the watch: it isn't one of the retries.
+    public mutating func forgetAttempt(_ id: UInt32) {
+        guard let n = attempts[id] else { return }
+        attempts[id] = n > 1 ? n - 1 : nil
+    }
+
     public func canRetry(_ id: UInt32) -> Bool {
         (attempts[id] ?? 0) <= retriesPerDive
     }

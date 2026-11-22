@@ -84,8 +84,11 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
 
     public func connect() throws -> NauticSyncLink {
         let address = currentAddress
-        guard DeviceConfiguration.openBLEDevice(name: name, deviceAddress: address, forcedModel: (family, model)) else {
-            throw NauticAutoSyncError.connectFailed("could not open \(name)")
+        let status = DeviceConfiguration.openBLEDeviceStatus(name: name, deviceAddress: address, forcedModel: (family, model))
+        guard status == DC_STATUS_SUCCESS else {
+            // The driver's open fails with TIMEOUT only after waiting for another app to finish with the watch.
+            if status == DC_STATUS_TIMEOUT && family == .suuntoNautic { throw NauticAutoSyncError.otherAppActive }
+            throw NauticAutoSyncError.connectFailed("could not open \(name) (\(DiveLogRetriever.statusName(status)))")
         }
         // openBLEDevice publishes the pointer with an async hop to main; this read is queued behind it.
         let manager = self.manager
