@@ -160,6 +160,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
             append("Dive \(id) failed: \(reason)")
         case .watchUnreachable:
             unreachableHint = "Watch not reachable. It may be asleep: press a button on the watch."
+        case .otherAppPersists(let waits):
+            append("The Suunto app kept the watch through \(waits) waits without progress; counting the next tries as failed attempts. Close the Suunto app if it isn't syncing.")
         case .syncCompleted(let summary):
             append("Sync done: \(summary.downloaded.count) new of \(summary.listed) on the watch" +
                    (summary.failed.isEmpty ? "" : ", failed: \(summary.failed.map(String.init).joined(separator: ", "))"))

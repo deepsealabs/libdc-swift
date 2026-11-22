@@ -142,8 +142,9 @@ final class NauticAutoSyncPolicyTests: XCTestCase {
 
     func testConnectAttemptsAndTriggerRetriesAreBounded() {
         let config = NauticAutoSync.Configuration()
-        // Past the open's wait of about 20 s for the Suunto app, but a pending connect to a sleeping watch can't sit for minutes.
-        XCTAssertEqual(config.connectTimeout, 45)
+        // A pending connect to a sleeping watch can't sit for minutes; a link that is up gets the open's wait on top.
+        XCTAssertEqual(config.connectTimeout, 25)
+        XCTAssertEqual(config.openTimeout, 30)
         XCTAssertEqual(config.triggerSubscribeRetries, 3)
         XCTAssertEqual(config.triggerSubscribeRetryDelay, 2)
         XCTAssertEqual(config.triggerResubscribeInterval, 5 * 60)

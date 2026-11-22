@@ -282,6 +282,7 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
             RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.05))
         }
 
+        setOpenAttemptLinkUp(notifyCharacteristic.isNotifying)
         return notifyCharacteristic.isNotifying
     }
     
@@ -872,7 +873,21 @@ public class CoreBluetoothManager: NSObject, CoreBluetoothManagerProtocol, Obser
     
     /// Starts an open: the last open's failure no longer applies, even if this one fails before it connects.
     func beginOpenAttempt() {
+        setOpenAttemptLinkUp(false)
         syncOnMain { self.connectAttempt.start() }
+    }
+
+    private let openAttemptLinkLock = NSLock()
+    private var openAttemptLinkUp = false
+
+    /// Whether the current open's link is up, notifications on: the driver is opening the device on it. Any thread.
+    public var isOpenAttemptLinkUp: Bool {
+        openAttemptLinkLock.lock(); defer { openAttemptLinkLock.unlock() }
+        return openAttemptLinkUp
+    }
+
+    private func setOpenAttemptLinkUp(_ value: Bool) {
+        openAttemptLinkLock.lock(); openAttemptLinkUp = value; openAttemptLinkLock.unlock()
     }
 
     @objc public func connect(toDevice address: String!) -> Bool {

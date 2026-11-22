@@ -130,6 +130,8 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
         return .connectFailed("could not open \(name) (\(DiveLogRetriever.statusName(status)))")
     }
 
+    public var isLinkUp: Bool { manager.isOpenAttemptLinkUp }
+
     /// iOS never times out a pending connect; cancelling it makes the open's wait for the link fail.
     public func cancelConnect() {
         let manager = self.manager

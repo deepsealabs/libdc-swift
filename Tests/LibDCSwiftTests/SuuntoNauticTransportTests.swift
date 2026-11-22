@@ -2313,6 +2313,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var hangingConnects = 0
         /// Called with the attempt's number once the watch has reconnected, before the open.
         var onConnect: ((Int) -> Void)?
+        /// Connects whose open finds the Suunto app using the watch, before anything else.
+        var busyConnects = 0
+        /// What `isLinkUp` reports: a hanging connect with its link up is opening the device.
+        var linkUpWhileConnecting = false
+        var isLinkUp: Bool { lock.lock(); defer { lock.unlock() }; return linkUpWhileConnecting }
         var connects: Int { lock.lock(); defer { lock.unlock() }; return _connects }
         var presenceChecks: Int { lock.lock(); defer { lock.unlock() }; return _presenceChecks }
         var cancels: Int { lock.lock(); defer { lock.unlock() }; return _cancels }
@@ -2338,7 +2343,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
             let attempt = _connects
             let hang = hangingConnects > 0
             if hang { hangingConnects -= 1 }
+            let busy = busyConnects > 0
+            if busy { busyConnects -= 1 }
             lock.unlock()
+            if busy { throw NauticAutoSyncError.otherAppActive }
             if hang {
                 _ = cancelled.wait(timeout: .now() + 10)
                 throw NauticAutoSyncError.connectFailed("could not open")
@@ -2402,8 +2410,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
         -> (NauticAutoSync, FakeConnector, VirtualClock, EventLog) {
         let connector = FakeConnector(watch: watch, open: { [unowned self] in
             let (status, device) = try self.openStatus(watch, resume: resume)
-            if status == DC_STATUS_TIMEOUT { return nil }
-            XCTAssertEqual(status, DC_STATUS_SUCCESS)
+            guard status == DC_STATUS_SUCCESS else {
+                throw CoreBluetoothNauticConnector.openFailure(status, family: .suuntoNautic, name: Self.watchName)
+            }
             return try XCTUnwrap(device)
         }, close: { [unowned self] in self.close(device: $0) })
         connector.slot = slot
@@ -3317,10 +3326,16 @@ extension SuuntoNauticTransportTests {
         events.filter { if case .state(.reconnecting) = $0 { return true } else { return false } }.count
     }
 
+    private static func persists(_ events: [NauticAutoSync.Event]) -> [Int] {
+        events.compactMap { if case .otherAppPersists(let waits) = $0 { return waits } else { return nil } }
+    }
+
     func testAutoDownloadDefaultsLeaveRoomForTheOpensWaitAndBackOff() {
         let configuration = NauticAutoSync.Configuration()
-        XCTAssertGreaterThanOrEqual(configuration.connectTimeout ?? .infinity, 45, "the open waits up to about 20 s for the app")
+        XCTAssertEqual(configuration.connectTimeout, 25, "an asleep watch gets the press-a-button hint as soon as before")
+        XCTAssertGreaterThanOrEqual(configuration.openTimeout, 25, "once the link is up, the open waits up to about 20 s for the app")
         XCTAssertEqual(configuration.otherAppBackOff, [30, 60, 120, 300])
+        XCTAssertEqual(configuration.otherAppWaitsWithoutProgress, 3)
     }
 
     func testAutoSyncWaitsForTheSuuntoAppWhenTheOpenFindsTheLinkBusy() async throws {
@@ -3392,9 +3407,9 @@ extension SuuntoNauticTransportTests {
             $0.retriesPerDive = 1
             $0.reconnect = ReconnectPolicy(loopDisconnects: 2)
         }
-        // No resume buffer, so every attempt streams the dive again, and the app cuts in five times.
+        // No resume buffer, so every attempt streams the dive again, and the app cuts in three times.
         connector.onConnect = { attempt in
-            watch.mutate { $0.appDuringStream = attempt <= 5 ? (1, .tornHello) : nil }
+            watch.mutate { $0.appDuringStream = attempt <= 3 ? (1, .tornHello) : nil }
         }
 
         sync.start()
@@ -3405,16 +3420,145 @@ extension SuuntoNauticTransportTests {
 
         // The app says hello while auto download listens for new dives.
         watch.pushAppHello()
-        await waitFor(log) { Self.otherAppWaits($0) == 6 }
+        await waitFor(log) { Self.otherAppWaits($0) == 4 }
         await waitFor(log) { $0.last == .state(.watching) }
         await stopAndWait(sync, log)
 
         let events = log.all
-        XCTAssertEqual(clock.sleeps.filter { $0 >= 30 }, [30, 60, 120, 300, 300, 30])
-        XCTAssertEqual(connector.connects, 7)
+        XCTAssertEqual(clock.sleeps.filter { $0 >= 30 }, [30, 60, 120, 30])
+        XCTAssertEqual(connector.connects, 5)
         XCTAssertFalse(events.contains { if case .state(.coolingDown) = $0 { return true } else { return false } })
         XCTAssertEqual(Self.reconnects(events), 0)
         XCTAssertFalse(events.contains { if case .diveFailed = $0 { return true } else { return false } })
+        XCTAssertEqual(Self.persists(events), [])
+    }
+
+    /// M2: a step-aside that never gets anywhere (a false one, or an app that answers our traffic with its hello)
+    /// must not hold a dive forever.
+    func testStepAsidesThatGetNowhereCountAfterThreeAndTheDiveIsGivenUp() async throws {
+        let dive = FakeDive(id: 1_790_300_100, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch) { $0.retriesPerDive = 1 }
+        // No resume buffer, so nothing is kept: the app cuts in on every connect.
+        connector.onConnect = { _ in watch.mutate { $0.appDuringStream = (1, .tornHello) } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertEqual(Self.otherAppWaits(events), 3, "three waits are let off")
+        XCTAssertEqual(Array(clock.sleeps.prefix(5)), [30, 60, 120, 4, 4], "then the usual reconnect delay")
+        XCTAssertEqual(Self.persists(events), [3, 4])
+        XCTAssertTrue(messages.contains("The Suunto app has kept the watch through 3 waits without progress; counting this as a failed attempt"), "\(messages)")
+        XCTAssertTrue(events.contains(.diveFailed(id: dive.id, reason: "the Suunto app kept using the watch")))
+        XCTAssertEqual(Self.completedSyncs(events).first?.failed, [dive.id])
+        XCTAssertEqual(Self.dives(events), [])
+        XCTAssertEqual(connector.connects, 6)
+    }
+
+    func testAStepAsideThatKeepsNewBytesIsProgressAndStillLetOff() async throws {
+        let dive = FakeDive(id: 1_790_300_200, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch, resume: SuuntoNauticResume())
+        // Three busy opens, then the app cuts into the stream: the fourth wait, but the bytes before it are kept.
+        connector.busyConnects = 3
+        connector.onConnect = { attempt in watch.mutate { $0.appDuringStream = attempt == 4 ? (5, .tornHello) : nil } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        XCTAssertEqual(Self.persists(events), [])
+        XCTAssertEqual(clock.sleeps.filter { $0 >= 30 }, [30, 60, 120, 300])
+        XCTAssertEqual(Self.dives(events).map(\.attempts), [1], "the step-aside isn't one of the dive's attempts")
+        XCTAssertEqual(Self.dives(events).map(\.data), [Data(dive.blob)])
+    }
+
+    func testTheSameStepAsideWithoutBytesKeptCountsAsTheDivesAttempt() async throws {
+        let dive = FakeDive(id: 1_790_300_300, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch)
+        connector.busyConnects = 3
+        connector.onConnect = { attempt in watch.mutate { $0.appDuringStream = attempt == 4 ? (5, .tornHello) : nil } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        XCTAssertEqual(Self.persists(events), [3])
+        XCTAssertEqual(clock.sleeps.filter { $0 >= 30 }, [30, 60, 120])
+        XCTAssertEqual(Self.dives(events).map(\.attempts), [2])
+    }
+
+    func testBusyOpensThatGetNowhereBecomeFailedConnectsAndLeavingRangeStartsOver() async throws {
+        let dive = FakeDive(id: 1_790_300_400, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch) { $0.reconnect = ReconnectPolicy(maxCountedAttempts: 2) }
+        connector.busyConnects = 6
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertEqual(Self.persists(events), [3, 4])
+        XCTAssertTrue(messages.contains("Connect failed: the Suunto app is using the watch"), "\(messages)")
+        XCTAssertTrue(messages.contains("Connect keeps failing; pausing reconnects"))
+        XCTAssertTrue(events.contains { if case .state(.coolingDown) = $0 { return true } else { return false } })
+        // The cool-down ends with the watch looked for again, so the back-off and the patience start over.
+        XCTAssertEqual(Array(clock.sleeps.prefix(6)), [30, 60, 120, 4, ReconnectPolicy().coolDown, 30])
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
+        XCTAssertEqual(connector.connects, 7)
+    }
+
+    /// M1 end to end: an open whose write timed out is an ordinary failed connect, never the Suunto app.
+    func testAWriteTimeoutOnConnectIsAFailedConnectNotTheSuuntoApp() async throws {
+        let dive = FakeDive(id: 1_790_300_500, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch)
+        connector.onConnect = { attempt in watch.mutate { $0.timedOutWrites = attempt == 1 ? [1] : [] } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertTrue(messages.contains("Connect failed: could not open \(Self.watchName) (IO)"), "\(messages)")
+        XCTAssertEqual(Self.otherAppWaits(events), 0)
+        XCTAssertTrue(events.contains(.state(.reconnecting(attempt: 2, delay: 4))))
+        XCTAssertEqual(clock.sleeps.first, 4)
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
+    }
+
+    /// S5: the press-a-button hint isn't held back for the open's wait unless the link came up.
+    func testAConnectWhoseLinkIsUpGetsTheOpensWaitAndNoUnreachableHint() async throws {
+        let dive = FakeDive(id: 1_790_300_600, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, _, log) = makeAutoSync(watch) {
+            $0.connectTimeout = 0.2
+            $0.openTimeout = 0.6
+        }
+        connector.hangingConnects = 1
+        connector.linkUpWhileConnecting = true
+        let started = Date()
+
+        sync.start()
+        await waitFor(log) { Self.logs($0).contains("Connect failed: timed out") }
+        let cancelledAfter = Date().timeIntervalSince(started)
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        XCTAssertGreaterThanOrEqual(cancelledAfter, 0.75, "connectTimeout, then openTimeout more")
+        XCTAssertEqual(connector.cancels, 1)
+        XCTAssertFalse(events.contains { if case .watchUnreachable = $0 { return true } else { return false } })
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
     }
 
     func testARefusedStreamIsRetriedOnANewConnection() async throws {

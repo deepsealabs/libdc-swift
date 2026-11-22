@@ -36,10 +36,13 @@ public protocol NauticSyncConnector: AnyObject {
     func simulateDrop()
     /// Abandons a `connect()` still in progress, which then returns or throws soon after.
     func cancelConnect()
+    /// Whether the `connect()` in progress has its BLE link up and is opening the device on it.
+    var isLinkUp: Bool { get }
 }
 
 public extension NauticSyncConnector {
     func cancelConnect() {}
+    var isLinkUp: Bool { false }
 }
 
 public enum NauticAutoSyncError: Error, Equatable {

@@ -24,7 +24,10 @@ public protocol NauticAutoSyncDelegate: AnyObject {
 /// - when the Suunto app is using the watch (the open finds the link busy, or
 ///   the driver steps aside mid-session), closes the link and waits for it,
 ///   backing off `otherAppBackOff`, before carrying on. Those waits count
-///   toward neither the reconnect limits nor a dive's retries.
+///   toward neither the reconnect limits nor a dive's retries, as long as
+///   they get somewhere: after `otherAppWaitsWithoutProgress` in a row with
+///   no dive finished and no new bytes kept, the next one is a failed attempt
+///   like any other (`Event.otherAppPersists`).
 ///
 /// Never writes to the watch: dives stay unsynchronised for the Suunto app.
 public final class NauticAutoSync {
@@ -44,10 +47,12 @@ public final class NauticAutoSync {
         public var notificationPollMs: UInt32 = 1000
         /// How long to look for the watch after a failed connect before waiting passively.
         public var presenceTimeout: TimeInterval = 15
-        /// Gives up on a connect attempt after this long; nil waits as long as the open does.
-        /// A watch on its standby screen isn't connectable until a button is pressed. Longer than the
-        /// driver's open, which waits up to about 20 s for the Suunto app to finish with the watch.
-        public var connectTimeout: TimeInterval? = 45
+        /// Gives up on a connect attempt that hasn't brought the BLE link up after this long; nil waits as long
+        /// as the open does. A watch on its standby screen isn't connectable until a button is pressed.
+        public var connectTimeout: TimeInterval? = 25
+        /// Once the link is up, how much longer than `connectTimeout` the open may take: the driver waits up to
+        /// about 20 s for the Suunto app to finish with the watch. Needs a connector that reports `isLinkUp`.
+        public var openTimeout: TimeInterval = 30
         /// Attempts after the first when subscribing to the sync triggers fails, and the delay between them.
         public var triggerSubscribeRetries = 3
         public var triggerSubscribeRetryDelay: TimeInterval = 2
@@ -56,6 +61,9 @@ public final class NauticAutoSync {
         /// Waits before trying again while the Suunto app is using the watch, in turn; the last one repeats,
         /// and a completed sync starts over from the first.
         public var otherAppBackOff: [TimeInterval] = [30, 60, 120, 300]
+        /// Waits for the Suunto app in a row with no dive finished and no new bytes kept for a resume, after
+        /// which the next one counts as a failed attempt: toward the dive's retries and `ReconnectPolicy`.
+        public var otherAppWaitsWithoutProgress = 3
 
         public init() {}
     }
@@ -97,6 +105,10 @@ public final class NauticAutoSync {
         case syncCompleted(SyncSummary)
         /// A connect attempt timed out: the watch is likely asleep on its standby screen.
         case watchUnreachable(after: TimeInterval)
+        /// The Suunto app (or another app) kept the watch through `waits` waits in a row without auto download
+        /// getting anywhere, more than `otherAppWaitsWithoutProgress`. This one, and each after it until a dive
+        /// finishes or new bytes are kept, counts as a failed connect, lost link or dive attempt.
+        case otherAppPersists(waits: Int)
     }
 
     public static let unreachableHint = "watch not reachable; it may be asleep, press a button on the watch"
@@ -149,6 +161,10 @@ public final class NauticAutoSync {
     private var runDownloaded: [UInt32] = []
     /// Waits for the Suunto app since the last completed sync, which pick the next `otherAppBackOff` step.
     private var otherAppWaits = 0
+    /// Step-asides for the Suunto app in a row with no dive finished and no new bytes kept.
+    private var fruitlessStepAsides = 0
+    /// Whether the download's step-aside was let off (`excuseStepAside`), for the session to act on.
+    private var downloadStepAsideExcused: Bool?
 
     public init(
         deviceKey: String,
@@ -230,6 +246,8 @@ public final class NauticAutoSync {
     private enum SessionOutcome {
         case linkLost(String)
         case refresh(String)
+        /// Open a new session after the usual delay, outside the reconnect limits.
+        case reconnect(String)
         case otherAppActive(String)
         case idleDone
         case stopped
@@ -245,6 +263,7 @@ public final class NauticAutoSync {
     private enum SyncOutcome {
         case done
         case refresh(String)
+        case reconnect(String)
         case stopped
     }
 
@@ -326,6 +345,9 @@ public final class NauticAutoSync {
                     link = opened
                 case .gone:
                     linkLease.release()
+                    // The watch went away, so whatever kept it busy is over.
+                    otherAppWaits = 0
+                    fruitlessStepAsides = 0
                     continue
                 case .otherAppActive:
                     // The lease is let go of for the wait, so another watch's session can run meanwhile.
@@ -348,6 +370,12 @@ public final class NauticAutoSync {
                 case .idleDone:
                     set(.waitingForDevice)
                     try await environment.sleep(configuration.revisitInterval)
+                case .reconnect(let reason):
+                    // A dive's refused transfer, bounded by its retries: not a lost link, so the loop guard leaves it out.
+                    emit(.log(reason))
+                    set(.reconnecting(attempt: tracker.nextAttempt, delay: configuration.reconnect.retryDelay))
+                    try await environment.sleep(configuration.reconnect.retryDelay)
+                    reconnecting = true
                 case .linkLost(let reason), .refresh(let reason):
                     emit(.log(reason))
                     switch tracker.disconnected(at: environment.now()) {
@@ -376,8 +404,8 @@ public final class NauticAutoSync {
                 emit(.log("Connected"))
                 return .connected(link)
             } catch {
-                // The watch is awake and in range, only busy: not a failed attempt.
-                if Self.isOtherAppActive(error) { return .otherAppActive }
+                // The watch is awake and in range, only busy: not a failed attempt, while the waits get somewhere.
+                if Self.isOtherAppActive(error), excuseStepAside(progressed: false) { return .otherAppActive }
                 emit(.log("Connect failed: \(Self.describe(error))"))
                 guard try await connector.waitUntilPresent(timeout: configuration.presenceTimeout) else {
                     emit(.log("Watch no longer in range; waiting for it"))
@@ -395,6 +423,20 @@ public final class NauticAutoSync {
             }
         }
         return .gone
+    }
+
+    /// Counts a step-aside for the Suunto app; false once `otherAppWaitsWithoutProgress` in a row got nowhere,
+    /// when it is to count as a failed attempt instead.
+    private func excuseStepAside(progressed: Bool) -> Bool {
+        if progressed {
+            fruitlessStepAsides = 0
+            return true
+        }
+        fruitlessStepAsides += 1
+        guard fruitlessStepAsides > configuration.otherAppWaitsWithoutProgress else { return true }
+        emit(.log("The Suunto app has kept the watch through \(fruitlessStepAsides - 1) waits without progress; counting this as a failed attempt"))
+        emit(.otherAppPersists(waits: fruitlessStepAsides - 1))
+        return false
     }
 
     /// Keeps off the watch while the Suunto app uses it, for the next `otherAppBackOff` step.
@@ -415,16 +457,11 @@ public final class NauticAutoSync {
         }
         let attempt = ConnectAttempt()
         let started = Date()
-        // Wall-clock, so a device that slept past the deadline fires as soon as it wakes.
-        DispatchQueue.global().asyncAfter(wallDeadline: .now() + timeout) { [connector = self.connector] in
-            guard attempt.expire() else { return }
-            connector.cancelConnect()
-        }
+        armConnectDeadline(attempt, after: timeout, linkGrace: configuration.openTimeout)
         do {
             let link = try await onLinkQueue { try self.connector.connect() }
             if attempt.finish() { return link }
             await runOnLinkQueue { link.close() }
-            reportUnreachable(after: timeout)
             throw NauticAutoSyncError.connectTimedOut
         } catch NauticAutoSyncError.connectTimedOut {
             throw NauticAutoSyncError.connectTimedOut
@@ -432,10 +469,7 @@ public final class NauticAutoSync {
             let expired = !attempt.finish()
             // An open that found the Suunto app using the watch reached it: it isn't asleep.
             if Self.isOtherAppActive(error) { throw error }
-            if expired {
-                reportUnreachable(after: timeout)
-                throw NauticAutoSyncError.connectTimedOut
-            }
+            if expired { throw NauticAutoSyncError.connectTimedOut }
             let elapsed = Date().timeIntervalSince(started)
             if elapsed > timeout * 2 {
                 emit(.log("The connect attempt took \(Int(elapsed)) s; the app was probably suspended meanwhile"))
@@ -444,10 +478,25 @@ public final class NauticAutoSync {
         }
     }
 
-    /// Reported once the timed-out connect has returned, so an open that failed because the Suunto app is busy never says so.
-    private func reportUnreachable(after timeout: TimeInterval) {
-        emit(.log("No connection after \(Int(timeout)) s: \(Self.unreachableHint)"))
-        emit(.watchUnreachable(after: timeout))
+    /// Cancels the connect `timeout` after it started unless its link is up by then; a link that is up gets
+    /// `linkGrace` more for the open, whose wait for the Suunto app comes after the link. Only a link that never came
+    /// up is reported unreachable, at once.
+    private func armConnectDeadline(_ attempt: ConnectAttempt, after timeout: TimeInterval, linkGrace: TimeInterval) {
+        // Wall-clock, so a device that slept past the deadline fires as soon as it wakes.
+        DispatchQueue.global().asyncAfter(wallDeadline: .now() + timeout) { [weak self, connector = self.connector] in
+            if connector.isLinkUp {
+                DispatchQueue.global().asyncAfter(wallDeadline: .now() + linkGrace) {
+                    guard attempt.expire() else { return }
+                    self?.emit(.log("The open took over \(Int(timeout + linkGrace)) s after the link came up; cancelling it"))
+                    connector.cancelConnect()
+                }
+                return
+            }
+            guard attempt.expire() else { return }
+            self?.emit(.log("No connection after \(Int(timeout)) s: \(Self.unreachableHint)"))
+            self?.emit(.watchUnreachable(after: timeout))
+            connector.cancelConnect()
+        }
     }
 
     private func coolDown(_ duration: TimeInterval, _ tracker: inout ReconnectTracker) async throws {
@@ -489,6 +538,7 @@ public final class NauticAutoSync {
                     switch try await sync(link, &plan) {
                     case .done: break
                     case .refresh(let reason): return .refresh(reason)
+                    case .reconnect(let reason): return .reconnect(reason)
                     case .stopped: return .stopped
                     }
                     needsSync = false
@@ -536,9 +586,13 @@ public final class NauticAutoSync {
             }
             switch Self.classify(error) {
             case .otherAppActive:
+                let excused = downloadStepAsideExcused ?? excuseStepAside(progressed: false)
+                downloadStepAsideExcused = nil
                 // The driver already waited for the Suunto app; every call on this device fails from here on.
+                guard excused else { return .linkLost("The Suunto app started using the watch again; stepped aside") }
                 return .otherAppActive("The Suunto app started using the watch; stepped aside")
             case .refused(let reason):
+                // Nothing else bounds these reconnects, so they stay under the loop guard.
                 return .refresh("The watch refused a request (\(reason)); reconnecting before trying again")
             default:
                 return .linkLost("Link lost: \(Self.describe(error))")
@@ -560,8 +614,9 @@ public final class NauticAutoSync {
             let id = pending[index]
             set(.downloading(index: index + 1, total: pending.count, id: id))
             let attempt = plan.recordAttempt(id)
-            if let bytes = try? await onLinkQueue({ link.resumableBytes(of: id) }) {
-                emit(.log("Dive \(id): carrying on from byte \(bytes) of an earlier attempt"))
+            let kept = try? await onLinkQueue({ link.resumableBytes(of: id) })
+            if let kept {
+                emit(.log("Dive \(id): carrying on from byte \(kept) of an earlier attempt"))
             }
             do {
                 let data = try await onLinkQueue { try link.download(id) }
@@ -583,7 +638,15 @@ public final class NauticAutoSync {
                     return .stopped
                 case .otherAppActive:
                     // The bytes that arrived are kept for the resume; the attempt was the Suunto app's doing.
-                    plan.forgetAttempt(id)
+                    let now = try? await onLinkQueue({ link.resumableBytes(of: id) })
+                    let excused = excuseStepAside(progressed: (now ?? 0) > (kept ?? 0))
+                    downloadStepAsideExcused = excused
+                    if excused {
+                        plan.forgetAttempt(id)
+                    } else if !plan.canRetry(id) {
+                        plan.giveUp(id)
+                        emit(.diveFailed(id: id, reason: "the Suunto app kept using the watch"))
+                    }
                     throw error
                 case .refused(let reason):
                     // A transfer the watch refused or broke off leaves the session in doubt (after a Suunto app
@@ -592,7 +655,7 @@ public final class NauticAutoSync {
                         plan.giveUp(id)
                         emit(.diveFailed(id: id, reason: reason))
                     }
-                    return .refresh("Dive \(id) failed (\(reason), attempt \(attempt)); reconnecting before trying again")
+                    return .reconnect("Dive \(id) failed (\(reason), attempt \(attempt)); reconnecting before trying again")
                 case .incomplete(let data):
                     if plan.canRetry(id) {
                         return .refresh("Dive \(id) came back incomplete (attempt \(attempt)); reconnecting to retry")
@@ -616,6 +679,7 @@ public final class NauticAutoSync {
         runDownloaded.removeAll()
         plan.finishRun()
         otherAppWaits = 0
+        fruitlessStepAsides = 0
         return .done
     }
 
@@ -645,6 +709,7 @@ public final class NauticAutoSync {
         store.markSynced([id], device: deviceKey)
         plan.markSynced(id)
         runDownloaded.append(id)
+        fruitlessStepAsides = 0
         emit(.dive(dive))
     }
 
