@@ -56,6 +56,8 @@ public class DiveLogRetriever {
         let useFingerprint: Bool
         /// Drivers report a callback stop as success; this keeps a host stop from passing as complete.
         var stoppedByHost = false
+        /// A Suunto Nautic/Ocean stepped aside because another app, normally the Suunto app, started using the watch.
+        var otherAppActive = false
 
         var detectedFamily: dc_family_t = DC_FAMILY_NULL
         var detectedModel: UInt32 = 0
@@ -303,6 +305,10 @@ public class DiveLogRetriever {
 
     /// Stable, human-stable name for a libdivecomputer status code, used for
     /// logging and for `DiveDataViewModel.lastDownloadStatus` (analytics).
+    /// `DiveDataViewModel.lastDownloadStatus` after a Suunto Nautic/Ocean download stepped aside for another app.
+    public static let otherAppActiveStatus = "otherAppActive"
+    static let otherAppActiveMessage = "The Suunto app started using the watch, so the download stepped aside. Try again once it's done; what arrived is kept."
+
     static func statusName(_ status: dc_status_t) -> String {
         switch status {
         case DC_STATUS_SUCCESS:     return "SUCCESS"
@@ -892,6 +898,11 @@ public class DiveLogRetriever {
                 if policy == .session, useFingerprint, devicePtr.pointee.fingerprint != nil, devicePtr.pointee.fsize > 0 {
                     context.deviceHadStoredFingerprint = true
                 }
+                if enumStatus == DC_STATUS_IO, dc_device_get_type(dcDevice) == DC_FAMILY_SUUNTO_NAUTIC,
+                   suunto_nautic_device_taken_over(dcDevice) != 0 {
+                    context.otherAppActive = true
+                    logWarning("Another app (the Suunto app) started using \(deviceName); the download stepped aside. Try again once it is done.")
+                }
 
                 // Log errors for debugging
                 if enumStatus != DC_STATUS_SUCCESS && enumStatus != DC_STATUS_PROTOCOL {
@@ -975,6 +986,10 @@ public class DiveLogRetriever {
             if context.stoppedByHost {
                 logInfo("Download stopped by the app after \(context.logCount - 1) dive(s); fingerprint kept")
                 viewModel.updateProgress(.cancelled)
+            } else if context.otherAppActive {
+                logWarning("Download stepped aside for another app after \(context.logCount - 1) dive(s); fingerprint kept")
+                viewModel.lastDownloadStatus = otherAppActiveStatus
+                viewModel.setDetailedError(otherAppActiveMessage, status: enumStatus)
             } else if emptyReadOnly {
                 logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
                 viewModel.updateProgress(.emptyRead)
@@ -1013,9 +1028,11 @@ public class DiveLogRetriever {
 
     /// `outcome`'s rule, with a commit in place of the save: a cancel, a failure or a first parse rejection never commits.
     static func sessionOutcome(_ outcome: DownloadOutcome, status: dc_status_t, heldCount: Int, rejectionStatus: dc_status_t,
-                               fingerprintMatched: Bool, hadStoredFingerprint: Bool, hasNewDives: Bool)
+                               fingerprintMatched: Bool, hadStoredFingerprint: Bool, hasNewDives: Bool,
+                               otherAppActive: Bool = false)
         -> (outcome: DiveDownloadResult.Outcome, commits: Bool) {
         if status == DC_STATUS_CANCELLED { return (.cancelled, false) }
+        if otherAppActive { return (.otherAppActive, false) }
         guard outcome.succeeded else {
             if outcome.emptyReadOnly { return (.emptyRead, false) }
             if outcome.parseRejected { return (.parseRejected(count: heldCount, status: rejectionStatus), false) }
@@ -1035,7 +1052,8 @@ public class DiveLogRetriever {
                                                 rejectionStatus: context.rejectionStatus,
                                                 fingerprintMatched: context.fingerprintMatched,
                                                 hadStoredFingerprint: context.hadStoredFingerprint,
-                                                hasNewDives: context.hasNewDives)
+                                                hasNewDives: context.hasNewDives,
+                                                otherAppActive: context.otherAppActive)
         let divesDownloaded = context.logCount - 1 - context.emptyReadCount
         let skipped = settled.succeeded ? unreadable : []
 
@@ -1088,6 +1106,10 @@ public class DiveLogRetriever {
             logWarning("Download interrupted after \(divesDownloaded) dive(s): DC_STATUS_\(statusName(status)); fingerprint kept")
             viewModel.lastDownloadStatus = statusName(status)
             viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: status)
+        case .otherAppActive:
+            logWarning("Download stepped aside for another app after \(divesDownloaded) dive(s); fingerprint kept")
+            viewModel.lastDownloadStatus = otherAppActiveStatus
+            viewModel.setDetailedError(otherAppActiveMessage, status: enumStatus)
         case .failed(let status):
             viewModel.lastDownloadStatus = statusName(status)
             viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(status)", status: status)

@@ -97,7 +97,7 @@ public enum CableError: Error, Equatable {
                 return
             }
             self = Self.deviceFailed(status, family: family, portPresent: portPresent)
-        case .completed, .noNewDives, .emptyRead, .parseRejected:
+        case .completed, .noNewDives, .emptyRead, .parseRejected, .otherAppActive:
             return nil
         }
     }

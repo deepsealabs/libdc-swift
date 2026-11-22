@@ -876,13 +876,43 @@ final class DiveComputerSessionTests: XCTestCase {
 
     private func sessionOutcome(_ status: dc_status_t, held: Int = 0, unreadable: Int = 0, matched: Bool = false,
                                 stored: Bool = true, newDives: Bool, empty: Int = 0,
-                                family: dc_family_t = DC_FAMILY_SHEARWATER_PETREL) -> (DiveDownloadResult.Outcome, Bool) {
+                                family: dc_family_t = DC_FAMILY_SHEARWATER_PETREL,
+                                otherAppActive: Bool = false) -> (DiveDownloadResult.Outcome, Bool) {
         let settled = DiveLogRetriever.outcome(status: status, family: family, fingerprintMatched: matched,
                                                hasNewDives: newDives, hadStoredFingerprint: stored, emptyReadCount: empty,
                                                rejectedCount: held, unreadableCount: unreadable)
         let r = DiveLogRetriever.sessionOutcome(settled, status: status, heldCount: held, rejectionStatus: DC_STATUS_DATAFORMAT,
-                                                fingerprintMatched: matched, hadStoredFingerprint: stored, hasNewDives: newDives)
+                                                fingerprintMatched: matched, hadStoredFingerprint: stored, hasNewDives: newDives,
+                                                otherAppActive: otherAppActive)
         return (r.outcome, r.commits)
+    }
+
+    func testAStepAsideForTheSuuntoAppIsItsOwnOutcomeAndNeverCommits() {
+        let nautic = DC_FAMILY_SUUNTO_NAUTIC
+        XCTAssertTrue(sessionOutcome(DC_STATUS_IO, newDives: true, family: nautic, otherAppActive: true) == (.otherAppActive, false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_IO, newDives: false, family: nautic, otherAppActive: true) == (.otherAppActive, false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_CANCELLED, newDives: true, family: nautic, otherAppActive: true) == (.cancelled, false),
+                      "a cancel during the wait for the app is the host's")
+    }
+
+    func testADownloadThatStepsAsideForTheSuuntoAppReportsIt() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB, Self.diveC])
+        // The app says hello two chunks into the second dive's stream (the walk goes newest first).
+        watch.onStreamStart = { [unowned watch] n in
+            if n == 2 { watch.appDuringStream = (2, .hello) }
+        }
+        let stores = stores()
+        let viewModel = DiveDataViewModel(fingerprintStore: stores.fingerprints)
+        let session = try openNautic(watch, stores: stores, lease: DiveComputerSessionLease())
+
+        let result = try XCTUnwrap(download(session, viewModel: viewModel))
+        XCTAssertEqual(result.outcome, .otherAppActive)
+        XCTAssertEqual(result.status, DC_STATUS_IO)
+        XCTAssertEqual(result.divesDownloaded, 1, "the newest dive came before the app")
+        XCTAssertNil(result.fingerprintCommit, "the fingerprint stays before the dives still to come")
+        XCTAssertFalse(result.succeeded)
+        drainMain { viewModel.lastDownloadStatus == DiveLogRetriever.otherAppActiveStatus }
+        XCTAssertEqual(viewModel.lastDownloadStatus, DiveLogRetriever.otherAppActiveStatus)
     }
 
     func testOnlyACompleteWalkWithNoHeldDiveCommits() {

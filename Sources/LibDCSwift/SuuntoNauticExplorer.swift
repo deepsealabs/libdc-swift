@@ -30,6 +30,15 @@ public enum SuuntoNauticExplorer {
         /// The download doesn't match the size `/Logbook/Entries` lists for the
         /// dive, so it is most likely truncated. The bytes received are attached.
         case incompleteDownload(Data)
+        /// Another app, normally the Suunto app, started using the watch and the device stepped aside for it
+        /// (`DC_STATUS_IO` with `suunto_nautic_device_taken_over`). Every later call fails the same way: close
+        /// the device and open a new one once the other app is done. A download's bytes are kept for a resume.
+        case otherAppActive
+    }
+
+    /// The error a failed call on `dcDevice` throws: `otherAppActive` once the device stepped aside, else `requestFailed`.
+    static func failure(_ status: dc_status_t, on dcDevice: OpaquePointer) -> ExplorerError {
+        status == DC_STATUS_IO && suunto_nautic_device_taken_over(dcDevice) != 0 ? .otherAppActive : .requestFailed(status)
     }
 
     /// Issue a raw GET request to an arbitrary RPC endpoint path, e.g.
@@ -47,7 +56,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_request(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -69,7 +78,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_fetch(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -90,7 +99,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_fetch_raw(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
         return dataFromBuffer(buffer)
     }
@@ -118,7 +127,7 @@ public enum SuuntoNauticExplorer {
         // just unpack that list — no protocol logic duplicated in Swift.
         let status = suunto_nautic_device_list(dcDevice, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         let bytes = [UInt8](dataFromBuffer(buffer))
@@ -155,7 +164,7 @@ public enum SuuntoNauticExplorer {
             throw ExplorerError.incompleteDownload(dataFromBuffer(buffer))
         }
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -244,7 +253,7 @@ public enum SuuntoNauticExplorer {
         var handle: [UInt8] = [0, 0, 0]
         let status = suunto_nautic_device_subscribe(dcDevice, path, &handle, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
         return Subscription(path: path, handle: handle, initialValue: WhiteboardValue(encoded: dataFromBuffer(buffer)))
     }
@@ -252,7 +261,7 @@ public enum SuuntoNauticExplorer {
     public static func unsubscribe(dcDevice: OpaquePointer, _ subscription: Subscription) throws {
         let status = suunto_nautic_device_unsubscribe(dcDevice, subscription.handle)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
     }
 
@@ -272,7 +281,7 @@ public enum SuuntoNauticExplorer {
         let status = suunto_nautic_device_wait_notification(dcDevice, timeoutMs, &handle, buffer)
         if status == DC_STATUS_TIMEOUT { return nil }
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
         return Notification(handle: handle, value: WhiteboardValue(encoded: dataFromBuffer(buffer)))
     }
@@ -292,7 +301,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_download_summary(dcDevice, logbookID, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -312,7 +321,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_fetch_paged(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)

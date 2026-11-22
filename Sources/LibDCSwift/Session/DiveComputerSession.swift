@@ -563,6 +563,10 @@ public struct DiveDownloadResult {
         /// Some dives arrived, then the walk failed with this status.
         case interrupted(dc_status_t)
         case failed(dc_status_t)
+        /// A Suunto Nautic/Ocean stepped aside because another app, normally the Suunto app, started using the
+        /// watch (`status` is `DC_STATUS_IO`). Close and download again once that app is done: the dives that
+        /// arrived are delivered, the fingerprint stays, and a cut-off dive carries on (`SuuntoNauticResume`).
+        case otherAppActive
     }
 
     public let outcome: Outcome

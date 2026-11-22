@@ -3091,4 +3091,26 @@ extension SuuntoNauticTransportTests {
         XCTAssertEqual(watch.hellosReceived, 1, "one open")
         XCTAssertLessThan(Date().timeIntervalSince(started), 10, "not four more waits of 20 s")
     }
+
+    func testTheExplorerTellsAStepAsideFromALostLink() throws {
+        let dive = FakeDive(id: 1_790_000_009, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.appDuringStream = (10, .hello)
+        let link = DCDeviceNauticLink(device: try open(watch)) { _ in }
+        XCTAssertThrowsError(try link.download(dive.id)) { error in
+            guard case SuuntoNauticExplorer.ExplorerError.otherAppActive = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertThrowsError(try link.listDives(), "every later call fails the same way") { error in
+            guard case SuuntoNauticExplorer.ExplorerError.otherAppActive = error else { return XCTFail("\(error)") }
+        }
+
+        let lost = FakeWatch(dives: [dive])
+        lost.dropAfterChunks = 10
+        let lostLink = DCDeviceNauticLink(device: try open(lost)) { _ in }
+        XCTAssertThrowsError(try lostLink.download(dive.id)) { error in
+            guard case SuuntoNauticExplorer.ExplorerError.requestFailed(let status) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(status, DC_STATUS_IO)
+        }
+    }
 }
