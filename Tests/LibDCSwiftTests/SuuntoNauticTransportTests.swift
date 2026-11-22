@@ -245,6 +245,16 @@ final class SuuntoNauticTransportTests: XCTestCase {
         }
         /// What the Suunto app does after this many chunks of the next /Data stream. Its hello ends the stream there.
         var appDuringStream: (afterChunks: Int, event: AppEvent)?
+        /// The next /Data SUBSCRIBE is taken, but one of the app's replies arrives ahead of its reply.
+        var appReplyBeforeStreamSubscribeReply = false
+        /// The app's replies that follow each 423 to a SUBSCRIBE: the app is using the watch.
+        var appRepliesAfterRefusal = 0
+        /// A request before any hello is answered with 404 instead of going unanswered.
+        var answersSessionlessWith404 = false
+        /// Host writes, counted from the last reconnect, that the transport wasn't ready to take: they fail with
+        /// DC_STATUS_TIMEOUT and nothing goes out, as the BLE bridge reports a CoreBluetooth write not accepted in time.
+        var timedOutWrites: Set<Int> = []
+        private var writes = 0
         /// Requests left unanswered because nobody had said hello on the link.
         private(set) var sessionlessRequests = 0
         private(set) var hellosReceived = 0
@@ -323,7 +333,23 @@ final class SuuntoNauticTransportTests: XCTestCase {
             linkUp = true
             rx.removeAll(); rxIndex = 0
             rxDecode.removeAll(); rxInFrame = false; rxEscaped = false
+            writes = 0
             connects += 1
+        }
+
+        var writesAttempted: Int { lock.lock(); defer { lock.unlock() }; return writes }
+
+        /// Counts a host write; true when the transport wasn't ready to take it (`timedOutWrites`).
+        func writeTimesOut() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            writes += 1
+            return timedOutWrites.contains(writes)
+        }
+
+        /// A frame whose framing is broken: an escape character right before the closing flag.
+        func pushDamagedFrame() {
+            lock.lock(); defer { lock.unlock() }
+            rx += [0x7E, 0xA5, 0x02, 0x7D, 0x7E]
         }
 
         func dropLink() {
@@ -523,6 +549,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
             } else if !session && !appSession {
                 sessionlessRequests += 1
                 if answersProbeLate && lateProbe == nil { lateProbe = msgid }
+                if answersSessionlessWith404 && f[1] == 0x0A {
+                    send(Self.packet(0x02, msgid, [0xFF, 0xFF, 0xFF, 0x01, 0x80, 0x00] + Self.u16(404)))
+                }
                 return
             }
             if f[1] != 0x12 {
@@ -602,12 +631,17 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 if refuseStreams > 0 {
                     refuseStreams -= 1
                     send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(423) + [0x00, 0x00]))
+                    for _ in 0..<appRepliesAfterRefusal { pushAppReplyLocked() }
                     return
                 }
                 streamsServed += 1
                 streamedPaths.append(path)
                 if cancelIOAfterStreamBytes != nil { streamBytesRead = 0 }
                 onStreamStart?(streamsServed)
+                if appReplyBeforeStreamSubscribeReply {
+                    appReplyBeforeStreamSubscribeReply = false
+                    pushAppReplyLocked()
+                }
                 send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00]))
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
@@ -888,6 +922,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
             if watch.answersCancelled(.write) {
                 actual?.pointee = 0
                 return DC_STATUS_CANCELLED
+            }
+            if watch.writeTimesOut() {
+                actual?.pointee = 0
+                return DC_STATUS_TIMEOUT
             }
             guard watch.hostWrote(UnsafeRawBufferPointer(start: data, count: size)) else {
                 actual?.pointee = 0
@@ -3081,7 +3119,149 @@ extension SuuntoNauticTransportTests {
         XCTAssertEqual(watch.heldIdHandles, [])
     }
 
+    /// A probe GET or hello the transport wasn't ready to take fails with TIMEOUT, which isn't the Suunto app.
+    func testAWriteTheTransportWasntReadyForFailsTheOpenWithIONotTimeout() throws {
+        let watch = FakeWatch(dives: [])
+        watch.timedOutWrites = [1]
+        let (probe, _) = try openStatus(watch)
+        XCTAssertEqual(probe, DC_STATUS_IO, "the probe's write")
+        XCTAssertEqual(watch.hellosReceived, 0)
+
+        watch.reconnect()
+        watch.timedOutWrites = [2]
+        let (hello, _) = try openStatus(watch)
+        XCTAssertEqual(hello, DC_STATUS_IO, "the hello's write")
+        XCTAssertEqual(watch.sessionlessRequests, 1)
+        XCTAssertEqual(watch.hellosReceived, 0)
+
+        watch.reconnect()
+        watch.timedOutWrites = []
+        XCTAssertEqual(try openStatus(watch).0, DC_STATUS_SUCCESS)
+    }
+
+    func testADamagedFrameWhileProbingIsTheAppsTrafficNotALostLink() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appSession = true
+        watch.pushDamagedFrame()
+        watch.pushAppReplies(2)
+        watch.pushDamagedFrame()
+        let log = DriverLog()
+        let (status, device) = try openStatus(watch, log: log)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(log.openWaits, 1, "the probe took the damaged frame for the app being busy")
+        XCTAssertEqual(watch.hellosReceived, 0)
+        XCTAssertEqual(suunto_nautic_device_taken_over(try XCTUnwrap(device)), 0)
+    }
+
+    func testADamagedFrameLeftFromBeforeIsDrainedBeforeADownload() throws {
+        let dive = FakeDive(id: 1_790_000_010, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        let device = try open(watch)
+        watch.pushAppReplies(3)
+        watch.pushDamagedFrame()
+        watch.pushAppReplies(3)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 0)
+    }
+
+    func testAnAppReplyAheadOfTheSubscribeReplyStillUnsubscribes() throws {
+        let dive = FakeDive(id: 1_790_000_011, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.appReplyBeforeStreamSubscribeReply = true
+        let device = try open(watch)
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_IO)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(watch.streamsServed, 1, "the watch took the SUBSCRIBE")
+        XCTAssertEqual(watch.streamUnsubscribes, [200], "so the stream is ended, not left to starve the app")
+    }
+
+    func testALeftOverStreamOnTheAppsSessionIsEndedOnceTheLinkIsQuiet() throws {
+        let dive = FakeDive(id: 1_790_000_012, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.refuseStreams = 1
+        let log = DriverLog()
+        let device = try XCTUnwrap(try openStatus(watch, log: log).1)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        XCTAssertEqual(log.count("Waiting for a quiet link before ending the stream"), 1)
+        XCTAssertEqual(watch.streamUnsubscribes, [200, 200])
+    }
+
+    func testALeftOverStreamOnTheAppsSessionIsLeftAloneWhileTheAppIsBusy() throws {
+        let dive = FakeDive(id: 1_790_000_013, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.refuseStreams = 1
+        watch.appRepliesAfterRefusal = 2
+        let device = try open(watch)
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_IO)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(watch.streamUnsubscribes, [], "the stream may be the app's: not ended")
+        XCTAssertEqual(watch.streamsServed, 0)
+    }
+
+    func testAFreshLinkEndsALeftOverStreamWithoutWaiting() throws {
+        let dive = FakeDive(id: 1_790_000_014, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.refuseStreams = 1
+        let log = DriverLog()
+        let device = try XCTUnwrap(try openStatus(watch, log: log).1)
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_SUCCESS)
+        XCTAssertEqual(log.count("Waiting for a quiet link"), 0, "our own hello's session has no other app in it")
+    }
+
+    func testAnErrorReplyToTheProbeIsNoSession() throws {
+        let watch = FakeWatch(dives: [])
+        watch.answersSessionlessWith404 = true
+        let device = try open(watch)
+        XCTAssertEqual(watch.hellosReceived, 1)
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 1)
+    }
+
     // MARK: Bridge and explorer
+
+    /// M1: a write timeout on open is a hiccup the bridge retries, not the Suunto app.
+    func testTheBridgeRetriesANauticOpenWhoseWriteTimedOutAndTheConnectorDoesntBlameTheApp() throws {
+        let watch = FakeWatch(dives: [])
+        watch.timedOutWrites = [1]
+        // The bridge frees the context with the device data, or at once when the open fails.
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let iostream = try stream(watch, context: context)
+        let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        data.initialize(to: device_data_t())
+        defer { data.deallocate() }
+        data.pointee.context = context
+
+        let status = open_device_on_iostream(data, iostream, DC_FAMILY_SUUNTO_NAUTIC, 0, UInt32(LIBDC_BLE_OPEN_ATTEMPTS), 0)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS, "the second attempt opens")
+        XCTAssertEqual(watch.sessionlessRequests, 1, "the first probe never went out")
+        XCTAssertEqual(watch.hellosReceived, 1)
+        libdc_close_device_data(data)
+
+        let stuck = FakeWatch(dives: [])
+        stuck.timedOutWrites = Set(1...50)
+        let stuckData = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        stuckData.initialize(to: device_data_t())
+        defer { stuckData.deallocate() }
+        var stuckContext: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&stuckContext), DC_STATUS_SUCCESS)
+        stuckData.pointee.context = stuckContext
+        let failed = open_device_on_iostream(stuckData, try stream(stuck, context: stuckContext), DC_FAMILY_SUUNTO_NAUTIC, 0,
+                                             UInt32(LIBDC_BLE_OPEN_ATTEMPTS), 0)
+        XCTAssertEqual(failed, DC_STATUS_IO)
+        XCTAssertEqual(stuck.writesAttempted, Int(LIBDC_BLE_OPEN_ATTEMPTS), "every attempt was made")
+        XCTAssertEqual(CoreBluetoothNauticConnector.openFailure(failed, family: .suuntoNautic, name: "Nautic"),
+                       .connectFailed("could not open Nautic (IO)"))
+        XCTAssertEqual(CoreBluetoothNauticConnector.openFailure(DC_STATUS_TIMEOUT, family: .suuntoNautic, name: "Nautic"),
+                       .otherAppActive)
+    }
 
     /// The bridge retried a failed open 5 times, 3 s apart: on a busy Nautic each retry waited for the app again.
     func testTheBridgeDoesntRetryANauticOpenThatFoundTheLinkBusy() throws {

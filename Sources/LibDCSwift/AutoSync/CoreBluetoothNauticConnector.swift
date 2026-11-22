@@ -86,9 +86,7 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
         let address = currentAddress
         let status = DeviceConfiguration.openBLEDeviceStatus(name: name, deviceAddress: address, forcedModel: (family, model))
         guard status == DC_STATUS_SUCCESS else {
-            // The driver's open fails with TIMEOUT only after waiting for another app to finish with the watch.
-            if status == DC_STATUS_TIMEOUT && family == .suuntoNautic { throw NauticAutoSyncError.otherAppActive }
-            throw NauticAutoSyncError.connectFailed("could not open \(name) (\(DiveLogRetriever.statusName(status)))")
+            throw Self.openFailure(status, family: family, name: name)
         }
         // openBLEDevice publishes the pointer with an async hop to main; this read is queued behind it.
         let manager = self.manager
@@ -123,6 +121,13 @@ public final class CoreBluetoothNauticConnector: NauticSyncConnector {
         // close() returns before the device's close and the link's cancel; a session opened sooner loses its link.
         manager.waitForPendingTeardown()
         if let peripheral { CoreBluetoothManager.waitForDisconnect(peripheral, timeout: 3) }
+    }
+
+    /// The error `connect()` throws for a failed open's status.
+    static func openFailure(_ status: dc_status_t, family: DeviceConfiguration.DeviceFamily, name: String) -> NauticAutoSyncError {
+        // The driver's open fails with TIMEOUT only after waiting for another app to finish with the watch.
+        if status == DC_STATUS_TIMEOUT && family == .suuntoNautic { return .otherAppActive }
+        return .connectFailed("could not open \(name) (\(DiveLogRetriever.statusName(status)))")
     }
 
     /// iOS never times out a pending connect; cancelling it makes the open's wait for the link fail.
