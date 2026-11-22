@@ -30,6 +30,15 @@ public enum SuuntoNauticExplorer {
         /// The download doesn't match the size `/Logbook/Entries` lists for the
         /// dive, so it is most likely truncated. The bytes received are attached.
         case incompleteDownload(Data)
+        /// Another app, normally the Suunto app, started using the watch and the device stepped aside for it
+        /// (`DC_STATUS_IO` with `suunto_nautic_device_taken_over`). Every later call fails the same way: close
+        /// the device and open a new one once the other app is done. A download's bytes are kept for a resume.
+        case otherAppActive
+    }
+
+    /// The error a failed call on `dcDevice` throws: `otherAppActive` once the device stepped aside, else `requestFailed`.
+    static func failure(_ status: dc_status_t, on dcDevice: OpaquePointer) -> ExplorerError {
+        status == DC_STATUS_IO && suunto_nautic_device_taken_over(dcDevice) != 0 ? .otherAppActive : .requestFailed(status)
     }
 
     /// Issue a raw GET request to an arbitrary RPC endpoint path, e.g.
@@ -47,7 +56,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_request(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -69,7 +78,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_fetch(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -90,7 +99,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_fetch_raw(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
         return dataFromBuffer(buffer)
     }
@@ -118,7 +127,7 @@ public enum SuuntoNauticExplorer {
         // just unpack that list — no protocol logic duplicated in Swift.
         let status = suunto_nautic_device_list(dcDevice, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         let bytes = [UInt8](dataFromBuffer(buffer))
@@ -134,8 +143,8 @@ public enum SuuntoNauticExplorer {
 
     /// Download and decompress a specific logbook entry, given its
     /// numeric id as it appears in a "/Logbook/byId/<id>/..." path (e.g.
-    /// "1787752091"). Returns the decoded SBEM0103 TLV stream, ready for
-    /// `decode(sbemData:)` below.
+    /// "1787752091"). Returns the dive as the driver stores it, SUMMARY_SIZE(4)
+    /// SUMMARY PROFILE, ready for `decode(sbemData:)` below.
     public static func download(device devicePtr: UnsafeMutablePointer<device_data_t>, logbookID: String) throws -> Data {
         guard let dcDevice = devicePtr.pointee.device else {
             throw ExplorerError.notConnected
@@ -155,7 +164,7 @@ public enum SuuntoNauticExplorer {
             throw ExplorerError.incompleteDownload(dataFromBuffer(buffer))
         }
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -244,7 +253,7 @@ public enum SuuntoNauticExplorer {
         var handle: [UInt8] = [0, 0, 0]
         let status = suunto_nautic_device_subscribe(dcDevice, path, &handle, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
         return Subscription(path: path, handle: handle, initialValue: WhiteboardValue(encoded: dataFromBuffer(buffer)))
     }
@@ -252,7 +261,7 @@ public enum SuuntoNauticExplorer {
     public static func unsubscribe(dcDevice: OpaquePointer, _ subscription: Subscription) throws {
         let status = suunto_nautic_device_unsubscribe(dcDevice, subscription.handle)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
     }
 
@@ -272,7 +281,7 @@ public enum SuuntoNauticExplorer {
         let status = suunto_nautic_device_wait_notification(dcDevice, timeoutMs, &handle, buffer)
         if status == DC_STATUS_TIMEOUT { return nil }
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
         return Notification(handle: handle, value: WhiteboardValue(encoded: dataFromBuffer(buffer)))
     }
@@ -292,7 +301,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_download_summary(dcDevice, logbookID, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -312,7 +321,7 @@ public enum SuuntoNauticExplorer {
 
         let status = suunto_nautic_device_fetch_paged(dcDevice, path, buffer)
         guard status == DC_STATUS_SUCCESS else {
-            throw ExplorerError.requestFailed(status)
+            throw failure(status, on: dcDevice)
         }
 
         return dataFromBuffer(buffer)
@@ -321,8 +330,7 @@ public enum SuuntoNauticExplorer {
 
     /// A decoded dive profile. Populated from the standard dc_parser_t
     /// fields/samples: depth, temperature, tank pressure, and (from the
-    /// appended /Summary section) gradient factors and gas mix. See
-    /// suunto_nautic.h for what's still missing (dive events, datetime).
+    /// /Summary section in front of the profile) gradient factors and gas mix.
     public struct DecodedProfile {
         public struct DepthSample { public let time: TimeInterval; public let depth: Double }
         public struct TemperatureSample { public let time: TimeInterval; public let temperature: Double }
@@ -383,7 +391,8 @@ public enum SuuntoNauticExplorer {
         }
         /// Real-time gradient factors (percent). No standard libdivecomputer
         /// channel, so carried via DC_SAMPLE_VENDOR.
-        public struct GradientFactorSample { public let time: TimeInterval; public let gf99: Int; public let gfSurface: Int; public let gfLeading: Int }
+        /// `gfLeading` is nil when the record carries only GF99 and the surface GF, as the current parser emits it.
+        public struct GradientFactorSample { public let time: TimeInterval; public let gf99: Int; public let gfSurface: Int; public let gfLeading: Int? }
         public struct Event {
             public let time: TimeInterval
             public let type: UInt32
@@ -463,8 +472,8 @@ public enum SuuntoNauticExplorer {
         public var gradientFactorProfile: [GradientFactorSample]
     }
 
-    /// Decode a downloaded (and already decompressed) SBEM0103 stream
-    /// into a real dive profile. Calls the same dc_parser_t machinery
+    /// Decode a downloaded dive (SUMMARY_SIZE(4) SUMMARY PROFILE, as the driver
+    /// stores it) into a real dive profile. Calls the same dc_parser_t machinery
     /// GenericParser uses, but directly — see the type-level doc comment
     /// for why this bypasses GenericParser.parseDiveData.
     ///
@@ -580,8 +589,8 @@ public enum SuuntoNauticExplorer {
                                                 mx: i16(13), my: i16(15), mz: i16(17)))
                 case 4 where size >= 11: // DiveRouteFeatures: 5x uint16 (algo inputs, not the track)
                     collector.diveRouteFeatures.append(.init(time: t, features: [u16(1), u16(3), u16(5), u16(7), u16(9)]))
-                case 5 where size >= 7: // real-time gradient factors
-                    collector.gf.append(.init(time: t, gf99: i16(1), gfSurface: i16(3), gfLeading: i16(5)))
+                case 5 where size >= 5: // real-time gradient factors
+                    collector.gf.append(.init(time: t, gf99: i16(1), gfSurface: i16(3), gfLeading: size >= 7 ? i16(5) : nil))
                 default:
                     break
                 }

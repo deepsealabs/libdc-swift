@@ -130,8 +130,9 @@ struct DeviceExplorerView: View {
     private var explorerLogSection: some View {
         Section {
             let device = deviceName
+            FullLoggingToggle()
             Button {
-                shareItems = [log.text(device: device)]
+                log.shareItems(device: device) { shareItems = $0 }
             } label: {
                 Label("Share log", systemImage: "square.and.arrow.up")
             }
@@ -144,7 +145,7 @@ struct DeviceExplorerView: View {
         } header: {
             Text("Explorer log")
         } footer: {
-            Text("\(log.lines.count) line(s): connects, commands and their results, for a GitHub report.")
+            Text("\(log.lineCount) line(s): connects, commands and their results, for a GitHub report. \(FullLogging.footer)")
         }
     }
 
@@ -351,7 +352,12 @@ struct DeviceExplorerView: View {
         ) { success in
             DispatchQueue.main.async {
                 busy = false
-                if !success {
+                let nonDives = viewModel.lastNonDivesSkipped
+                let skipped = nonDives > 0 ? " Skipped \(DiveLogRetriever.nonDivesSkippedText(nonDives))." : ""
+                if !success && viewModel.lastDownloadStatus == DiveLogRetriever.otherAppActiveStatus {
+                    statusMessage = "The Suunto app started using the watch, so the download stepped aside. "
+                        + "Once it's done, reconnect and download again to carry on.\(skipped)"
+                } else if !success {
                     let hint = handshakeMissing && viewModel.lastDownloadStatus == "TIMEOUT" ? "\n\(Self.sleepingHint)" : ""
                     // `status` is empty on most failures; the reason lives in `progress`.
                     let reason: String
@@ -360,12 +366,12 @@ struct DeviceExplorerView: View {
                     } else {
                         reason = viewModel.status.isEmpty ? viewModel.progress.description : viewModel.status
                     }
-                    statusMessage = "Download failed: \(reason) [DC_STATUS_\(viewModel.lastDownloadStatus)]\(hint)"
+                    statusMessage = "Download failed: \(reason) [DC_STATUS_\(viewModel.lastDownloadStatus)]\(skipped)\(hint)"
                 } else if viewModel.progress == .noNewDives {
-                    statusMessage = "No new dives since the last download. Turn on Download all to fetch every dive again."
+                    statusMessage = "No new dives since the last download.\(skipped) Turn on Download all to fetch every dive again."
                 } else {
                     // This run's dives, not the session's.
-                    statusMessage = "Downloaded \(max(0, viewModel.dives.count - divesBefore)) dive(s)."
+                    statusMessage = "Downloaded \(max(0, viewModel.dives.count - divesBefore)) dive(s).\(skipped)"
                 }
             }
         }
@@ -543,6 +549,12 @@ struct DeviceExplorerView: View {
     /// half-finished), which a reconnect clears. Only call the dive gone when
     /// /Logbook/Entries no longer lists it.
     private func describeDownloadFailure(id: String, error: Error) -> String {
+        if case SuuntoNauticExplorer.ExplorerError.otherAppActive = error {
+            // Every request on this connection fails from here on, so don't list or fetch anything more.
+            let kept = resumableBytes(of: id).map { " The \($0) bytes received are kept." } ?? ""
+            return "The Suunto app started using the watch, so DC Tester stepped aside from dive \(id).\(kept) "
+                + "Once the Suunto app is done, reconnect and download it again to carry on."
+        }
         var statusText = "\(error)"
         if case SuuntoNauticExplorer.ExplorerError.requestFailed(let st) = error {
             statusText = "status \(st.rawValue)"

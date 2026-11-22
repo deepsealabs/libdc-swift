@@ -563,6 +563,10 @@ public struct DiveDownloadResult {
         /// Some dives arrived, then the walk failed with this status.
         case interrupted(dc_status_t)
         case failed(dc_status_t)
+        /// A Suunto Nautic/Ocean stepped aside because another app, normally the Suunto app, started using the
+        /// watch (`status` is `DC_STATUS_IO`). Close and download again once that app is done: the dives that
+        /// arrived are delivered, the fingerprint stays, and a cut-off dive carries on (`SuuntoNauticResume`).
+        case otherAppActive
     }
 
     public let outcome: Outcome
@@ -573,6 +577,8 @@ public struct DiveDownloadResult {
     public let parseFailureCount: Int
     /// Fingerprints of the dives skipped because an earlier download's parser rejected them too; only on a success.
     public let unreadableDives: [Data]
+    /// Logbook entries left out because they aren't dives (a Suunto Ocean also logs runs); never a failure.
+    public let nonDivesSkipped: Int
     /// Present only when the walk finished with every dive parsed or skipped as unreadable. Nothing is saved until the host acknowledges it.
     public let fingerprintCommit: FingerprintCommit?
     /// The computer DEVINFO reported; nil when the download ended before it.
@@ -581,13 +587,14 @@ public struct DiveDownloadResult {
     public var succeeded: Bool { outcome == .completed || outcome == .noNewDives }
 
     public init(outcome: Outcome, status: dc_status_t = DC_STATUS_SUCCESS, divesDownloaded: Int = 0,
-                parseFailureCount: Int = 0, unreadableDives: [Data] = [], fingerprintCommit: FingerprintCommit? = nil,
-                identity: DiveComputerIdentity? = nil) {
+                parseFailureCount: Int = 0, unreadableDives: [Data] = [], nonDivesSkipped: Int = 0,
+                fingerprintCommit: FingerprintCommit? = nil, identity: DiveComputerIdentity? = nil) {
         self.outcome = outcome
         self.status = status
         self.divesDownloaded = divesDownloaded
         self.parseFailureCount = parseFailureCount
         self.unreadableDives = unreadableDives
+        self.nonDivesSkipped = nonDivesSkipped
         self.fingerprintCommit = fingerprintCommit
         self.identity = identity
     }

@@ -17,18 +17,100 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let decompressed: [UInt8]
         /// The size /Logbook/Entries lists; defaults to the true /Data + /Summary.
         var listedSize: UInt32
+        /// Whether the entry flags its size as present, as every real one does.
+        var hasSize = true
 
+        /// A dive the parser reads: a /Summary of `summaryBytes` (at least its dive header) and a profile of
+        /// `profileBytes`: the timeline base (the dive starts at `id`, UTC), a 1 m depth sample, then chunks
+        /// no parser decodes, a second apart. A profile of 8 bytes is the SBEM0103 header alone, an empty read.
         init(id: UInt32, profileBytes: Int, summaryBytes: Int = 2036) {
             self.id = id
             var profile = Array("SBEM0103".utf8)
+            if profileBytes >= profile.count + 10 + 143 {
+                profile += [0x01, 8] + Array(withUnsafeBytes(of: (UInt64(id) * 1000).littleEndian, Array.init).prefix(7)) + [0x00]
+                var status = [UInt8](repeating: 0, count: 141)
+                status.replaceSubrange(2..<6, with: withUnsafeBytes(of: Float(1).bitPattern.littleEndian, Array.init))
+                profile += [0x16, 141] + status
+            }
             let seed = Int(id % 251)
-            profile += (0..<max(0, profileBytes - profile.count)).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7 &+ seed) }
+            var remaining = profileBytes - profile.count
+            while remaining >= 4 {
+                let length = remaining > 259 ? 254 : remaining > 256 ? 100 : remaining - 2
+                profile += [0x40, UInt8(length), 0xE8, 0x03]
+                let base = profile.count
+                profile += (0..<(length - 2)).map { UInt8(truncatingIfNeeded: (base + $0) &* 31 &+ 7 &+ seed) }
+                remaining = profileBytes - profile.count
+            }
             decompressed = profile
             compressed = FakeDive.heatshrinkLiterals(profile)
-            var s = Array("SBEM0103".utf8)
-            s += (0..<max(0, summaryBytes - s.count)).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 1) }
-            summary = s
+            // The dive header (id 0x20, five gas records, air in the first) fills the /Summary.
+            var header = [UInt8](repeating: 0, count: max(410, summaryBytes - 14))
+            header[185 + 1] = 21
+            summary = Array("SBEM0103".utf8) + [0x20, 0xFF] + withUnsafeBytes(of: UInt32(header.count).littleEndian, Array.init) + header
             listedSize = UInt32(compressed.count + summary.count)
+        }
+
+        /// The dive as the driver delivers it: SUMMARY_SIZE(4) SUMMARY PROFILE.
+        var blob: [UInt8] {
+            withUnsafeBytes(of: UInt32(summary.count).littleEndian, Array.init) + summary + decompressed
+        }
+
+        /// An entry with this /Summary and profile, listed with their true size.
+        init(id: UInt32, summary: [UInt8], profile: [UInt8]) {
+            self.id = id
+            self.summary = summary
+            decompressed = profile
+            compressed = FakeDive.heatshrinkLiterals(profile)
+            listedSize = UInt32(compressed.count + summary.count)
+        }
+
+        /// An activity the watch logs like a dive, a run by default. The /Summary is three Windows records and the
+        /// Header (ids 0x26 and 0x24, as on an Ocean), whose DateTime is the start, 0.3 s after `id` at UTC+2, and
+        /// whose ActivityType is `sport`. The profile is the timeline base, the activity record and heart rate samples,
+        /// without the dive status records. `diveHeader` puts a dive header first, `header: false` leaves the Header
+        /// out, `headerStart` gives the Header another start, and `diveStatus` adds a dive status record. `windowID`
+        /// and `headerID` give the records the ids another set of descriptors could, and `headerFirst` puts the Header
+        /// before the Windows.
+        static func activity(id: UInt32, sport: UInt8 = 3, diveHeader: Bool = false, header: Bool = true,
+                             headerStart: UInt32? = nil, diveStatus: Bool = false, profileBytes: Int = 3000,
+                             windowID: UInt8 = 0x26, headerID: UInt8 = 0x24, headerFirst: Bool = false) -> FakeDive {
+            func record(_ rid: UInt8, _ data: [UInt8]) -> [UInt8] {
+                data.count < 0xFF ? [rid, UInt8(data.count)] + data
+                    : [rid, 0xFF] + withUnsafeBytes(of: UInt32(data.count).littleEndian, Array.init) + data
+            }
+            // local64: the local time in ms in 7 bytes, then the UTC offset in quarter hours.
+            func local64(_ seconds: UInt32) -> [UInt8] {
+                let local = UInt64(seconds) * 1000 + 300 + 8 * 900_000
+                return Array(withUnsafeBytes(of: local.littleEndian, Array.init).prefix(7)) + [8]
+            }
+            var summary = Array("SBEM0103".utf8)
+            if diveHeader {
+                var dive = [UInt8](repeating: 0, count: 410)
+                dive[185 + 1] = 21
+                summary += record(0x20, dive)
+            }
+            var window = [UInt8](repeating: 0, count: 239)
+            window.replaceSubrange(0..<8, with: local64(id + 1800))
+            window[8] = 1
+            window[9] = sport
+            let windows = (0..<3).flatMap { _ in record(windowID, window) }
+            var headerRecord: [UInt8] = []
+            if header {
+                var h = [UInt8](repeating: 0, count: 370)
+                h.replaceSubrange(0..<8, with: local64(id + 1800))
+                h.replaceSubrange(8..<16, with: local64(headerStart ?? id))
+                h[36] = sport
+                headerRecord = record(headerID, h)
+            }
+            summary += headerFirst ? headerRecord + windows : windows + headerRecord
+            var profile = Array("SBEM0103".utf8) + record(0x01, local64(id)) + record(0x08, [0, 0, sport] + Array(String(sport).utf8) + [0])
+            if diveStatus {
+                profile += record(0x16, [UInt8](repeating: 0, count: 141))
+            }
+            while profile.count + 5 <= profileBytes {
+                profile += record(0x0F, [0xE8, 0x03, 120])
+            }
+            return FakeDive(id: id, summary: summary, profile: profile)
         }
 
         /// An empty/aborted logbook entry: listed with size 0, no profile data.
@@ -68,6 +150,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// Served for any /Logbook/byId/<id>/Descriptors, paged like /Summary.
         var descriptors: [UInt8] = []
         var mdsPayloadSize = 278
+        /// Most bytes one read returns, as a BLE notification caps it (60 in #29's Nautic capture); nil for no cap.
+        var maxReadSize: Int?
         /// Stale 0x01 chunks emitted just before the next /Summary GET's ACK.
         var leftoverChunksBeforeSummaryAck = 0
         /// Streams to refuse with 423 before accepting.
@@ -80,6 +164,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var dropAfterChunks: Int?
         /// Lose the link at the next /Summary GET, before it is answered.
         var dropAtSummaryGet = false
+        /// /Summary GETs to leave unanswered on a live link.
+        var unansweredSummaryGets = 0
         /// Lose the link right after the next /Data stream's end markers, before the UNSUBSCRIBE.
         var dropAfterEndMarker = false
         /// Lose the link at the Nth /Data page request from now, before it is answered.
@@ -112,6 +198,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         /// Set `ioCancelled` once this many bytes of the next /Data stream have been read.
         var cancelIOAfterStreamBytes: Int?
         private var streamBytesRead: Int?
+        /// /Info's product: "Ocean" on an Ocean, "Nautic" on a Nautic.
+        var product = "Ocean"
         /// Value resources the watch can be subscribed to.
         var unsyncedCount: UInt16 = 0
         var busy: UInt8 = 0
@@ -130,6 +218,52 @@ final class SuuntoNauticTransportTests: XCTestCase {
         var staleFramesAfterDrop = 0
         /// A sleeping watch: the hello gets one stray frame and no Hello-Ack.
         var withholdHelloAck = false
+
+        // The session: the watch answers a request only once a client on the link has said hello. A fresh link has
+        // no session, so the driver's probe (a GET before any hello) goes unanswered and it says hello itself.
+
+        /// Whether someone said hello on this link. A dropped link takes it, unless `keepsSessionAcrossDrops`.
+        private var session = false
+        /// The Suunto app has a session on the link, from before our open or from a hello of its own: requests are
+        /// answered without a hello of ours. It outlasts our reconnects, which leave the app's link up.
+        var appSession = false
+        /// The Suunto app is busy with the watch: every read that finds nothing else gets one of its replies.
+        var appBusy = false
+        /// The Suunto app starts using the watch as our hello goes out (`appBusy` from then on).
+        var appBusyAfterHello = false
+        /// A fresh link answers the request that came before our hello late, just ahead of the hello reply.
+        var answersProbeLate = false
+        /// The next request with this opcode is answered only just before the reply to the request after it.
+        var lateReplyTo: UInt8?
+        enum AppEvent {
+            /// The app's hello cuts off the chunk it arrives in (no closing flag), as in build 32's 14:14:04.
+            case tornHello
+            /// The app's hello reply arrives whole between two chunks, as at 14:15:29.
+            case hello
+            /// A reply to one of the app's requests arrives between two chunks.
+            case reply
+        }
+        /// What the Suunto app does after this many chunks of the next /Data stream. Its hello ends the stream there.
+        var appDuringStream: (afterChunks: Int, event: AppEvent)?
+        /// The next /Data SUBSCRIBE is taken, but one of the app's replies arrives ahead of its reply.
+        var appReplyBeforeStreamSubscribeReply = false
+        /// The app's replies that follow each 423 to a SUBSCRIBE: the app is using the watch.
+        var appRepliesAfterRefusal = 0
+        /// A request before any hello is answered with 404 instead of going unanswered.
+        var answersSessionlessWith404 = false
+        /// Host writes, counted from the last reconnect, that the transport wasn't ready to take: they fail with
+        /// DC_STATUS_TIMEOUT and nothing goes out, as the BLE bridge reports a CoreBluetooth write not accepted in time.
+        var timedOutWrites: Set<Int> = []
+        private var writes = 0
+        /// Requests left unanswered because nobody had said hello on the link.
+        private(set) var sessionlessRequests = 0
+        private(set) var hellosReceived = 0
+        /// The status each /Data UNSUBSCRIBE got: 404 once the app's hello has ended our session.
+        private(set) var streamUnsubscribes: [Int] = []
+        private var appTookSession = false
+        private var appSeq = 900
+        private var lateProbe: [UInt8]?
+        private var lateReply: [UInt8] = []
         private var pendingStaleFrames = 0
         private var helloAckEnd: Int?
         private(set) var ignoredRequests = 0
@@ -186,15 +320,36 @@ final class SuuntoNauticTransportTests: XCTestCase {
             lock.lock(); defer { lock.unlock() }
             if !linkUp { pendingStaleFrames = staleFramesAfterDrop }
             helloAckEnd = nil
+            lateProbe = nil
+            lateReply.removeAll()
+            // A new connection binds its handles in the app's session, so they are good in it.
+            appTookSession = false
             if !(keepsSessionAcrossDrops && !linkUp) {
                 heldSlots.removeAll()
                 subscribed.removeAll()
                 recentRequests.removeAll()
+                session = false
             }
             linkUp = true
             rx.removeAll(); rxIndex = 0
             rxDecode.removeAll(); rxInFrame = false; rxEscaped = false
+            writes = 0
             connects += 1
+        }
+
+        var writesAttempted: Int { lock.lock(); defer { lock.unlock() }; return writes }
+
+        /// Counts a host write; true when the transport wasn't ready to take it (`timedOutWrites`).
+        func writeTimesOut() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            writes += 1
+            return timedOutWrites.contains(writes)
+        }
+
+        /// A frame whose framing is broken: an escape character right before the closing flag.
+        func pushDamagedFrame() {
+            lock.lock(); defer { lock.unlock() }
+            rx += [0x7E, 0xA5, 0x02, 0x7D, 0x7E]
         }
 
         func dropLink() {
@@ -214,6 +369,40 @@ final class SuuntoNauticTransportTests: XCTestCase {
             guard let h = subscribed[path] else { return }
             let body = value(for: path)
             send(Self.packet(0x01, [0x00, 0x00], h + [0x01, 0x80, 0x00] + body + [0x00]))
+        }
+
+        /// Replies to the Suunto app's requests, as they reach every client on the link.
+        func pushAppReplies(_ n: Int = 1) {
+            lock.lock(); defer { lock.unlock() }
+            for _ in 0..<n { pushAppReplyLocked() }
+        }
+
+        /// The Suunto app's hello reply: the app now has the session, and ours is over.
+        func pushAppHello() {
+            lock.lock(); defer { lock.unlock() }
+            appHelloLocked()
+        }
+
+        private func pushAppReplyLocked() {
+            send(Self.packet(0x02, Self.u16(appSeq), [0xF0, 0x31, 0x1C, 0x01, 0x80, 0x00] + Self.u16(200)))
+            appSeq += 1
+        }
+
+        private func appHelloLocked() {
+            send(Self.packet(0x13, [0x00, 0x00], Self.helloReply))
+            appSession = true
+            appTookSession = true
+        }
+
+        /// The first half of that push, then nothing: a frame the link cut off.
+        func notifyCutOff(_ path: String) {
+            lock.lock(); defer { lock.unlock() }
+            guard let h = subscribed[path] else { return }
+            let frame = Self.packet(0x01, [0x00, 0x00], h + [0x01, 0x80, 0x00] + value(for: path) + [0x00])
+            rx.append(0x7E)
+            for b in frame.prefix(frame.count / 2) {
+                if b == 0x7E || b == 0x7D { rx.append(0x7D); rx.append(b ^ 0x20) } else { rx.append(b) }
+            }
         }
 
         private func value(for path: String) -> [UInt8] {
@@ -258,7 +447,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
         // Watch -> host bytes; nil once the link is down and nothing is left in flight.
         func hostRead(into buffer: UnsafeMutableRawPointer, size: Int) -> Int? {
             lock.lock(); defer { lock.unlock() }
-            let n = min(size, rx.count - rxIndex)
+            if appBusy && linkUp && rx.count == rxIndex { pushAppReplyLocked() }
+            let n = min(size, rx.count - rxIndex, maxReadSize ?? Int.max)
             guard n > 0 else { return linkUp ? 0 : nil }
             rx.withUnsafeBufferPointer { buffer.copyMemory(from: $0.baseAddress! + rxIndex, byteCount: n) }
             rxIndex += n
@@ -308,17 +498,62 @@ final class SuuntoNauticTransportTests: XCTestCase {
             Self.packet(0x05, msgid, handle + [0x01, 0x80, 0x00] + Self.u16(status) + body)
         }
 
-        /// A /Data notification: HANDLE(3) FLAGS(3) ?(4) OFFSET(4) LENGTH(2) ?(6) DATA.
+        /// A /Data notification: HANDLE(3) FLAGS(3) ?(4) OFFSET(4) LENGTH(2) ?(6) DATA 00.
         private func chunkFrame(_ payload: ArraySlice<UInt8>, offset: Int = 0) -> [UInt8] {
             Self.packet(0x01, [0x00, 0x00], [0xF0, 0x24, 0x0E, 0x01, 0x80, 0x00, 0x02, 0x24, 0x22, 0x25]
-                + Self.u32(UInt32(offset)) + Self.u16(payload.count) + [0x00, 0x10, 0x0C, 0x00, 0x00, 0x00] + Array(payload))
+                + Self.u32(UInt32(offset)) + Self.u16(payload.count) + [0x00, 0x10, 0x0C, 0x00, 0x00, 0x00] + Array(payload) + [0x00])
+        }
+
+        /// /Info as the watch serves it: TYPE(2) SIZE(2) ?(2), then a struct led by the offsets of its eight strings.
+        private var info: [UInt8] {
+            let strings = ["Suunto", product, "Porvoo", "T", "2604C3003306", "01385D425091602000000100034252D12543", "2.51.28", "4252D1"]
+            var offsets: [UInt8] = [], text: [UInt8] = []
+            for string in strings {
+                offsets += Self.u32(UInt32(strings.count * 4 + text.count))
+                text += Array(string.utf8) + [0x00]
+            }
+            return [0x02, 0x2F, 0x19, 0x25, 0x01, 0x00] + offsets + text
         }
 
         private var sortedDives: [FakeDive] { dives.sorted { $0.id < $1.id } }
 
         private func handle(_ f: [UInt8]) {
             guard f.count >= 6, f[0] == 0xA5 else { return }
+            if !lateReply.isEmpty {
+                rx += lateReply
+                lateReply.removeAll()
+            }
+            let mark = rx.count
+            handleRequest(f)
+            if let op = lateReplyTo, f[1] == op, rx.count > mark {
+                lateReplyTo = nil
+                lateReply = Array(rx[mark...])
+                rx.removeSubrange(mark...)
+            }
+        }
+
+        private func handleRequest(_ f: [UInt8]) {
             let msgid = Array(f[4...5])
+            if f[1] == 0x12 {
+                hellosReceived += 1
+                session = true
+                appTookSession = false
+                if let probe = lateProbe {
+                    lateProbe = nil
+                    send(Self.packet(0x02, probe, [0xF0, 0x24, 0x00, 0x01, 0x80, 0x00] + Self.u16(200)))
+                }
+                if appBusyAfterHello {
+                    appBusy = true
+                    pushAppReplyLocked()
+                }
+            } else if !session && !appSession {
+                sessionlessRequests += 1
+                if answersProbeLate && lateProbe == nil { lateProbe = msgid }
+                if answersSessionlessWith404 && f[1] == 0x0A {
+                    send(Self.packet(0x02, msgid, [0xFF, 0xFF, 0xFF, 0x01, 0x80, 0x00] + Self.u16(404)))
+                }
+                return
+            }
             if f[1] != 0x12 {
                 if helloAckEnd != nil {
                     ignoredRequests += 1
@@ -357,6 +592,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     send(Self.packet(0x02, msgid, [0xFF, 0xFF, 0xFF, 0x01, 0x80, 0x00] + Self.u16(404)))
                     return
                 }
+                if path.hasSuffix("/Summary") && unansweredSummaryGets > 0 {
+                    unansweredSummaryGets -= 1
+                    return
+                }
                 if path.hasSuffix("/Summary") && dropAtSummaryGet {
                     dropAtSummaryGet = false
                     linkUp = false
@@ -392,12 +631,17 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 if refuseStreams > 0 {
                     refuseStreams -= 1
                     send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(423) + [0x00, 0x00]))
+                    for _ in 0..<appRepliesAfterRefusal { pushAppReplyLocked() }
                     return
                 }
                 streamsServed += 1
                 streamedPaths.append(path)
                 if cancelIOAfterStreamBytes != nil { streamBytesRead = 0 }
                 onStreamStart?(streamsServed)
+                if appReplyBeforeStreamSubscribeReply {
+                    appReplyBeforeStreamSubscribeReply = false
+                    pushAppReplyLocked()
+                }
                 send(Self.packet(0x08, msgid, h + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00]))
                 let truncate = truncatedStreams > 0 ? truncateStreamBy : 0
                 if truncate > 0 { truncatedStreams -= 1 }
@@ -418,6 +662,24 @@ final class SuuntoNauticTransportTests: XCTestCase {
                         return
                     }
                     let j = min(i + mdsPayloadSize, bytes.endIndex)
+                    if let app = appDuringStream, sent == app.afterChunks {
+                        appDuringStream = nil
+                        switch app.event {
+                        case .tornHello:
+                            // The chunk loses its tail and closing flag; the hello's opening flag ends it.
+                            rx.append(0x7E)
+                            for b in chunkFrame(bytes[i..<j], offset: i - bytes.startIndex).dropLast(30) {
+                                if b == 0x7E || b == 0x7D { rx.append(0x7D); rx.append(b ^ 0x20) } else { rx.append(b) }
+                            }
+                            appHelloLocked()
+                            return
+                        case .hello:
+                            appHelloLocked()
+                            return
+                        case .reply:
+                            pushAppReplyLocked()
+                        }
+                    }
                     if !(lostChunk && sent == 1) {
                         send(chunkFrame(bytes[i..<j], offset: i - bytes.startIndex))
                     }
@@ -453,7 +715,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 }
             case 0x11: // unsubscribe a /Data handle; the resolution stays bound until released
                 streamStops += 1
-                send(Self.packet(0x09, msgid, Array(f[6...8]) + [0x01, 0x80, 0x00] + Self.u16(200) + [0x00, 0x00]))
+                let status = appTookSession ? 404 : 200
+                streamUnsubscribes.append(status)
+                send(Self.packet(0x09, msgid, Array(f[6...8]) + [0x01, 0x80, 0x00] + Self.u16(status) + [0x00, 0x00]))
             case 0x0D: // fetch on a handle
                 let h = Array(f[6...8])
                 guard let path = handles[h] else { return }
@@ -505,7 +769,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                     let header: [UInt8] = [0x0D, 0x00, 0x02, len[0], len[1], 0x00, len[0], len[1], 0x00, len[0], len[1]]
                     send(dataFrame(msgid: msgid, handle: h, status: end < content.count ? 100 : 200, body: header + data))
                 } else if path == "/Info" {
-                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: Array("Suunto\0Ocean\0Porvoo\0T\02604C3003306\02.51.28\0".utf8)))
+                    send(dataFrame(msgid: msgid, handle: h, status: 200, body: info))
                 } else {
                     send(dataFrame(msgid: msgid, handle: h, status: 404, body: []))
                 }
@@ -566,7 +830,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 ? [0x01, 0x24, 0x0A, 0x24, 0x00, 0x00, 0x00, 0x00, 0x08, 0x3C, 0x08, 0x00, 0x00, 0x00]
                 : [0x01, 0x24] + Self.u32(2_100_000_000 - 1) + Self.u32(UInt32(page.count)) + Self.u32(12) + Self.u32(16)
             for d in page {
-                body += Self.u32(d.id) + Self.u32(d.id + 1800) + Self.u32(1) + Self.u32(0)
+                body += Self.u32(d.id) + Self.u32(d.id + 1800) + Self.u32(d.hasSize ? 1 : 0) + Self.u32(0)
                     + Self.u32(d.listedSize) + Self.u32(0)
             }
             send(dataFrame(msgid: msgid, handle: handle, status: more ? 100 : 200, body: body))
@@ -585,6 +849,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
     private var sessions: [Session] = []
     private let sessionsLock = NSLock()
+    private var keepAlive: [AnyObject] = []
 
     override func tearDown() {
         sessionsLock.lock()
@@ -592,6 +857,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         sessions.removeAll()
         sessionsLock.unlock()
         open.forEach(Self.close)
+        keepAlive.removeAll()
         super.tearDown()
     }
 
@@ -613,13 +879,29 @@ final class SuuntoNauticTransportTests: XCTestCase {
         Unmanaged<FakeWatch>.fromOpaque(userdata!).takeUnretainedValue()
     }
 
-    private func open(_ watch: FakeWatch, resume: SuuntoNauticResume? = nil) throws -> OpaquePointer {
-        let s = Session(watch: watch)
-        sessionsLock.lock()
-        sessions.append(s)
-        sessionsLock.unlock()
-        XCTAssertEqual(dc_context_new(&s.context), DC_STATUS_SUCCESS)
+    /// `logging`: the context logs through the bridge at `LibDCLogging.level`, as a connect's does.
+    private func open(_ watch: FakeWatch, resume: SuuntoNauticResume? = nil, logging: Bool = false) throws -> OpaquePointer {
+        let (status, device) = try openStatus(watch, resume: resume, logging: logging)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        return try XCTUnwrap(device)
+    }
 
+    /// Collects a context's log lines.
+    final class DriverLog {
+        private let lock = NSLock()
+        private var lines: [String] = []
+        func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+        func count(_ needle: String) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return lines.filter { $0.contains(needle) }.count
+        }
+        /// The open's wait for the link to go quiet, and the step-aside's.
+        var openWaits: Int { count("waiting until it is done") }
+        var stepAsideWaits: Int { count("Waiting for the other app to finish") }
+    }
+
+    /// The custom iostream every open here runs on: the fake watch behind it.
+    private func stream(_ watch: FakeWatch, context: OpaquePointer?) throws -> OpaquePointer {
         var cbs = dc_custom_cbs_t()
         cbs.set_timeout = { _, _ in DC_STATUS_SUCCESS }
         cbs.read = { userdata, data, size, actual in
@@ -641,6 +923,10 @@ final class SuuntoNauticTransportTests: XCTestCase {
                 actual?.pointee = 0
                 return DC_STATUS_CANCELLED
             }
+            if watch.writeTimesOut() {
+                actual?.pointee = 0
+                return DC_STATUS_TIMEOUT
+            }
             guard watch.hostWrote(UnsafeRawBufferPointer(start: data, count: size)) else {
                 actual?.pointee = 0
                 return DC_STATUS_IO
@@ -654,8 +940,30 @@ final class SuuntoNauticTransportTests: XCTestCase {
         }
         cbs.close = { _ in DC_STATUS_SUCCESS }
 
+        var iostream: OpaquePointer?
         let userdata = Unmanaged.passUnretained(watch).toOpaque()
-        XCTAssertEqual(dc_custom_open(&s.iostream, s.context, DC_TRANSPORT_BLE, &cbs, userdata), DC_STATUS_SUCCESS)
+        XCTAssertEqual(dc_custom_open(&iostream, context, DC_TRANSPORT_BLE, &cbs, userdata), DC_STATUS_SUCCESS)
+        return try XCTUnwrap(iostream)
+    }
+
+    /// The open's status, and the device when it opened. `log` collects the driver's lines at every level.
+    private func openStatus(_ watch: FakeWatch, resume: SuuntoNauticResume? = nil, logging: Bool = false,
+                            log: DriverLog? = nil) throws -> (dc_status_t, OpaquePointer?) {
+        let s = Session(watch: watch)
+        sessionsLock.lock()
+        sessions.append(s)
+        sessionsLock.unlock()
+        XCTAssertEqual(dc_context_new(&s.context), DC_STATUS_SUCCESS)
+        if logging, let context = s.context { LibDCLogging.configure(context) }
+        if let log {
+            dc_context_set_loglevel(s.context, DC_LOGLEVEL_ALL)
+            dc_context_set_logfunc(s.context, { _, _, _, _, _, message, userdata in
+                guard let message, let userdata else { return }
+                Unmanaged<DriverLog>.fromOpaque(userdata).takeUnretainedValue().append(String(cString: message))
+            }, Unmanaged.passUnretained(log).toOpaque())
+            keepAlive.append(log)
+        }
+        s.iostream = try stream(watch, context: s.context)
 
         var descriptor: OpaquePointer?
         var iterator: OpaquePointer?
@@ -672,10 +980,9 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let desc = try XCTUnwrap(descriptor, "no Suunto Nautic descriptor")
         defer { dc_descriptor_free(desc) }
 
-        XCTAssertEqual(dc_device_open(&s.device, s.context, desc, s.iostream), DC_STATUS_SUCCESS)
-        let device = try XCTUnwrap(s.device)
-        if let resume { XCTAssertTrue(resume.attach(device, watch: Self.watchName)) }
-        return device
+        let status = dc_device_open(&s.device, s.context, desc, s.iostream)
+        if let resume, let device = s.device { XCTAssertTrue(resume.attach(device, watch: Self.watchName)) }
+        return (status, s.device)
     }
 
     private static let watchName = "Suunto Nautic test"
@@ -746,7 +1053,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status, dives) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(dives.count, 1)
-        XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(dives.first?.data, dive.blob)
         XCTAssertEqual(watch.streamStops, 1)
     }
 
@@ -759,7 +1066,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, dives) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(dives.first?.data, dive.blob)
         XCTAssertEqual(watch.summaryOffsets, [0, 451, 902, 1353, 1804])
     }
 
@@ -788,26 +1095,28 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, dives) = foreach(device)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dives.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(dives.first?.data, dive.blob)
     }
 
     func testRefusedStreamFailsTheDive() throws {
         let dive = FakeDive(id: 1_789_487_763, profileBytes: 4000)
         let watch = FakeWatch(dives: [dive])
-        watch.refuseStreams = 1
+        // The driver ends a left-over stream (423) and subscribes again, twice; a third 423 fails the dive.
+        watch.refuseStreams = 3
         let device = try open(watch)
 
         let (status, dives) = foreach(device)
-        XCTAssertEqual(status, DC_STATUS_PROTOCOL, "the driver doesn't issue a refused stream again")
+        XCTAssertEqual(status, DC_STATUS_PROTOCOL, "the driver doesn't keep issuing a refused stream")
         XCTAssertTrue(dives.isEmpty)
         XCTAssertEqual(watch.streamsServed, 0)
-        XCTAssertTrue(watch.summaryOffsets.isEmpty)
+        XCTAssertEqual(watch.streamUnsubscribes, [200, 200], "an UNSUBSCRIBE after each of the first two refusals")
+        XCTAssertEqual(watch.summaryOffsets.filter { $0 == 0 }.count, 1, "the /Summary comes before the stream")
         XCTAssertEqual(watch.heldIdHandles, [], "the refused stream's handle is released")
 
         // The retry is the application's, and works on the same link.
         let (retryStatus, retried) = foreach(device)
         XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
-        XCTAssertEqual(retried.first?.data, dive.decompressed + dive.summary)
+        XCTAssertEqual(retried.first?.data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1)
     }
 
@@ -835,6 +1144,220 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status, downloaded) = foreach(device, fingerprint: dives[20].id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         XCTAssertEqual(downloaded.map(\.fingerprint), [dives[22].id, dives[21].id])
+    }
+
+    // MARK: - libdc-swift#29: the activities that aren't dives
+
+    private final class ProgressEvents {
+        var last = dc_event_progress_t()
+        var count = 0
+    }
+
+    /// Records the progress events of `device` into `events`.
+    private func trackProgress(_ device: OpaquePointer, _ events: ProgressEvents) {
+        let status = dc_device_set_events(device, DC_EVENT_PROGRESS.rawValue, { _, event, data, userdata in
+            guard event == DC_EVENT_PROGRESS, let data, let userdata else { return }
+            let events = Unmanaged<ProgressEvents>.fromOpaque(userdata).takeUnretainedValue()
+            events.last = data.assumingMemoryBound(to: dc_event_progress_t.self).pointee
+            events.count += 1
+        }, Unmanaged.passUnretained(events).toOpaque())
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+    }
+
+    private func nonDives(_ device: OpaquePointer) -> UInt32 {
+        var count: UInt32 = .max
+        XCTAssertEqual(suunto_nautic_device_get_nondives(device, &count), DC_STATUS_SUCCESS)
+        return count
+    }
+
+    private func dataGets(_ watch: FakeWatch, _ id: UInt32) -> Int {
+        watch.getPaths.filter { $0 == "/Logbook/byId/\(id)/Data" }.count
+    }
+
+    func testARunBetweenDivesIsSkippedBeforeItsData() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let newer = FakeDive(id: 1_789_020_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [older, run, newer])
+        let device = try open(watch)
+        let progress = ProgressEvents()
+        trackProgress(device, progress)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, older.id], "the walk goes on past the run")
+        XCTAssertEqual(delivered.map(\.data), [newer.blob, older.blob])
+        XCTAssertTrue(watch.getPaths.contains("/Logbook/byId/\(run.id)/Summary"))
+        XCTAssertEqual(dataGets(watch, run.id), 0, "the run's /Data is never requested")
+        XCTAssertFalse(watch.streamedPaths.contains("/Logbook/byId/\(run.id)/Data"))
+        XCTAssertEqual(watch.streamsServed, 2)
+        XCTAssertEqual(nonDives(device), 1)
+        XCTAssertEqual(progress.last.current, progress.last.maximum, "the run's step is counted too")
+        XCTAssertEqual(progress.last.maximum, 4 * 1000)
+        XCTAssertEqual(watch.heldIdHandles, [])
+    }
+
+    func testANewestRunNeverBecomesTheFingerprintAndTheNextSyncReadsOnlyItsSummary() throws {
+        let dive = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let runs = [FakeDive.activity(id: 1_789_010_000), FakeDive.activity(id: 1_789_020_000, sport: 100)]
+        let watch = FakeWatch(dives: [dive] + runs)
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dive.id], "the first fingerprint delivered, the one a host stores, is the dive's")
+        XCTAssertEqual(nonDives(device), 2)
+        close(device: device)
+
+        watch.reconnect()
+        let next = try open(watch)
+        let (status2, delivered2) = foreach(next, fingerprint: dive.id)
+        XCTAssertEqual(status2, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered2.map(\.fingerprint), [], "nothing new, and the walk ends at the stored dive")
+        XCTAssertEqual(watch.getPaths.filter { $0.hasSuffix("/Summary") }.count, 3 + 2, "the second sync reads only the newer runs' /Summary")
+        XCTAssertEqual(watch.getPaths.filter { $0 == "/Logbook/byId/\(dive.id)/Summary" }.count, 1, "the stored dive isn't read again")
+        XCTAssertEqual(runs.map { dataGets(watch, $0.id) }, [0, 0])
+        XCTAssertEqual(nonDives(next), 2)
+    }
+
+    func testAFingerprintOnARunStillEndsTheWalk() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let newer = FakeDive(id: 1_789_020_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [older, run, newer])
+        let device = try open(watch)
+
+        // A build that delivered runs may have stored one as the fingerprint.
+        let (status, delivered) = foreach(device, fingerprint: run.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id])
+        XCTAssertFalse(watch.getPaths.contains { $0.contains("/\(run.id)/") || $0.contains("/\(older.id)/") })
+        XCTAssertEqual(nonDives(device), 0)
+    }
+
+    func testAnEntryThatCantBeToldFromADiveIsDownloaded() throws {
+        let entries = [
+            FakeDive.activity(id: 1_789_000_000, sport: 51),               // a diving sport
+            FakeDive.activity(id: 1_789_010_000, sport: 61),
+            FakeDive.activity(id: 1_789_020_000, sport: 62),
+            FakeDive.activity(id: 1_789_030_000, diveHeader: true),        // a dive header, whatever the sport
+            FakeDive.activity(id: 1_789_040_000, header: false),           // no Header to read the sport from
+            FakeDive.activity(id: 1_789_050_000, headerStart: 1_789_049_990), // a Header that doesn't start with the entry
+        ]
+        let watch = FakeWatch(dives: entries)
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), Array(entries.map(\.id).reversed()), "all of them, left to the parser")
+        XCTAssertEqual(delivered.map(\.data), entries.reversed().map(\.blob))
+        XCTAssertEqual(entries.map { dataGets(watch, $0.id) }, Array(repeating: 1, count: entries.count))
+        XCTAssertEqual(nonDives(device), 0)
+    }
+
+    func testARunWhoseRecordsGetTheDiveHeaderIdsIsStillSkipped() throws {
+        // The descriptors of a run, without the dive records, could number its records from 0x20.
+        let runs = [
+            FakeDive.activity(id: 1_789_000_000, headerID: 0x20, headerFirst: true), // the Header first, as 0x20
+            FakeDive.activity(id: 1_789_010_000, windowID: 0x21, headerID: 0x20),    // Windows 0x21, Header 0x20
+            FakeDive.activity(id: 1_789_020_000, windowID: 0x20, headerID: 0x21),    // Windows 0x20, Header 0x21
+            FakeDive.activity(id: 1_789_030_000, windowID: 0x21, headerID: 0x22),    // Windows 0x21 first
+        ]
+        let dive = FakeDive(id: 1_789_040_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: runs + [dive])
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dive.id])
+        XCTAssertEqual(runs.map { dataGets(watch, $0.id) }, [0, 0, 0, 0], "a record too small for a dive header isn't one")
+        XCTAssertEqual(nonDives(device), 4)
+    }
+
+    func testTheSkipCountIsTheLastForeachsOnTheSameDevice() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let runs = [FakeDive.activity(id: 1_789_010_000), FakeDive.activity(id: 1_789_020_000, sport: 100)]
+        let watch = FakeWatch(dives: [older] + runs)
+        let device = try open(watch)
+
+        XCTAssertEqual(foreach(device).0, DC_STATUS_SUCCESS)
+        XCTAssertEqual(nonDives(device), 2)
+
+        // The Explorer downloads again on the same connection.
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [older.id])
+        XCTAssertEqual(nonDives(device), 2, "this foreach's skips, not the connection's")
+
+        let (status3, delivered3) = foreach(device, fingerprint: runs[0].id)
+        XCTAssertEqual(status3, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered3.count, 0)
+        XCTAssertEqual(nonDives(device), 1, "only the newer run was walked")
+    }
+
+    func testTheHeaderOfARealOceanSummaryIsRead() throws {
+        // The /Summary of the synthetic run, whose Header is Ocean dive 1787699873's with the sport set to 3.
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_ocean_nondive_synthetic", withExtension: "bin"))
+        let run = [UInt8](try Data(contentsOf: url))
+        let size = Int(Self.le32(run, 0))
+        let ocean = FakeDive(id: 1_787_699_873, summary: Array(run[4..<(4 + size)]), profile: Array(run[(4 + size)...]))
+        // A real dive's /Summary, which starts with the Nautic's dive header (0x21).
+        let nautic = [UInt8](try Data(contentsOf: try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))))
+        let nauticSize = Int(Self.le32(nautic, 0))
+        let dive = FakeDive(id: 1_787_752_091, summary: Array(nautic[4..<(4 + nauticSize)]), profile: Array(nautic[(4 + nauticSize)...]))
+        let watch = FakeWatch(dives: [ocean, dive])
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [dive.id])
+        XCTAssertEqual(delivered.first?.data, dive.blob)
+        XCTAssertEqual(dataGets(watch, ocean.id), 0)
+        XCTAssertEqual(nonDives(device), 1)
+    }
+
+    func testTheByIdDownloadFetchesARunWhole() throws {
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let watch = FakeWatch(dives: [run])
+        let device = try open(watch)
+
+        let (status, data) = download(device, id: run.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, run.blob, "the extension API fetches any entry; the parser judges it")
+    }
+
+    func testBytesKeptForARunAreForgottenWhenItIsSkipped() throws {
+        let run = FakeDive.activity(id: 1_789_010_000, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [run])
+        watch.keepsSessionAcrossDrops = true
+        watch.dropAfterChunks = 10
+        let resume = SuuntoNauticResume()
+
+        // A by-id download keeps the bytes of a run, as an older build's foreach did.
+        let first = try open(watch, resume: resume)
+        XCTAssertEqual(download(first, id: run.id).0, DC_STATUS_IO)
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: run.id, on: first), 10 * watch.mdsPayloadSize)
+        close(device: first)
+
+        watch.reconnect()
+        let second = try open(watch, resume: resume)
+        let (status, delivered) = foreach(second)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.count, 0)
+        XCTAssertEqual(dataGets(watch, run.id), 1, "only the by-id download asked for the /Data")
+        XCTAssertNil(SuuntoNauticResume.resumableBytes(of: run.id, on: second))
+    }
+
+    func testALostLinkAtARunsSummaryStopsTheWalkLikeADive() throws {
+        let older = FakeDive(id: 1_789_000_000, profileBytes: 600, summaryBytes: 100)
+        let run = FakeDive.activity(id: 1_789_010_000)
+        let watch = FakeWatch(dives: [older, run])
+        watch.dropAtSummaryGet = true
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertNotEqual(status, DC_STATUS_SUCCESS, "it isn't known to be a run before its /Summary arrives")
+        XCTAssertEqual(delivered.count, 0, "nothing older is delivered past it")
     }
 
     // MARK: - #58: downloads are checked against the listed size
@@ -866,7 +1389,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         // The application's retry on the same link gets the whole dive.
         let (retryStatus, retried) = download(device, id: dive.id)
         XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
-        XCTAssertEqual(retried, dive.decompressed + dive.summary)
+        XCTAssertEqual(retried, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2)
     }
 
@@ -881,7 +1404,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(data.isEmpty, "a stream without its end marker is never handed out")
         XCTAssertEqual(watch.streamsServed, 1, "one stream, not retried by the driver")
         XCTAssertEqual(watch.streamStops, 1, "and it was unsubscribed")
-        XCTAssertTrue(watch.summaryOffsets.isEmpty)
+        XCTAssertEqual(watch.summaryOffsets.filter { $0 == 0 }.count, 1, "the /Summary comes before the stream")
         XCTAssertEqual(watch.heldIdHandles, [], "and released")
     }
 
@@ -896,12 +1419,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(data.isEmpty)
         XCTAssertEqual(watch.streamsServed, 1)
         XCTAssertEqual(watch.streamStops, 1, "the failed stream is still unsubscribed")
-        XCTAssertTrue(watch.summaryOffsets.isEmpty, "the stream check caught it, not the size check")
+        XCTAssertEqual(watch.summaryOffsets.filter { $0 == 0 }.count, 1, "the /Summary comes before the stream")
         XCTAssertTrue(watch.dataPageOffsets.isEmpty, "a chunk at an earlier offset isn't read again in pages")
 
         let (retryStatus, retried) = download(device, id: dive.id)
         XCTAssertEqual(retryStatus, DC_STATUS_SUCCESS)
-        XCTAssertEqual(retried, dive.decompressed + dive.summary)
+        XCTAssertEqual(retried, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2)
     }
 
@@ -913,7 +1436,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary, "the same dive as an uninterrupted stream")
+        XCTAssertEqual(data, dive.blob, "the same dive as an uninterrupted stream")
         XCTAssertEqual(watch.streamsServed, 1, "recovered on the same stream, not by downloading again")
         XCTAssertEqual(watch.streamStops, 1)
         let first = watch.mdsPayloadSize, page = watch.summaryPageSize
@@ -947,7 +1470,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: second), kept, "the next connection's device has the kept bytes")
         let (status2, data2) = download(second, id: dive.id)
         XCTAssertEqual(status2, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data2, dive.decompressed + dive.summary, "byte for byte the dive an uninterrupted stream gives")
+        XCTAssertEqual(data2, dive.blob, "byte for byte the dive an uninterrupted stream gives")
         XCTAssertEqual(watch.streamsServed, 1, "the rest isn't streamed again")
         XCTAssertEqual(watch.dataPageOffsets, stride(from: kept, to: dive.compressed.count, by: watch.summaryPageSize).map(UInt32.init),
                        "pages from the first missing byte to the end")
@@ -956,7 +1479,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second), "a dive that downloaded forgets what was kept")
     }
 
-    func testDropAtTheSummaryKeepsTheWholeProfileAndTheNextConnectionFetchesOnlyTheSummary() throws {
+    func testDropAtTheSummaryComesBeforeTheProfileSoTheNextConnectionDownloadsItWhole() throws {
         let dive = FakeDive(id: 1_789_390_907, profileBytes: 8000)
         let watch = FakeWatch(dives: [dive])
         watch.dropAtSummaryGet = true
@@ -964,16 +1487,15 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let first = try open(watch, resume: resume)
         XCTAssertEqual(download(first, id: dive.id).0, DC_STATUS_IO)
-        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: first), dive.compressed.count)
+        XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: first), "no /Data had arrived yet")
+        XCTAssertEqual(watch.streamsServed, 0)
         close(device: first)
 
         watch.reconnect()
-        let before = watch.getPaths.count
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
-        XCTAssertFalse(watch.getPaths[before...].contains("/Logbook/byId/\(dive.id)/Data"), "the profile isn't read again")
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1)
         XCTAssertTrue(watch.dataPageOffsets.isEmpty)
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second))
@@ -997,7 +1519,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.dataPageOffsets.first, UInt32(kept))
         XCTAssertEqual(watch.streamsServed, 1)
     }
@@ -1026,7 +1548,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2, "streamed from the start again")
         XCTAssertTrue(watch.dataPageOffsets.isEmpty)
     }
@@ -1048,7 +1570,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, other.decompressed + other.summary)
+        XCTAssertEqual(data, other.blob)
         XCTAssertTrue(watch.dataPageOffsets.isEmpty, "streamed from the start")
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second))
     }
@@ -1080,7 +1602,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         for dive in [a, b] {
             let (status, data) = download(third, id: dive.id)
             XCTAssertEqual(status, DC_STATUS_SUCCESS)
-            XCTAssertEqual(data, dive.decompressed + dive.summary)
+            XCTAssertEqual(data, dive.blob)
             XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: third))
         }
         XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(a.id)/Data", "/Logbook/byId/\(b.id)/Data", "/Logbook/byId/\(b.id)/Data"],
@@ -1132,7 +1654,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.dataPageOffsets[pagesBefore], UInt32(kept), "the third connection starts where the second stopped")
         XCTAssertEqual(watch.streamsServed, 1)
     }
@@ -1159,7 +1681,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
     }
 
     /// The whole /Data arrived, but the stream didn't end cleanly: no end marker, the link went right
@@ -1189,7 +1711,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
             let second = try open(watch, resume: resume)
             let (status, data) = download(second, id: dive.id)
             XCTAssertEqual(status, DC_STATUS_SUCCESS, "\(ending)")
-            XCTAssertEqual(data, dive.decompressed + dive.summary, "\(ending)")
+            XCTAssertEqual(data, dive.blob, "\(ending)")
             XCTAssertFalse(watch.getPaths[before...].contains("/Logbook/byId/\(dive.id)/Data"), "\(ending): the /Data isn't asked for again")
             XCTAssertTrue(watch.dataPageOffsets.isEmpty, "\(ending)")
             XCTAssertEqual(watch.streamsServed, 1, "\(ending)")
@@ -1211,7 +1733,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let second = try open(watch, resume: resume)
         let (status, data) = download(second, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.dataPageOffsets, [UInt32(20 * watch.mdsPayloadSize)], "one refused page, then the stream")
         XCTAssertEqual(watch.streamsServed, 2)
         XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: second))
@@ -1238,8 +1760,37 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let third = try open(watch, resume: resume)
         let (status, data) = download(third, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 2, "streamed from the start")
+    }
+
+    func testAResumedDiveWhoseSummaryTimesOutKeepsItsBytes() throws {
+        let dive = FakeDive(id: 1_789_390_916, profileBytes: 20_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.dropAfterChunks = 20
+        let resume = SuuntoNauticResume()
+
+        let first = try open(watch, resume: resume)
+        XCTAssertEqual(download(first, id: dive.id).0, DC_STATUS_IO)
+        close(device: first)
+        let kept = 20 * watch.mdsPayloadSize
+
+        // A quiet watch on a live link times out at the /Summary, before any /Data read.
+        watch.reconnect()
+        watch.unansweredSummaryGets = 1
+        let second = try open(watch, resume: resume)
+        XCTAssertEqual(download(second, id: dive.id).0, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: second), kept, "kept for the next connection")
+        close(device: second)
+
+        watch.reconnect()
+        let third = try open(watch, resume: resume)
+        let (status, data) = download(third, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        XCTAssertEqual(watch.streamsServed, 1, "the rest is read in pages, not streamed again")
+        XCTAssertEqual(watch.dataPageOffsets.first, UInt32(kept))
+        XCTAssertNil(SuuntoNauticResume.resumableBytes(of: dive.id, on: third))
     }
 
     func testForeachCarriesOnWithTheDiveTheLinkDroppedIn() throws {
@@ -1262,7 +1813,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let (status2, delivered2) = foreach(second)
         XCTAssertEqual(status2, DC_STATUS_SUCCESS)
         XCTAssertEqual(delivered2.map(\.fingerprint), dives.reversed().map(\.id))
-        XCTAssertEqual(delivered2.map(\.data), dives.reversed().map { $0.decompressed + $0.summary })
+        XCTAssertEqual(delivered2.map(\.data), dives.reversed().map { $0.blob })
         XCTAssertEqual(watch.streamedPaths, [dives[2], dives[1], dives[2], dives[0]].map { "/Logbook/byId/\($0.id)/Data" },
                        "the dive the link dropped in isn't streamed a second time")
         XCTAssertEqual(watch.dataPageOffsets.first, UInt32(30 * watch.mdsPayloadSize))
@@ -1294,7 +1845,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1, "skipped, not recovered by a retry")
     }
 
@@ -1317,6 +1868,80 @@ final class SuuntoNauticTransportTests: XCTestCase {
         defer { dc_buffer_free(buffer) }
         var handle: [UInt8] = [0, 0, 0]
         XCTAssertEqual(suunto_nautic_device_subscribe(device, "/Sync/BusyState", &handle, buffer), DC_STATUS_UNSUPPORTED)
+    }
+
+    // MARK: - Waiting for a notification: a quiet watch is no error, a failed read still is
+
+    private static var sinkLines: [(level: String, message: String)] = []
+
+    private func captureSink() {
+        Self.sinkLines = []
+        set_libdc_log_sink { level, message in
+            SuuntoNauticTransportTests.sinkLines.append((String(cString: level!), String(cString: message!)))
+        }
+        addTeardownBlock { set_libdc_log_sink(nil) }
+    }
+
+    private static var receiveErrors: Int {
+        sinkLines.filter { $0.level == "ERROR" && $0.message.contains("Failed to receive the packet.") }.count
+    }
+
+    private func subscribeToUnsynced(_ device: OpaquePointer) {
+        let buffer = dc_buffer_new(0)
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        XCTAssertEqual(suunto_nautic_device_subscribe(device, "/Logbook/UnsynchronisedLogs", &handle, buffer), DC_STATUS_SUCCESS)
+    }
+
+    private func waitForNotification(_ device: OpaquePointer) -> (dc_status_t, [UInt8]) {
+        let buffer = dc_buffer_new(0)!
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        let status = suunto_nautic_device_wait_notification(device, 1000, &handle, buffer)
+        return (status, Array(UnsafeBufferPointer(start: dc_buffer_get_data(buffer), count: dc_buffer_get_size(buffer))))
+    }
+
+    func testAnIdleWaitTimesOutWithoutAnErrorAndADownloadsUnansweredRequestStillLogsOne() throws {
+        let dive = FakeDive(id: 1_789_312_850, profileBytes: 4000)
+        let watch = FakeWatch(dives: [dive])
+        captureSink()
+        let device = try open(watch, logging: true)
+        subscribeToUnsynced(device)
+
+        for _ in 0..<5 { XCTAssertEqual(waitForNotification(device).0, DC_STATUS_TIMEOUT) }
+        XCTAssertEqual(Self.sinkLines.filter { $0.level == "ERROR" }.map(\.message), [], "a quiet watch is the usual outcome of a wait")
+
+        watch.mutate { $0.unsyncedCount = 1 }
+        watch.notify("/Logbook/UnsynchronisedLogs")
+        let (status, value) = waitForNotification(device)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(value, [0x05, 0x00, 0x01, 0x00, 0x00])
+
+        watch.mutate { $0.unansweredSummaryGets = 1 }
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(Self.receiveErrors, 1, "the download's timeout is still an error: \(Self.sinkLines)")
+    }
+
+    func testALinkLostWhileWaitingIsStillAnError() throws {
+        let watch = FakeWatch(dives: [])
+        captureSink()
+        let device = try open(watch, logging: true)
+        subscribeToUnsynced(device)
+
+        watch.dropLink()
+        XCTAssertEqual(waitForNotification(device).0, DC_STATUS_IO)
+        XCTAssertEqual(Self.receiveErrors, 1)
+    }
+
+    func testANotificationCutOffWhileWaitingIsStillAnError() throws {
+        let watch = FakeWatch(dives: [])
+        captureSink()
+        let device = try open(watch, logging: true)
+        subscribeToUnsynced(device)
+
+        watch.notifyCutOff("/Logbook/UnsynchronisedLogs")
+        XCTAssertEqual(waitForNotification(device).0, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(Self.receiveErrors, 1, "a timeout with part of a frame received isn't a quiet watch")
     }
 
     func testShortDownloadStopsForeach() throws {
@@ -1345,7 +1970,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         }
         XCTAssertEqual(status, DC_STATUS_IO, "a dive that failed to download is an error, not a skip")
         XCTAssertEqual(delivered.map(\.fingerprint), [new[2].id], "nothing older than the gap is delivered")
-        XCTAssertEqual(delivered.first?.data, new[2].decompressed + new[2].summary)
+        XCTAssertEqual(delivered.first?.data, new[2].blob)
         XCTAssertEqual(watch.drops, 1)
 
         let afterFirst = DiveLogRetriever.outcome(status: status, family: DC_FAMILY_SUUNTO_NAUTIC, fingerprintMatched: false,
@@ -1363,7 +1988,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status2, DC_STATUS_SUCCESS)
         XCTAssertEqual(delivered2.map(\.fingerprint), new.map(\.id).reversed(), "every new dive, stopping at the stored fingerprint")
         for (got, fake) in zip(delivered2, new.reversed()) {
-            XCTAssertEqual(got.data, fake.decompressed + fake.summary)
+            XCTAssertEqual(got.data, fake.blob)
         }
         XCTAssertEqual(watch.streamsServed - streamsBefore, 3, "the already-synced dive is not downloaded again")
 
@@ -1410,7 +2035,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(watch.cancelledCalls, [.read, .write, .write], "the first cancelled read ends the dive")
         XCTAssertEqual(watch.streamsServed, 2)
         XCTAssertEqual(watch.getPaths.filter { $0.hasSuffix("/Data") }.count, 2)
-        XCTAssertFalse(watch.getPaths.contains("/Logbook/byId/\(dives[1].id)/Summary"), "no request after the cancel")
+        XCTAssertFalse(watch.getPaths.contains { $0.contains("\(dives[0].id)") }, "no request after the cancel")
     }
 
     func testCancelledWriteBetweenDivesEndsForeach() throws {
@@ -1448,7 +2073,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(outcome.interrupted)
     }
 
-    func testEmptyLogbookEntryIsSkipped() throws {
+    func testEmptyLogbookEntryIsDeliveredNotSkipped() throws {
         let older = FakeDive(id: 1_789_900_000, profileBytes: 4000)
         let empty = FakeDive(emptyID: 1_789_907_200)
         let newer = FakeDive(id: 1_789_914_400, profileBytes: 4000)
@@ -1456,9 +2081,23 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let device = try open(watch)
 
         let (status, delivered) = foreach(device)
-        XCTAssertEqual(status, DC_STATUS_SUCCESS, "an entry with nothing to download is not a gap")
-        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, older.id])
-        XCTAssertFalse(watch.streamedPaths.contains("/Logbook/byId/\(empty.id)/Data"), "skipped without a download")
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id, empty.id, older.id], "nothing is skipped")
+        XCTAssertEqual(delivered.dropFirst().first?.data, empty.blob, "an empty /Summary and /Data, which the parser rejects")
+        XCTAssertTrue(watch.streamedPaths.contains("/Logbook/byId/\(empty.id)/Data"))
+    }
+
+    func testEntryListedWithoutASizeFailsForeach() throws {
+        let older = FakeDive(id: 1_789_900_000, profileBytes: 4000)
+        var unsized = FakeDive(id: 1_789_907_200, profileBytes: 4000)
+        unsized.hasSize = false
+        let newer = FakeDive(id: 1_789_914_400, profileBytes: 4000)
+        let watch = FakeWatch(dives: [older, unsized, newer])
+        let device = try open(watch)
+
+        let (status, delivered) = foreach(device)
+        XCTAssertEqual(status, DC_STATUS_DATAFORMAT)
+        XCTAssertEqual(delivered.map(\.fingerprint), [newer.id], "foreach stops at the entry it can't check")
     }
 
     func testCompleteDownloadById() throws {
@@ -1468,7 +2107,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: dive.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, dive.decompressed + dive.summary)
+        XCTAssertEqual(data, dive.blob)
         XCTAssertEqual(watch.streamsServed, 1)
     }
 
@@ -1484,7 +2123,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (status, data) = download(device, id: unlisted.id)
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
-        XCTAssertEqual(data, unlisted.decompressed + unlisted.summary)
+        XCTAssertEqual(data, unlisted.blob)
         XCTAssertEqual(watch.entriesStartAfter.count, listings + 1, "the listing was read for the dive's size")
         XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(unlisted.id)/Data"])
     }
@@ -1500,12 +2139,12 @@ final class SuuntoNauticTransportTests: XCTestCase {
 
         let (statusA, dataA) = download(device, id: a.id)
         XCTAssertEqual(statusA, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dataA, a.decompressed + a.summary)
+        XCTAssertEqual(dataA, a.blob)
 
         let (statusB, dataB) = download(device, id: b.id)
         XCTAssertEqual(statusB, DC_STATUS_SUCCESS)
-        XCTAssertEqual(dataB, b.decompressed + b.summary, "dive B's request must not come back with dive A's profile")
-        XCTAssertFalse(dataB.starts(with: a.decompressed))
+        XCTAssertEqual(dataB, b.blob, "dive B's request must not come back with dive A's profile")
+        XCTAssertFalse(dataB.dropFirst(4 + b.summary.count).starts(with: a.decompressed))
 
         XCTAssertEqual(watch.streamedPaths, ["/Logbook/byId/\(a.id)/Data", "/Logbook/byId/\(b.id)/Data"])
         XCTAssertEqual(watch.heldIdHandles, [], "every per-id resolution is released")
@@ -1520,9 +2159,129 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertEqual(status, DC_STATUS_SUCCESS)
         let newestFirst = dives.sorted { $0.id > $1.id }
         XCTAssertEqual(got.map(\.fingerprint), newestFirst.map(\.id))
-        XCTAssertEqual(got.map(\.data), newestFirst.map { $0.decompressed + $0.summary })
+        XCTAssertEqual(got.map(\.data), newestFirst.map { $0.blob })
         XCTAssertEqual(watch.streamedPaths, newestFirst.map { "/Logbook/byId/\($0.id)/Data" })
         XCTAssertEqual(watch.heldIdHandles, [])
+    }
+
+    // MARK: - #29: DEVINFO names the model from /Info's product
+
+    private final class DevinfoEvents {
+        var devinfo: dc_event_devinfo_t?
+    }
+
+    /// The DEVINFO a download of `watch` reports.
+    private func devinfo(of watch: FakeWatch) throws -> dc_event_devinfo_t {
+        let device = try open(watch, logging: true)
+        let events = DevinfoEvents()
+        XCTAssertEqual(dc_device_set_events(device, DC_EVENT_DEVINFO.rawValue, { _, event, data, userdata in
+            guard event == DC_EVENT_DEVINFO, let data, let userdata else { return }
+            Unmanaged<DevinfoEvents>.fromOpaque(userdata).takeUnretainedValue().devinfo =
+                data.assumingMemoryBound(to: dc_event_devinfo_t.self).pointee
+        }, Unmanaged.passUnretained(events).toOpaque()), DC_STATUS_SUCCESS)
+        XCTAssertEqual(foreach(device).0, DC_STATUS_SUCCESS)
+        return try XCTUnwrap(events.devinfo)
+    }
+
+    private func oceanOrNautic(_ product: String) -> FakeWatch {
+        let watch = FakeWatch(dives: [FakeDive(id: 1_789_100_000, profileBytes: 600, summaryBytes: 100)])
+        watch.product = product
+        return watch
+    }
+
+    func testDevinfoReportsAnOceanAsModel1AndANauticAsModel0() throws {
+        captureSink()
+        for (product, model) in [("Ocean", UInt32(1)), ("Nautic", 0), ("Nautic S", 0)] {
+            let info = try devinfo(of: oceanOrNautic(product))
+            XCTAssertEqual(info.model, model, product)
+            XCTAssertEqual(info.serial, 0xC300_3306, product)
+            XCTAssertEqual(info.firmware, 2 << 16 | 51 << 8 | 28, product)
+        }
+        XCTAssertEqual(Self.sinkLines.filter { $0.level == "WARN" }.map(\.message), [])
+    }
+
+    func testAnUnknownProductIsReportedAsANauticWithAWarning() throws {
+        captureSink()
+        XCTAssertEqual(try devinfo(of: oceanOrNautic("Race")).model, 0)
+        XCTAssertEqual(Self.sinkLines.filter { $0.level == "WARN" }.map { $0.message.components(separatedBy: "(): ").last },
+                       ["Unknown product 'Race' in the device info."])
+    }
+
+    /// Build 32's log: "Updating stored device from suuntoNautic model 1 to suuntoNautic model 0 for Suunto Ocean". The
+    /// Explorer's download stores DEVINFO's model as it comes, and the driver reported 0 for both watches.
+    func testTheExplorersDownloadKeepsAStoredOceanAtModel1() throws {
+        let suiteName = "com.libdcswift.tests.nautic-model.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = DeviceStorage(userDefaults: defaults)
+        let ptr = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        ptr.initialize(to: device_data_t())
+        defer { ptr.deallocate() }
+        ptr.pointee.have_devinfo = 1
+
+        func download(_ product: String, stored: UInt32, session: Bool = false) throws -> UInt32? {
+            storage.storeDevice(uuid: "WATCH", name: "Suunto \(product) Test", family: .suuntoNautic, model: stored)
+            ptr.pointee.devinfo = try devinfo(of: oceanOrNautic(product))
+            DeviceConfiguration.updateDeviceConfigurationFromHardware(
+                deviceAddress: "WATCH", deviceDataPtr: ptr, deviceName: "Suunto \(product) Test", storage: storage,
+                requireKnownModel: session)
+            return storage.getStoredDevice(uuid: "WATCH")?.model
+        }
+
+        XCTAssertEqual(try download("Ocean", stored: 1), 1)
+        XCTAssertEqual(try download("Ocean", stored: 0), 1, "an Ocean an earlier build stored as model 0 is put right")
+        XCTAssertEqual(try download("Nautic", stored: 0), 0)
+        XCTAssertEqual(try download("Ocean", stored: 0, session: true), 1, "a session download puts it right too")
+        XCTAssertEqual(try download("Nautic", stored: 0, session: true), 0)
+    }
+
+    // MARK: - Full logging
+
+    private static let fullLog = BoundedLogBuffer()
+    private static let fullLogClock: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+
+    /// What DC Tester's Share log holds after a full-logging download: four dives the size of #29's 1787752091, read 60 bytes
+    /// at a time. The fake sends each as 843,681 bytes of heatshrink literals (673,907 compressed on the real watch), so this
+    /// logs more than a real download: about 13 MB here, 6.0 MB for the real two-dive capture in the same line format.
+    func testAFullLoggingDownloadOfFourRealSizeDivesFitsTheDefaultLogBuffer() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
+        let fixture = [UInt8](try Data(contentsOf: url))
+        let summarySize = Int(Self.le32(fixture, 0))
+        let summary = Array(fixture[4..<(4 + summarySize)])
+        let profile = Array(fixture[(4 + summarySize)...])
+        let dives = (0..<4).map { FakeDive(id: 1_787_752_091 + UInt32($0) * 86_400, summary: summary, profile: profile) }
+        let watch = FakeWatch(dives: dives)
+        watch.maxReadSize = 60
+
+        Self.fullLog.removeAll()
+        LibDCLogging.level = .all
+        set_libdc_log_sink { level, message in
+            let stamp = SuuntoNauticTransportTests.fullLogClock.string(from: Date())
+            SuuntoNauticTransportTests.fullLog.append(
+                "\(stamp) [libdc \(String(cString: level!))] \(String(cString: message!))")
+        }
+        defer {
+            set_libdc_log_sink(nil)
+            LibDCLogging.level = .warning
+        }
+        let device = try open(watch, logging: true)
+
+        let (status, got) = foreach(device)
+
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(got.count, 4)
+        let wire = dives.reduce(0) { $0 + $1.compressed.count + $1.summary.count }
+        let logged = Self.fullLog.byteCount
+        let perByte = Double(logged) / Double(wire)
+        print(String(format: "Full log: %d lines, %d bytes for %d bytes on the wire (%.2f per byte); a 673,907-byte dive logs ~%.1f MB",
+                     Self.fullLog.lineCount, logged, wire, perByte, perByte * 673_907 / 1_048_576))
+        XCTAssertEqual(Self.fullLog.droppedLineCount, 0, "four dives fit the default buffer")
+        XCTAssertGreaterThan(Self.fullLog.lines().filter { $0.contains("Read: size=60, data=") }.count, wire / 60 * 9 / 10)
+        Self.fullLog.removeAll()
     }
 
     // MARK: - Auto download: reconnect, resume, no duplicates
@@ -1541,7 +2300,8 @@ final class SuuntoNauticTransportTests: XCTestCase {
     /// Opens a fresh driver session on the same fake watch for every connect, like a real reconnect.
     private final class FakeConnector: NauticSyncConnector {
         let watch: FakeWatch
-        let openSession: () throws -> OpaquePointer
+        /// Nil when the open failed with TIMEOUT: the Suunto app is using the watch.
+        let openSession: () throws -> OpaquePointer?
         let closeSession: (OpaquePointer) -> Void
         var slot: DeviceSlot?
         private let lock = NSLock()
@@ -1551,11 +2311,18 @@ final class SuuntoNauticTransportTests: XCTestCase {
         private let cancelled = DispatchSemaphore(value: 0)
         /// Connect attempts that hang, like a pending CoreBluetooth connect to a sleeping watch, until cancelled.
         var hangingConnects = 0
+        /// Called with the attempt's number once the watch has reconnected, before the open.
+        var onConnect: ((Int) -> Void)?
+        /// Connects whose open finds the Suunto app using the watch, before anything else.
+        var busyConnects = 0
+        /// What `isLinkUp` reports: a hanging connect with its link up is opening the device.
+        var linkUpWhileConnecting = false
+        var isLinkUp: Bool { lock.lock(); defer { lock.unlock() }; return linkUpWhileConnecting }
         var connects: Int { lock.lock(); defer { lock.unlock() }; return _connects }
         var presenceChecks: Int { lock.lock(); defer { lock.unlock() }; return _presenceChecks }
         var cancels: Int { lock.lock(); defer { lock.unlock() }; return _cancels }
 
-        init(watch: FakeWatch, open: @escaping () throws -> OpaquePointer, close: @escaping (OpaquePointer) -> Void) {
+        init(watch: FakeWatch, open: @escaping () throws -> OpaquePointer?, close: @escaping (OpaquePointer) -> Void) {
             self.watch = watch
             openSession = open
             closeSession = close
@@ -1573,15 +2340,20 @@ final class SuuntoNauticTransportTests: XCTestCase {
         func connect() throws -> NauticSyncLink {
             lock.lock()
             _connects += 1
+            let attempt = _connects
             let hang = hangingConnects > 0
             if hang { hangingConnects -= 1 }
+            let busy = busyConnects > 0
+            if busy { busyConnects -= 1 }
             lock.unlock()
+            if busy { throw NauticAutoSyncError.otherAppActive }
             if hang {
                 _ = cancelled.wait(timeout: .now() + 10)
                 throw NauticAutoSyncError.connectFailed("could not open")
             }
             watch.reconnect()
-            let device = try openSession()
+            onConnect?(attempt)
+            guard let device = try openSession() else { throw NauticAutoSyncError.otherAppActive }
             slot?.opened()
             return DCDeviceNauticLink(device: device) { [closeSession, slot] in
                 closeSession($0)
@@ -1636,8 +2408,13 @@ final class SuuntoNauticTransportTests: XCTestCase {
                               resume: SuuntoNauticResume? = nil,
                               configure: (inout NauticAutoSync.Configuration) -> Void = { _ in })
         -> (NauticAutoSync, FakeConnector, VirtualClock, EventLog) {
-        let connector = FakeConnector(watch: watch, open: { [unowned self] in try self.open(watch, resume: resume) },
-                                      close: { [unowned self] in self.close(device: $0) })
+        let connector = FakeConnector(watch: watch, open: { [unowned self] in
+            let (status, device) = try self.openStatus(watch, resume: resume)
+            guard status == DC_STATUS_SUCCESS else {
+                throw CoreBluetoothNauticConnector.openFailure(status, family: .suuntoNautic, name: Self.watchName)
+            }
+            return try XCTUnwrap(device)
+        }, close: { [unowned self] in self.close(device: $0) })
         connector.slot = slot
         var config = NauticAutoSync.Configuration()
         config.refreshInterval = nil
@@ -1695,7 +2472,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let delivered = Self.dives(events)
         XCTAssertEqual(delivered.map(\.id), dives.map(\.id), "oldest first, each dive exactly once")
         for (dive, fake) in zip(delivered, dives) {
-            XCTAssertEqual(dive.data, Data(fake.decompressed + fake.summary))
+            XCTAssertEqual(dive.data, Data(fake.blob))
             XCTAssertTrue(dive.isComplete)
         }
         XCTAssertEqual(delivered[1].attempts, 2, "the dive the link died on is fetched again from the start")
@@ -1726,7 +2503,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let delivered = Self.dives(events)
         XCTAssertEqual(delivered.map(\.id), dives.map(\.id), "oldest first, each dive exactly once")
         for (dive, fake) in zip(delivered, dives) {
-            XCTAssertEqual(dive.data, Data(fake.decompressed + fake.summary))
+            XCTAssertEqual(dive.data, Data(fake.blob))
             XCTAssertTrue(dive.isComplete)
         }
         XCTAssertEqual(delivered[1].attempts, 2)
@@ -1752,9 +2529,11 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let delivered = Self.dives(log.all)
         XCTAssertEqual(delivered.count, 1)
         XCTAssertEqual(delivered.first?.isComplete, true)
-        XCTAssertEqual(delivered.first?.data, Data(dive.decompressed + dive.summary))
-        XCTAssertTrue(Self.logs(log.all).contains { $0.hasPrefix("Dive \(dive.id) failed (PROTOCOL); retrying") })
-        XCTAssertEqual(connector.connects, 1, "retried on the same link")
+        XCTAssertEqual(delivered.first?.data, Data(dive.blob))
+        XCTAssertEqual(delivered.first?.attempts, 3)
+        XCTAssertTrue(Self.logs(log.all).contains("Dive \(dive.id) failed (PROTOCOL, attempt 1); reconnecting before trying again"))
+        // A PROTOCOL failure can be the Suunto app's hello ending our session: a retry at once would get in its way.
+        XCTAssertEqual(connector.connects, 3, "each retry on a new connection, never at once on the same link")
     }
 
     func testAutoSyncGivesUpOnAPersistentlyShortDive() async throws {
@@ -1770,7 +2549,7 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(Self.dives(log.all).isEmpty, "a short dive is never delivered")
         XCTAssertTrue(log.all.contains(.diveFailed(id: dive.id, reason: "PROTOCOL")))
         XCTAssertEqual(Self.completedSyncs(log.all).first?.failed, [dive.id])
-        XCTAssertEqual(connector.connects, 1)
+        XCTAssertEqual(connector.connects, 3, "the retry and the rest of the sync each on a new connection")
     }
 
     func testAutoSyncGivesUpOnADiveWhoseStreamNeverEndsAndGetsTheNewerOnes() async throws {
@@ -1836,12 +2615,16 @@ final class SuuntoNauticTransportTests: XCTestCase {
     func testBusyWatchDefersTheSync() async throws {
         let dive = FakeDive(id: 1_789_500_000, profileBytes: 600, summaryBytes: 100)
         let watch = FakeWatch(dives: [dive])
+        // The watch reports busy while the Suunto app syncs it, so the app's session is on the link: the open uses it.
         watch.busy = 1
+        watch.appSession = true
         let (sync, _, _, log) = makeAutoSync(watch)
 
         sync.start()
         await waitFor(log) { $0.contains(.state(.watchBusy)) }
-        XCTAssertFalse(watch.getPaths.contains("/Logbook/Entries"), "nothing is listed while the watch is busy")
+        XCTAssertEqual(watch.hellosReceived, 0, "no hello over the app's session")
+        // The open's probe GETs /Logbook/Entries without fetching it; a listing fetches its pages.
+        XCTAssertEqual(watch.entriesStartAfter, [], "nothing is listed while the watch is busy")
 
         watch.mutate { $0.busy = 0 }
         watch.notify("/Sync/BusyState")
@@ -1979,7 +2762,18 @@ final class SuuntoNauticTransportTests: XCTestCase {
         let watch = FakeWatch(dives: [])
         watch.withholdHelloAck = true
         let device = try open(watch)
+        XCTAssertEqual(watch.sessionlessRequests, 1, "a fresh link leaves the probe unanswered")
+        XCTAssertEqual(watch.hellosReceived, 1)
         XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 0)
+    }
+
+    func testTheAppsSessionCountsAsAcknowledged() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appSession = true
+        watch.withholdHelloAck = true
+        let device = try open(watch)
+        XCTAssertEqual(watch.hellosReceived, 0, "the probe was answered, so there is no hello to go unanswered")
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 1)
     }
 
     func testTriggerSubscriptionIsAnsweredFirstTimeAfterAQuickReconnect() async throws {
@@ -2091,5 +2885,697 @@ final class SuuntoNauticTransportTests: XCTestCase {
         XCTAssertTrue(events.contains(.state(.reconnecting(attempt: 2, delay: 4))))
         XCTAssertTrue(clock.sleeps.contains(4))
         XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
+    }
+}
+
+// MARK: - Sharing the watch with the Suunto app (deepsealabs/libdivecomputer#20 on round 4)
+
+extension SuuntoNauticTransportTests {
+    private func subscribe(_ device: OpaquePointer, _ path: String) -> dc_status_t {
+        let buffer = dc_buffer_new(0)!
+        defer { dc_buffer_free(buffer) }
+        var handle: [UInt8] = [0, 0, 0]
+        return suunto_nautic_device_subscribe(device, path, &handle, buffer)
+    }
+
+    private func cancelOnceSteppedAside(_ device: OpaquePointer) {
+        dc_device_set_cancel(device, { userdata in
+            suunto_nautic_device_taken_over(OpaquePointer(userdata)) != 0 ? 1 : 0
+        }, UnsafeMutableRawPointer(device))
+    }
+
+    func testAFreshLinkGetsAHelloAfterTheUnansweredProbe() throws {
+        let dive = FakeDive(id: 1_790_000_001, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        let device = try open(watch)
+        XCTAssertEqual(watch.sessionlessRequests, 1, "nobody said hello on the link, so the probe goes unanswered")
+        XCTAssertEqual(watch.hellosReceived, 1)
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 1)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+    }
+
+    func testTheAppsSessionIsUsedWithoutAHello() throws {
+        let dive = FakeDive(id: 1_790_000_002, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        let device = try open(watch)
+        XCTAssertEqual(watch.hellosReceived, 0, "a hello would take the Suunto app's session over")
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 1)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        let (walk, dives) = foreach(device)
+        XCTAssertEqual(walk, DC_STATUS_SUCCESS)
+        XCTAssertEqual(dives.map(\.data), [dive.blob])
+    }
+
+    /// Build 32's 14:14:04: the Suunto app's hello cut a chunk off, and its reply came right behind it.
+    func testAnAppHelloThatTearsAChunkStepsAsideAndTheNextConnectionCarriesOn() throws {
+        let dive = FakeDive(id: 1_790_000_003, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appDuringStream = (100, .tornHello)
+        let resume = SuuntoNauticResume()
+        let log = DriverLog()
+        let (opened, first) = try openStatus(watch, resume: resume, log: log)
+        XCTAssertEqual(opened, DC_STATUS_SUCCESS)
+        let device = try XCTUnwrap(first)
+        let releases = watch.releases
+
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_IO)
+        XCTAssertTrue(data.isEmpty)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(log.count("Another app is using the watch (13 0)"), 1, "the hello reply is read behind the torn chunk")
+        XCTAssertEqual(watch.streamUnsubscribes, [], "no UNSUBSCRIBE into the app's session")
+        XCTAssertEqual(watch.releases - releases, 1, "only the /Summary's, before the stream")
+        XCTAssertEqual(watch.heldIdHandles, ["/Logbook/byId/\(dive.id)/Data"], "nor a RELEASE of the /Data handle")
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: device), 100 * watch.mdsPayloadSize)
+        let gets = watch.getPaths.count
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_IO)
+        XCTAssertEqual(watch.getPaths.count, gets, "a device that stepped aside sends nothing more")
+        close(device: device)
+
+        watch.reconnect()
+        let second = try open(watch, resume: resume)
+        XCTAssertEqual(watch.hellosReceived, 1, "the next open uses the app's session")
+        let (again, whole) = download(second, id: dive.id)
+        XCTAssertEqual(again, DC_STATUS_SUCCESS)
+        XCTAssertEqual(whole, dive.blob)
+        XCTAssertEqual(watch.streamsServed, 1, "the rest comes in pages")
+    }
+
+    /// Build 32's 14:15:29: the app's hello reply arrived whole between two chunks.
+    func testAnAppHelloBetweenChunksLeavesTheStreamAlone() throws {
+        let dive = FakeDive(id: 1_790_000_004, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.appDuringStream = (50, .hello)
+        let resume = SuuntoNauticResume()
+        let device = try open(watch, resume: resume)
+        let releases = watch.releases
+
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_IO)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(watch.streamUnsubscribes, [], "its hello ended our stream")
+        XCTAssertEqual(watch.releases - releases, 1)
+        XCTAssertEqual(watch.heldIdHandles, ["/Logbook/byId/\(dive.id)/Data"])
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: device), 50 * watch.mdsPayloadSize)
+    }
+
+    func testAnAppReplyMidStreamEndsOurStreamFirst() throws {
+        let dive = FakeDive(id: 1_790_000_005, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.appDuringStream = (50, .reply)
+        let resume = SuuntoNauticResume()
+        let device = try open(watch, resume: resume)
+
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_IO)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(watch.streamUnsubscribes, [200], "our stream is still ours to stop")
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: device), 50 * watch.mdsPayloadSize)
+    }
+
+    func testAppRepliesLeftFromBeforeAreDroppedBeforeADownload() throws {
+        let dive = FakeDive(id: 1_790_000_006, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        let device = try open(watch)
+
+        watch.pushAppReplies(3000)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        watch.pushAppReplies(3000)
+        let (walk, dives) = foreach(device)
+        XCTAssertEqual(walk, DC_STATUS_SUCCESS)
+        XCTAssertEqual(dives.count, 1)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 0)
+    }
+
+    func testANotificationWaitSkipsAppRepliesAndEndsOnItsHello() throws {
+        let watch = FakeWatch(dives: [])
+        let log = DriverLog()
+        let device = try XCTUnwrap(try openStatus(watch, log: log).1)
+        XCTAssertEqual(subscribe(device, "/Logbook/UnsynchronisedLogs"), DC_STATUS_SUCCESS)
+
+        watch.pushAppReplies(3)
+        XCTAssertEqual(waitForNotification(device).0, DC_STATUS_TIMEOUT, "the app's replies get in nobody's way")
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 0)
+
+        watch.pushAppReplies(2)
+        watch.mutate { $0.unsyncedCount = 1 }
+        watch.notify("/Logbook/UnsynchronisedLogs")
+        XCTAssertEqual(waitForNotification(device).0, DC_STATUS_SUCCESS, "a push behind the app's replies still arrives")
+
+        watch.pushAppHello()
+        XCTAssertEqual(waitForNotification(device).0, DC_STATUS_IO, "its hello ends our session and its subscriptions")
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(log.stepAsideWaits, 0, "a notification wait doesn't wait for the app")
+    }
+
+    func testABusyLinkThatGoesQuietOpensOnTheAppsSession() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appSession = true
+        watch.pushAppReplies(5)
+        let log = DriverLog()
+        let (status, _) = try openStatus(watch, log: log)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(watch.hellosReceived, 0)
+        XCTAssertEqual(log.openWaits, 1)
+    }
+
+    func testALinkThatStaysBusyFailsTheOpenWithTimeout() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appBusy = true
+        let started = Date()
+        let (status, _) = try openStatus(watch)
+        XCTAssertEqual(status, DC_STATUS_TIMEOUT, "TIMEOUT from the open means the Suunto app is using the watch")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 25, "one wait of about 20 s")
+        XCTAssertEqual(watch.hellosReceived, 0)
+    }
+
+    func testAppTrafficAnsweringOurHelloFailsTheOpenWithoutASecondWait() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appBusyAfterHello = true
+        watch.pushAppReplies(5)
+        let log = DriverLog()
+        let started = Date()
+        let (status, _) = try openStatus(watch, log: log)
+        XCTAssertEqual(status, DC_STATUS_TIMEOUT)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        XCTAssertEqual(watch.hellosReceived, 1)
+        XCTAssertEqual(log.openWaits, 1, "the probe's")
+        XCTAssertEqual(log.stepAsideWaits, 0)
+    }
+
+    func testALateReplyToTheProbeIsOurs() throws {
+        let watch = FakeWatch(dives: [])
+        watch.answersProbeLate = true
+        let (status, device) = try openStatus(watch)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        let opened = try XCTUnwrap(device)
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(opened), 1)
+        XCTAssertEqual(suunto_nautic_device_taken_over(opened), 0)
+    }
+
+    func testALateReplyToARetriedRequestIsOurs() throws {
+        let watch = FakeWatch(dives: [])
+        let device = try open(watch)
+        watch.mutate { $0.lateReplyTo = 0x10 }
+        XCTAssertEqual(subscribe(device, "/Logbook/UnsynchronisedLogs"), DC_STATUS_TIMEOUT, "the SUBSCRIBE's reply is late")
+        XCTAssertEqual(subscribe(device, "/Logbook/UnsynchronisedLogs"), DC_STATUS_SUCCESS, "and is skipped as ours")
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 0)
+    }
+
+    func testACancelDuringAStreamsStepAsideIsCancelled() throws {
+        let dive = FakeDive(id: 1_790_000_007, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.appDuringStream = (20, .tornHello)
+        let resume = SuuntoNauticResume()
+        let device = try open(watch, resume: resume)
+        cancelOnceSteppedAside(device)
+
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_CANCELLED)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(SuuntoNauticResume.resumableBytes(of: dive.id, on: device), 20 * watch.mdsPayloadSize, "the bytes are kept")
+    }
+
+    func testACancelDuringARequestsStepAsideIsCancelled() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appSession = true
+        let device = try open(watch)
+        cancelOnceSteppedAside(device)
+        watch.pushAppReplies(1)
+        let response = dc_buffer_new(0)!
+        defer { dc_buffer_free(response) }
+        XCTAssertEqual(suunto_nautic_device_request(device, "/Info", response), DC_STATUS_CANCELLED)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+    }
+
+    func testAStreamLeftOverFromAnEarlierConnectionIsEnded() throws {
+        let dive = FakeDive(id: 1_790_000_008, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.refuseStreams = 1
+        let device = try open(watch)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        XCTAssertEqual(watch.streamUnsubscribes, [200, 200], "the left-over stream's, then ours at the end")
+        XCTAssertEqual(watch.heldIdHandles, [])
+    }
+
+    /// A probe GET or hello the transport wasn't ready to take fails with TIMEOUT, which isn't the Suunto app.
+    func testAWriteTheTransportWasntReadyForFailsTheOpenWithIONotTimeout() throws {
+        let watch = FakeWatch(dives: [])
+        watch.timedOutWrites = [1]
+        let (probe, _) = try openStatus(watch)
+        XCTAssertEqual(probe, DC_STATUS_IO, "the probe's write")
+        XCTAssertEqual(watch.hellosReceived, 0)
+
+        watch.reconnect()
+        watch.timedOutWrites = [2]
+        let (hello, _) = try openStatus(watch)
+        XCTAssertEqual(hello, DC_STATUS_IO, "the hello's write")
+        XCTAssertEqual(watch.sessionlessRequests, 1)
+        XCTAssertEqual(watch.hellosReceived, 0)
+
+        watch.reconnect()
+        watch.timedOutWrites = []
+        XCTAssertEqual(try openStatus(watch).0, DC_STATUS_SUCCESS)
+    }
+
+    func testADamagedFrameWhileProbingIsTheAppsTrafficNotALostLink() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appSession = true
+        watch.pushDamagedFrame()
+        watch.pushAppReplies(2)
+        watch.pushDamagedFrame()
+        let log = DriverLog()
+        let (status, device) = try openStatus(watch, log: log)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(log.openWaits, 1, "the probe took the damaged frame for the app being busy")
+        XCTAssertEqual(watch.hellosReceived, 0)
+        XCTAssertEqual(suunto_nautic_device_taken_over(try XCTUnwrap(device)), 0)
+    }
+
+    func testADamagedFrameLeftFromBeforeIsDrainedBeforeADownload() throws {
+        let dive = FakeDive(id: 1_790_000_010, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        let device = try open(watch)
+        watch.pushAppReplies(3)
+        watch.pushDamagedFrame()
+        watch.pushAppReplies(3)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 0)
+    }
+
+    func testAnAppReplyAheadOfTheSubscribeReplyStillUnsubscribes() throws {
+        let dive = FakeDive(id: 1_790_000_011, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.appReplyBeforeStreamSubscribeReply = true
+        let device = try open(watch)
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_IO)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(watch.streamsServed, 1, "the watch took the SUBSCRIBE")
+        XCTAssertEqual(watch.streamUnsubscribes, [200], "so the stream is ended, not left to starve the app")
+    }
+
+    func testALeftOverStreamOnTheAppsSessionIsEndedOnceTheLinkIsQuiet() throws {
+        let dive = FakeDive(id: 1_790_000_012, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.refuseStreams = 1
+        let log = DriverLog()
+        let device = try XCTUnwrap(try openStatus(watch, log: log).1)
+        let (status, data) = download(device, id: dive.id)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(data, dive.blob)
+        XCTAssertEqual(log.count("Waiting for a quiet link before ending the stream"), 1)
+        XCTAssertEqual(watch.streamUnsubscribes, [200, 200])
+    }
+
+    func testALeftOverStreamOnTheAppsSessionIsLeftAloneWhileTheAppIsBusy() throws {
+        let dive = FakeDive(id: 1_790_000_013, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.refuseStreams = 1
+        watch.appRepliesAfterRefusal = 2
+        let device = try open(watch)
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_IO)
+        XCTAssertEqual(suunto_nautic_device_taken_over(device), 1)
+        XCTAssertEqual(watch.streamUnsubscribes, [], "the stream may be the app's: not ended")
+        XCTAssertEqual(watch.streamsServed, 0)
+    }
+
+    func testAFreshLinkEndsALeftOverStreamWithoutWaiting() throws {
+        let dive = FakeDive(id: 1_790_000_014, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.refuseStreams = 1
+        let log = DriverLog()
+        let device = try XCTUnwrap(try openStatus(watch, log: log).1)
+        XCTAssertEqual(download(device, id: dive.id).0, DC_STATUS_SUCCESS)
+        XCTAssertEqual(log.count("Waiting for a quiet link"), 0, "our own hello's session has no other app in it")
+    }
+
+    func testAnErrorReplyToTheProbeIsNoSession() throws {
+        let watch = FakeWatch(dives: [])
+        watch.answersSessionlessWith404 = true
+        let device = try open(watch)
+        XCTAssertEqual(watch.hellosReceived, 1)
+        XCTAssertEqual(suunto_nautic_device_handshake_acknowledged(device), 1)
+    }
+
+    // MARK: Bridge and explorer
+
+    /// M1: a write timeout on open is a hiccup the bridge retries, not the Suunto app.
+    func testTheBridgeRetriesANauticOpenWhoseWriteTimedOutAndTheConnectorDoesntBlameTheApp() throws {
+        let watch = FakeWatch(dives: [])
+        watch.timedOutWrites = [1]
+        // The bridge frees the context with the device data, or at once when the open fails.
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let iostream = try stream(watch, context: context)
+        let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        data.initialize(to: device_data_t())
+        defer { data.deallocate() }
+        data.pointee.context = context
+
+        let status = open_device_on_iostream(data, iostream, DC_FAMILY_SUUNTO_NAUTIC, 0, UInt32(LIBDC_BLE_OPEN_ATTEMPTS), 0)
+        XCTAssertEqual(status, DC_STATUS_SUCCESS, "the second attempt opens")
+        XCTAssertEqual(watch.sessionlessRequests, 1, "the first probe never went out")
+        XCTAssertEqual(watch.hellosReceived, 1)
+        libdc_close_device_data(data)
+
+        let stuck = FakeWatch(dives: [])
+        stuck.timedOutWrites = Set(1...50)
+        let stuckData = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        stuckData.initialize(to: device_data_t())
+        defer { stuckData.deallocate() }
+        var stuckContext: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&stuckContext), DC_STATUS_SUCCESS)
+        stuckData.pointee.context = stuckContext
+        let failed = open_device_on_iostream(stuckData, try stream(stuck, context: stuckContext), DC_FAMILY_SUUNTO_NAUTIC, 0,
+                                             UInt32(LIBDC_BLE_OPEN_ATTEMPTS), 0)
+        XCTAssertEqual(failed, DC_STATUS_IO)
+        XCTAssertEqual(stuck.writesAttempted, Int(LIBDC_BLE_OPEN_ATTEMPTS), "every attempt was made")
+        XCTAssertEqual(CoreBluetoothNauticConnector.openFailure(failed, family: .suuntoNautic, name: "Nautic"),
+                       .connectFailed("could not open Nautic (IO)"))
+        XCTAssertEqual(CoreBluetoothNauticConnector.openFailure(DC_STATUS_TIMEOUT, family: .suuntoNautic, name: "Nautic"),
+                       .otherAppActive)
+    }
+
+    /// The bridge retried a failed open 5 times, 3 s apart: on a busy Nautic each retry waited for the app again.
+    func testTheBridgeDoesntRetryANauticOpenThatFoundTheLinkBusy() throws {
+        let watch = FakeWatch(dives: [])
+        watch.appBusyAfterHello = true
+        watch.pushAppReplies(5)
+        var context: OpaquePointer?
+        XCTAssertEqual(dc_context_new(&context), DC_STATUS_SUCCESS)
+        let iostream = try stream(watch, context: context)
+        let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
+        data.initialize(to: device_data_t())
+        defer { data.deallocate() }
+        data.pointee.context = context
+
+        let started = Date()
+        let status = open_device_on_iostream(data, iostream, DC_FAMILY_SUUNTO_NAUTIC, 0, UInt32(LIBDC_BLE_OPEN_ATTEMPTS), 0)
+        XCTAssertEqual(status, DC_STATUS_TIMEOUT)
+        XCTAssertEqual(watch.hellosReceived, 1, "one open")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10, "not four more waits of 20 s")
+    }
+
+    func testTheExplorerTellsAStepAsideFromALostLink() throws {
+        let dive = FakeDive(id: 1_790_000_009, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        watch.appSession = true
+        watch.appDuringStream = (10, .hello)
+        let link = DCDeviceNauticLink(device: try open(watch)) { _ in }
+        XCTAssertThrowsError(try link.download(dive.id)) { error in
+            guard case SuuntoNauticExplorer.ExplorerError.otherAppActive = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertThrowsError(try link.listDives(), "every later call fails the same way") { error in
+            guard case SuuntoNauticExplorer.ExplorerError.otherAppActive = error else { return XCTFail("\(error)") }
+        }
+
+        let lost = FakeWatch(dives: [dive])
+        lost.dropAfterChunks = 10
+        let lostLink = DCDeviceNauticLink(device: try open(lost)) { _ in }
+        XCTAssertThrowsError(try lostLink.download(dive.id)) { error in
+            guard case SuuntoNauticExplorer.ExplorerError.requestFailed(let status) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(status, DC_STATUS_IO)
+        }
+    }
+}
+
+// MARK: - Auto download waits for the Suunto app
+
+extension SuuntoNauticTransportTests {
+    private static func otherAppWaits(_ events: [NauticAutoSync.Event]) -> Int {
+        events.filter { if case .state(.waitingForSuuntoApp) = $0 { return true } else { return false } }.count
+    }
+
+    private static func reconnects(_ events: [NauticAutoSync.Event]) -> Int {
+        events.filter { if case .state(.reconnecting) = $0 { return true } else { return false } }.count
+    }
+
+    private static func persists(_ events: [NauticAutoSync.Event]) -> [Int] {
+        events.compactMap { if case .otherAppPersists(let waits) = $0 { return waits } else { return nil } }
+    }
+
+    func testAutoDownloadDefaultsLeaveRoomForTheOpensWaitAndBackOff() {
+        let configuration = NauticAutoSync.Configuration()
+        XCTAssertEqual(configuration.connectTimeout, 25, "an asleep watch gets the press-a-button hint as soon as before")
+        XCTAssertGreaterThanOrEqual(configuration.openTimeout, 25, "once the link is up, the open waits up to about 20 s for the app")
+        XCTAssertEqual(configuration.otherAppBackOff, [30, 60, 120, 300])
+        XCTAssertEqual(configuration.otherAppWaitsWithoutProgress, 3)
+    }
+
+    func testAutoSyncWaitsForTheSuuntoAppWhenTheOpenFindsTheLinkBusy() async throws {
+        let dive = FakeDive(id: 1_790_100_000, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch)
+        // The app answers our hello on the first two connects, then it's done.
+        connector.onConnect = { attempt in
+            watch.mutate {
+                $0.appBusy = false
+                $0.appBusyAfterHello = attempt <= 2
+            }
+            if attempt <= 2 { watch.pushAppReplies(5) }
+        }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
+        XCTAssertEqual(connector.connects, 3)
+        XCTAssertEqual(Array(clock.sleeps.prefix(2)), [30, 60])
+        XCTAssertEqual(Self.otherAppWaits(events), 2)
+        XCTAssertTrue(messages.contains("The Suunto app is using the watch (the link stayed busy); trying again in 30 s"), "\(messages)")
+        XCTAssertTrue(messages.contains("The Suunto app is using the watch (the link stayed busy); trying again in 60 s"))
+        XCTAssertFalse(events.contains { if case .watchUnreachable = $0 { return true } else { return false } },
+                       "a busy watch is awake: no press-a-button hint")
+        XCTAssertFalse(messages.contains { $0.contains(NauticAutoSync.unreachableHint) })
+        XCTAssertFalse(messages.contains { $0.hasPrefix("Connect failed") }, "not a failed connect")
+        XCTAssertEqual(Self.reconnects(events), 0, "nor one of the reconnect attempts")
+        XCTAssertEqual(connector.presenceChecks, 1, "the watch was in range all along")
+    }
+
+    func testAutoSyncStepsAsideMidDownloadThenCarriesOnWithTheKeptBytes() async throws {
+        let dives = (0..<3).map { FakeDive(id: 1_790_200_000 + UInt32($0) * 7200, profileBytes: 6000) }
+        let watch = FakeWatch(dives: dives)
+        let (sync, connector, clock, log) = makeAutoSync(watch, resume: SuuntoNauticResume())
+        var downloaded = 0
+        sync.onDive = { _ in
+            downloaded += 1
+            if downloaded == 1 { watch.mutate { $0.appDuringStream = (2, .tornHello) } }
+        }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        let delivered = Self.dives(events)
+        XCTAssertEqual(delivered.map(\.id), dives.map(\.id))
+        XCTAssertEqual(delivered.map(\.data), dives.map { Data($0.blob) })
+        XCTAssertEqual(delivered[1].attempts, 1, "the step-aside isn't one of the dive's attempts")
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertEqual(watch.hellosReceived, 1, "the second connection uses the app's session")
+        XCTAssertTrue(messages.contains("The Suunto app started using the watch; stepped aside; trying again in 30 s"), "\(messages)")
+        XCTAssertTrue(messages.contains("Dive \(dives[1].id): carrying on from byte \(2 * watch.mdsPayloadSize) of an earlier attempt"))
+        XCTAssertTrue(clock.sleeps.contains(30))
+        XCTAssertEqual(Self.reconnects(events), 0)
+        XCTAssertFalse(events.contains { if case .diveFailed = $0 { return true } else { return false } })
+    }
+
+    func testStepAsidesCountTowardNeitherADivesRetriesNorTheLoopGuardAndABackOffStartsOverAfterASync() async throws {
+        let dive = FakeDive(id: 1_790_300_000, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch) {
+            $0.retriesPerDive = 1
+            $0.reconnect = ReconnectPolicy(loopDisconnects: 2)
+        }
+        // No resume buffer, so every attempt streams the dive again, and the app cuts in three times.
+        connector.onConnect = { attempt in
+            watch.mutate { $0.appDuringStream = attempt <= 3 ? (1, .tornHello) : nil }
+        }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await waitFor(log) { $0.last == .state(.watching) }
+        XCTAssertEqual(Self.dives(log.all).map(\.attempts), [1])
+        XCTAssertEqual(Self.completedSyncs(log.all).first?.failed, [])
+
+        // The app says hello while auto download listens for new dives.
+        watch.pushAppHello()
+        await waitFor(log) { Self.otherAppWaits($0) == 4 }
+        await waitFor(log) { $0.last == .state(.watching) }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        XCTAssertEqual(clock.sleeps.filter { $0 >= 30 }, [30, 60, 120, 30])
+        XCTAssertEqual(connector.connects, 5)
+        XCTAssertFalse(events.contains { if case .state(.coolingDown) = $0 { return true } else { return false } })
+        XCTAssertEqual(Self.reconnects(events), 0)
+        XCTAssertFalse(events.contains { if case .diveFailed = $0 { return true } else { return false } })
+        XCTAssertEqual(Self.persists(events), [])
+    }
+
+    /// M2: a step-aside that never gets anywhere (a false one, or an app that answers our traffic with its hello)
+    /// must not hold a dive forever.
+    func testStepAsidesThatGetNowhereCountAfterThreeAndTheDiveIsGivenUp() async throws {
+        let dive = FakeDive(id: 1_790_300_100, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch) { $0.retriesPerDive = 1 }
+        // No resume buffer, so nothing is kept: the app cuts in on every connect.
+        connector.onConnect = { _ in watch.mutate { $0.appDuringStream = (1, .tornHello) } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertEqual(Self.otherAppWaits(events), 3, "three waits are let off")
+        XCTAssertEqual(Array(clock.sleeps.prefix(5)), [30, 60, 120, 4, 4], "then the usual reconnect delay")
+        XCTAssertEqual(Self.persists(events), [3, 4])
+        XCTAssertTrue(messages.contains("The Suunto app has kept the watch through 3 waits without progress; counting this as a failed attempt"), "\(messages)")
+        XCTAssertTrue(events.contains(.diveFailed(id: dive.id, reason: "the Suunto app kept using the watch")))
+        XCTAssertEqual(Self.completedSyncs(events).first?.failed, [dive.id])
+        XCTAssertEqual(Self.dives(events), [])
+        XCTAssertEqual(connector.connects, 6)
+    }
+
+    func testAStepAsideThatKeepsNewBytesIsProgressAndStillLetOff() async throws {
+        let dive = FakeDive(id: 1_790_300_200, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch, resume: SuuntoNauticResume())
+        // Three busy opens, then the app cuts into the stream: the fourth wait, but the bytes before it are kept.
+        connector.busyConnects = 3
+        connector.onConnect = { attempt in watch.mutate { $0.appDuringStream = attempt == 4 ? (5, .tornHello) : nil } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        XCTAssertEqual(Self.persists(events), [])
+        XCTAssertEqual(clock.sleeps.filter { $0 >= 30 }, [30, 60, 120, 300])
+        XCTAssertEqual(Self.dives(events).map(\.attempts), [1], "the step-aside isn't one of the dive's attempts")
+        XCTAssertEqual(Self.dives(events).map(\.data), [Data(dive.blob)])
+    }
+
+    func testTheSameStepAsideWithoutBytesKeptCountsAsTheDivesAttempt() async throws {
+        let dive = FakeDive(id: 1_790_300_300, profileBytes: 60_000)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch)
+        connector.busyConnects = 3
+        connector.onConnect = { attempt in watch.mutate { $0.appDuringStream = attempt == 4 ? (5, .tornHello) : nil } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        XCTAssertEqual(Self.persists(events), [3])
+        XCTAssertEqual(clock.sleeps.filter { $0 >= 30 }, [30, 60, 120])
+        XCTAssertEqual(Self.dives(events).map(\.attempts), [2])
+    }
+
+    func testBusyOpensThatGetNowhereBecomeFailedConnectsAndLeavingRangeStartsOver() async throws {
+        let dive = FakeDive(id: 1_790_300_400, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch) { $0.reconnect = ReconnectPolicy(maxCountedAttempts: 2) }
+        connector.busyConnects = 6
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertEqual(Self.persists(events), [3, 4])
+        XCTAssertTrue(messages.contains("Connect failed: the Suunto app is using the watch"), "\(messages)")
+        XCTAssertTrue(messages.contains("Connect keeps failing; pausing reconnects"))
+        XCTAssertTrue(events.contains { if case .state(.coolingDown) = $0 { return true } else { return false } })
+        // The cool-down ends with the watch looked for again, so the back-off and the patience start over.
+        XCTAssertEqual(Array(clock.sleeps.prefix(6)), [30, 60, 120, 4, ReconnectPolicy().coolDown, 30])
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
+        XCTAssertEqual(connector.connects, 7)
+    }
+
+    /// M1 end to end: an open whose write timed out is an ordinary failed connect, never the Suunto app.
+    func testAWriteTimeoutOnConnectIsAFailedConnectNotTheSuuntoApp() async throws {
+        let dive = FakeDive(id: 1_790_300_500, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, clock, log) = makeAutoSync(watch)
+        connector.onConnect = { attempt in watch.mutate { $0.timedOutWrites = attempt == 1 ? [1] : [] } }
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        let messages = Self.logs(events)
+        XCTAssertTrue(messages.contains("Connect failed: could not open \(Self.watchName) (IO)"), "\(messages)")
+        XCTAssertEqual(Self.otherAppWaits(events), 0)
+        XCTAssertTrue(events.contains(.state(.reconnecting(attempt: 2, delay: 4))))
+        XCTAssertEqual(clock.sleeps.first, 4)
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
+    }
+
+    /// S5: the press-a-button hint isn't held back for the open's wait unless the link came up.
+    func testAConnectWhoseLinkIsUpGetsTheOpensWaitAndNoUnreachableHint() async throws {
+        let dive = FakeDive(id: 1_790_300_600, profileBytes: 600, summaryBytes: 100)
+        let watch = FakeWatch(dives: [dive])
+        let (sync, connector, _, log) = makeAutoSync(watch) {
+            $0.connectTimeout = 0.2
+            $0.openTimeout = 0.6
+        }
+        connector.hangingConnects = 1
+        connector.linkUpWhileConnecting = true
+        let started = Date()
+
+        sync.start()
+        await waitFor(log) { Self.logs($0).contains("Connect failed: timed out") }
+        let cancelledAfter = Date().timeIntervalSince(started)
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let events = log.all
+        XCTAssertGreaterThanOrEqual(cancelledAfter, 0.75, "connectTimeout, then openTimeout more")
+        XCTAssertEqual(connector.cancels, 1)
+        XCTAssertFalse(events.contains { if case .watchUnreachable = $0 { return true } else { return false } })
+        XCTAssertEqual(Self.dives(events).map(\.id), [dive.id])
+    }
+
+    func testARefusedStreamIsRetriedOnANewConnection() async throws {
+        let dive = FakeDive(id: 1_790_400_000, profileBytes: 6000)
+        let watch = FakeWatch(dives: [dive])
+        watch.refuseStreams = 3
+        let (sync, connector, clock, log) = makeAutoSync(watch)
+
+        sync.start()
+        await waitFor(log) { !Self.completedSyncs($0).isEmpty }
+        await stopAndWait(sync, log)
+
+        let messages = Self.logs(log.all)
+        XCTAssertTrue(messages.contains("Dive \(dive.id) failed (PROTOCOL, attempt 1); reconnecting before trying again"), "\(messages)")
+        XCTAssertEqual(connector.connects, 2)
+        XCTAssertEqual(watch.streamsServed, 1)
+        XCTAssertTrue(clock.sleeps.contains(4), "after the usual reconnect delay")
+        XCTAssertEqual(Self.dives(log.all).map(\.attempts), [2])
     }
 }

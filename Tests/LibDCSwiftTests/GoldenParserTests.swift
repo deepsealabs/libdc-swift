@@ -320,7 +320,7 @@ final class GoldenParserTests: XCTestCase {
     // MARK: - Suunto Nautic / Ocean
 
     private func parseSuuntoNauticFixture() throws -> DiveData {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "sbem"))
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
         let data = try Data(contentsOf: url)
         return try data.withUnsafeBytes { raw in
             try GenericParser.parseDiveData(

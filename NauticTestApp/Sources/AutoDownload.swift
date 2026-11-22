@@ -32,10 +32,12 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
     private static let maxLines = 3000
     private let logFile = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("auto-download.log")
+    private let launched = Date()
+    private var sessionMarked = false
 
     init() {
         if let saved = try? String(contentsOf: logFile, encoding: .utf8) {
-            log = saved.split(separator: "\n").suffix(500).map { LogLine(date: .distantPast, text: String($0)) }
+            log = saved.split(separator: "\n").suffix(500).map { LogLine(date: .distantPast, text: LogStamp.restored(String($0))) }
         }
         // Resume after a relaunch (including a background relaunch through BLE state restoration).
         if let name = defaults.string(forKey: Self.enabledKey), let device = Self.storedDevice(named: name) {
@@ -80,6 +82,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         deviceName = device.name
         defaults.set(device.name, forKey: Self.enabledKey)
         append("Auto download ON for \(device.name) (DC Tester \(Self.appVersion), LibDCSwift \(libDCSwiftBuildTag))")
+        // Its libdivecomputer lines, a full log's included, go to the explorer log, not this one.
+        ExplorerLog.shared.noteConnection("Auto download ON for \(device.name)", device: device.name)
         if closedManualSession {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak sync] in sync?.start() }
         } else {
@@ -140,7 +144,7 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         case .state(let newState):
             state = newState
             switch newState {
-            case .listing, .downloading, .watching, .watchBusy, .stopped: unreachableHint = nil
+            case .listing, .downloading, .watching, .watchBusy, .waitingForSuuntoApp, .stopped: unreachableHint = nil
             default: break
             }
             append("State: \(Self.describe(newState))")
@@ -156,6 +160,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
             append("Dive \(id) failed: \(reason)")
         case .watchUnreachable:
             unreachableHint = "Watch not reachable. It may be asleep: press a button on the watch."
+        case .otherAppPersists(let waits):
+            append("The Suunto app kept the watch through \(waits) waits without progress; counting the next tries as failed attempts. Close the Suunto app if it isn't syncing.")
         case .syncCompleted(let summary):
             append("Sync done: \(summary.downloaded.count) new of \(summary.listed) on the watch" +
                    (summary.failed.isEmpty ? "" : ", failed: \(summary.failed.map(String.init).joined(separator: ", "))"))
@@ -163,18 +169,22 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
     }
 
     private func append(_ text: String) {
-        let stamp = Self.timestamp.string(from: Date())
-        let line = "\(stamp) \(text)"
-        log.append(LogLine(date: Date(), text: line))
+        let now = Date()
+        var lines: [String] = []
+        if !sessionMarked {
+            sessionMarked = true
+            lines = LogStamp.lines(LogStamp.sessionStart(at: launched), at: now)
+        }
+        lines += LogStamp.lines(text, at: now)
+        log += lines.map { LogLine(date: now, text: $0) }
         if log.count > Self.maxLines { log.removeFirst(log.count - Self.maxLines) }
-        if let data = (line + "\n").data(using: .utf8) {
-            if let handle = try? FileHandle(forWritingTo: logFile) {
-                handle.seekToEndOfFile()
-                handle.write(data)
-                try? handle.close()
-            } else {
-                try? data.write(to: logFile)
-            }
+        let data = Data((lines.joined(separator: "\n") + "\n").utf8)
+        if let handle = try? FileHandle(forWritingTo: logFile) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: logFile)
         }
     }
 
@@ -189,6 +199,8 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         case .watchBusy: return "connected, watch busy"
         case .reconnecting(let attempt, let delay): return "reconnecting (attempt \(attempt), in \(Int(delay)) s)"
         case .coolingDown(let until): return "paused after repeated failures, retrying at \(until.formatted(date: .omitted, time: .shortened))"
+        case .waitingForSuuntoApp(let until):
+            return "paused, the Suunto app is syncing the watch; trying again at \(until.formatted(date: .omitted, time: .standard))"
         }
     }
 
@@ -196,12 +208,6 @@ final class AutoDownloadController: ObservableObject, NauticAutoSyncDelegate {
         let total = Int(seconds)
         return String(format: "%d:%02d", total / 60, total % 60)
     }
-
-    private static let timestamp: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f
-    }()
 
     static var appVersion: String {
         let info = Bundle.main.infoDictionary
@@ -221,8 +227,9 @@ struct AutoDownloadToggle: View {
         )) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Auto download").font(.headline)
+                // Named while it runs too: with two watches stored, a bare status doesn't say which one it's using.
                 Text(controller.isEnabled(for: device)
-                     ? controller.unreachableHint ?? AutoDownloadController.describe(controller.state).capitalizingFirstLetter
+                     ? "\(device.name) · \(controller.unreachableHint ?? AutoDownloadController.describe(controller.state).capitalizingFirstLetter)"
                      : device.name)
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -235,6 +242,7 @@ struct AutoDownloadView: View {
     @ObservedObject var controller: AutoDownloadController
     @State private var shareItems: [Any]?
     @State private var autoScroll = true
+    @AppStorage(FullLogging.key) private var fullLogging = false
 
     var body: some View {
         Form {
@@ -248,6 +256,11 @@ struct AutoDownloadView: View {
                 }
                 if let name = controller.deviceName {
                     LabeledContent("Watch", value: name)
+                }
+                if fullLogging {
+                    Text("Full logging starts from the next connection: turn auto download off and on (or quit and reopen DC Tester) to start one now. Its log is in Share log under Log on the first screen.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
                 }
                 Button {
                     shareItems = [controller.logText]

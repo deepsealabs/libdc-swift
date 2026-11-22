@@ -29,22 +29,29 @@ public extension NauticSyncLink {
 public protocol NauticSyncConnector: AnyObject {
     /// Returns true once the watch is seen, false after `timeout` (nil waits indefinitely).
     func waitUntilPresent(timeout: TimeInterval?) async throws -> Bool
-    /// Opens a session. Blocking; called off the main thread.
+    /// Opens a session. Blocking; called off the main thread. Throws `NauticAutoSyncError.otherAppActive`
+    /// when the open finds the Suunto app using the watch.
     func connect() throws -> NauticSyncLink
     /// Breaks the current link the way a real drop would.
     func simulateDrop()
     /// Abandons a `connect()` still in progress, which then returns or throws soon after.
     func cancelConnect()
+    /// Whether the `connect()` in progress has its BLE link up and is opening the device on it.
+    var isLinkUp: Bool { get }
 }
 
 public extension NauticSyncConnector {
     func cancelConnect() {}
+    var isLinkUp: Bool { false }
 }
 
 public enum NauticAutoSyncError: Error, Equatable {
     case connectFailed(String)
     case deviceNotFound
     case connectTimedOut
+    /// The open found another app, normally the Suunto app, using the watch (`DC_STATUS_TIMEOUT` from the
+    /// Nautic driver, after waiting about 20 s for it): the watch is awake and in range, only busy.
+    case otherAppActive
 }
 
 /// `NauticSyncLink` over an open `dc_device_t`, through the Nautic driver.

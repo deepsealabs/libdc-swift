@@ -53,7 +53,8 @@ let package = Package(
                 .define("ENABLE_LOGGING"),
                 // Never HAVE_CONFIG_H (a local ./configure leaves an untracked config.h); other feature macros stay unset.
                 customBaudDefine,
-                .define("HAVE_CLOCK_GETTIME", .when(platforms: [.macOS]))
+                // Without it, timer.c falls back to the wall clock, and a clock change breaks driver deadlines.
+                .define("HAVE_CLOCK_GETTIME")
             ]
         ),
         .target(
@@ -89,6 +90,8 @@ let package = Package(
             sources: [
                 "LibDCSwift.swift",
                 "Logger.swift",
+                "LibDCLogging.swift",
+                "BoundedLogBuffer.swift",
                 "BLEManager.swift",
                 "BLELinkState.swift",
                 "BLEConnectionFailure.swift",
@@ -155,9 +158,11 @@ let package = Package(
             dependencies: ["LibDCSwift", "LibDCBridge", "Clibdivecomputer"],
             path: "Tests/LibDCSwiftTests",
             resources: [
-                .copy("Fixtures/suunto_nautic_1787752091.sbem"),
+                .copy("Fixtures/suunto_nautic_1787752091.bin"),
                 .copy("Fixtures/logbook_entries_multi.bin"),
+                .copy("Fixtures/suunto_ocean_nondive_synthetic.bin"),
                 .copy("Fixtures/suunto_nautic_1787752091.golden.json"),
+                .copy("Fixtures/suunto_nautic_app_takeover_replay.json"),
                 .copy("Fixtures/reefnet_sensus_synthetic.dcrec"),
                 .copy("Fixtures/hw_ostc_mk2_synthetic.dcrec"),
                 .copy("Fixtures/shearwater_petrel_serial_synthetic.dcrec"),

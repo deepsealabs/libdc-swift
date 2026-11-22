@@ -118,6 +118,63 @@ final class DiveComputerSessionTests: XCTestCase {
         Data((0..<4).map { UInt8((id >> (8 * UInt32($0))) & 0xFF) })
     }
 
+    // MARK: - Activities that aren't dives (#29)
+
+    func testANonDiveTheParserReportsIsSkippedAndTheDownloadCompletes() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB, Self.diveC])
+        let stores = stores()
+        let viewModel = DiveDataViewModel(fingerprintStore: stores.fingerprints)
+        let session = try openNautic(watch, stores: stores, lease: DiveComputerSessionLease())
+        let runC: DiveLogRetriever.ParseHook = { fingerprint, parse in
+            guard fingerprint != Self.le32(Self.diveC.id) else {
+                throw GenericParser.ParserError.sampleProcessingFailed(DC_STATUS_UNSUPPORTED)
+            }
+            return try parse()
+        }
+
+        let result = try XCTUnwrap(download(session, viewModel: viewModel, parseHook: runC))
+        XCTAssertEqual(result.outcome, .completed)
+        XCTAssertEqual(result.status, DC_STATUS_SUCCESS)
+        XCTAssertEqual(result.parseFailureCount, 0, "not a failure")
+        XCTAssertEqual(result.unreadableDives, [])
+        XCTAssertEqual(result.nonDivesSkipped, 1)
+        XCTAssertEqual(result.divesDownloaded, 2)
+        XCTAssertEqual(result.fingerprintCommit?.fingerprint, Self.le32(Self.diveB.id), "the newest dive's, not the run's")
+        XCTAssertEqual(viewModel.lastNonDivesSkipped, 1)
+        XCTAssertNil(viewModel.lastDownloadInterruption)
+        drainMain { viewModel.dives.count == 2 }
+        XCTAssertEqual(viewModel.dives.count, 2)
+    }
+
+    private static var logLines: [String] = []
+
+    func testRunsAreSkippedByTheDriverOrTheParserAndTheirReasonsReachTheLog() throws {
+        Self.logLines = []
+        set_libdc_log_sink { _, message in
+            DiveComputerSessionTests.logLines.append(message.map { String(cString: $0) } ?? "")
+        }
+        addTeardownBlock { set_libdc_log_sink(nil) }
+        // One the driver skips at its /Summary, one it can't judge (no Header) that the parser reports.
+        let skipped = FakeDive.activity(id: 1_789_753_600)
+        let parsed = FakeDive.activity(id: 1_789_761_000, header: false)
+        let watch = FakeWatch(dives: [Self.diveA, skipped, parsed, Self.diveC])
+        let stores = stores()
+        let viewModel = DiveDataViewModel(fingerprintStore: stores.fingerprints)
+        let session = try openNautic(watch, stores: stores, lease: DiveComputerSessionLease())
+
+        let result = try XCTUnwrap(download(session, viewModel: viewModel))
+        XCTAssertEqual(result.outcome, .completed)
+        XCTAssertEqual(result.parseFailureCount, 0)
+        XCTAssertEqual(result.nonDivesSkipped, 2)
+        XCTAssertEqual(result.divesDownloaded, 2)
+        XCTAssertEqual(result.fingerprintCommit?.fingerprint, Self.le32(Self.diveC.id))
+        XCTAssertFalse(watch.getPaths.contains("/Logbook/byId/\(skipped.id)/Data"))
+        XCTAssertTrue(watch.getPaths.contains("/Logbook/byId/\(parsed.id)/Data"))
+        XCTAssertTrue(Self.logLines.contains { $0.contains("Skipping entry \(skipped.id), not a dive (activity 3).") }, "\(Self.logLines)")
+        XCTAssertTrue(Self.logLines.contains { $0.hasPrefix("suunto_nautic_parser.c:") && $0.contains("Not a dive (activity 3).") },
+                      "the parser's line reaches the sink: \(Self.logLines)")
+    }
+
     // MARK: - Commit acknowledgement
 
     func testAcknowledgedCommitSavesTheFingerprintAndTheNextSessionStopsThere() throws {
@@ -203,6 +260,8 @@ final class DiveComputerSessionTests: XCTestCase {
 
     func testAFirstParseRejectionHoldsTheFingerprintAndReportsTheCount() throws {
         let watch = FakeWatch(dives: [Self.diveA, Self.diveB])
+        // A product the driver doesn't know, so DEVINFO has no model that would replace the stored one.
+        watch.product = "Unknown"
         let stores = stores()
         // A stored model no descriptor knows: every dive downloads, and none can be parsed.
         stores.devices.storeDevice(uuid: "FAKE-UUID", name: "Suunto Ocean 123456", family: .suuntoNautic, model: 99)
@@ -817,13 +876,43 @@ final class DiveComputerSessionTests: XCTestCase {
 
     private func sessionOutcome(_ status: dc_status_t, held: Int = 0, unreadable: Int = 0, matched: Bool = false,
                                 stored: Bool = true, newDives: Bool, empty: Int = 0,
-                                family: dc_family_t = DC_FAMILY_SHEARWATER_PETREL) -> (DiveDownloadResult.Outcome, Bool) {
+                                family: dc_family_t = DC_FAMILY_SHEARWATER_PETREL,
+                                otherAppActive: Bool = false) -> (DiveDownloadResult.Outcome, Bool) {
         let settled = DiveLogRetriever.outcome(status: status, family: family, fingerprintMatched: matched,
                                                hasNewDives: newDives, hadStoredFingerprint: stored, emptyReadCount: empty,
                                                rejectedCount: held, unreadableCount: unreadable)
         let r = DiveLogRetriever.sessionOutcome(settled, status: status, heldCount: held, rejectionStatus: DC_STATUS_DATAFORMAT,
-                                                fingerprintMatched: matched, hadStoredFingerprint: stored, hasNewDives: newDives)
+                                                fingerprintMatched: matched, hadStoredFingerprint: stored, hasNewDives: newDives,
+                                                otherAppActive: otherAppActive)
         return (r.outcome, r.commits)
+    }
+
+    func testAStepAsideForTheSuuntoAppIsItsOwnOutcomeAndNeverCommits() {
+        let nautic = DC_FAMILY_SUUNTO_NAUTIC
+        XCTAssertTrue(sessionOutcome(DC_STATUS_IO, newDives: true, family: nautic, otherAppActive: true) == (.otherAppActive, false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_IO, newDives: false, family: nautic, otherAppActive: true) == (.otherAppActive, false))
+        XCTAssertTrue(sessionOutcome(DC_STATUS_CANCELLED, newDives: true, family: nautic, otherAppActive: true) == (.cancelled, false),
+                      "a cancel during the wait for the app is the host's")
+    }
+
+    func testADownloadThatStepsAsideForTheSuuntoAppReportsIt() throws {
+        let watch = FakeWatch(dives: [Self.diveA, Self.diveB, Self.diveC])
+        // The app says hello two chunks into the second dive's stream (the walk goes newest first).
+        watch.onStreamStart = { [unowned watch] n in
+            if n == 2 { watch.appDuringStream = (2, .hello) }
+        }
+        let stores = stores()
+        let viewModel = DiveDataViewModel(fingerprintStore: stores.fingerprints)
+        let session = try openNautic(watch, stores: stores, lease: DiveComputerSessionLease())
+
+        let result = try XCTUnwrap(download(session, viewModel: viewModel))
+        XCTAssertEqual(result.outcome, .otherAppActive)
+        XCTAssertEqual(result.status, DC_STATUS_IO)
+        XCTAssertEqual(result.divesDownloaded, 1, "the newest dive came before the app")
+        XCTAssertNil(result.fingerprintCommit, "the fingerprint stays before the dives still to come")
+        XCTAssertFalse(result.succeeded)
+        drainMain { viewModel.lastDownloadStatus == DiveLogRetriever.otherAppActiveStatus }
+        XCTAssertEqual(viewModel.lastDownloadStatus, DiveLogRetriever.otherAppActiveStatus)
     }
 
     func testOnlyACompleteWalkWithNoHeldDiveCommits() {
@@ -858,7 +947,7 @@ final class DiveComputerSessionTests: XCTestCase {
     // MARK: - Suunto Nautic start time
 
     func testASessionTakesANauticStartFromTheParsersInstantNotTheFingerprint() throws {
-        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "sbem"))
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "suunto_nautic_1787752091", withExtension: "bin"))
         let dive = try Data(contentsOf: url)
         let data = UnsafeMutablePointer<device_data_t>.allocate(capacity: 1)
         data.initialize(to: device_data_t())

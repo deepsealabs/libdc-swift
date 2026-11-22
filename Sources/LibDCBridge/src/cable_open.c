@@ -3,7 +3,6 @@
 #if TARGET_OS_OSX
 #include <string.h>
 #include <libdivecomputer/serial.h>
-#include "bridge_private.h"
 
 typedef dc_status_t (*libdc_port_open_t)(dc_iostream_t **iostream, dc_context_t *context, const char *path, unsigned int limit);
 
@@ -38,8 +37,8 @@ static dc_status_t open_port_device(device_data_t *data, const char *path, dc_fa
     }
     dc_descriptor_free(descriptor);
 
-    // A wrapped port logs on its own context, WARNING and up (the port's errno lines): its INFO lines would repeat
-    // every call the wrapper logs, and the wrapper's 50 ms cancel slices would add a poll or sleep line each.
+    // A wrapped port logs on its own context, WARNING and up (the port's errno lines) unless full logging is on: its INFO
+    // lines would repeat every call the wrapper logs, and the wrapper's 50 ms cancel slices would add a poll or sleep line each.
     dc_context_t *port_context = context;
     if (wrap) {
         port_context = NULL;
@@ -48,7 +47,7 @@ static dc_status_t open_port_device(device_data_t *data, const char *path, dc_fa
             return DC_STATUS_NOMEMORY;
         }
         libdc_configure_context_logging(port_context);
-        dc_context_set_loglevel(port_context, DC_LOGLEVEL_WARNING);
+        dc_context_set_loglevel(port_context, libdc_stream_log_level());
     }
 
     dc_iostream_t *iostream = NULL;

@@ -48,12 +48,16 @@ public class DiveLogRetriever {
         var deliveredFingerprints: [Data] = []
         /// The first rejection's status, reported when the download itself went through.
         var rejectionStatus: dc_status_t = DC_STATUS_DATAFORMAT
+        /// Logbook entries left out as not dives: the ones the parser reported and the ones the driver skipped.
+        var nonDiveCount: Int = 0
         /// When false, a "download only new" toggle-off — skip loading/comparing
         /// against the stored fingerprint entirely so a full history re-download
         /// isn't cut short by the fingerprint match early-return below.
         let useFingerprint: Bool
         /// Drivers report a callback stop as success; this keeps a host stop from passing as complete.
         var stoppedByHost = false
+        /// A Suunto Nautic/Ocean stepped aside because another app, normally the Suunto app, started using the watch.
+        var otherAppActive = false
 
         var detectedFamily: dc_family_t = DC_FAMILY_NULL
         var detectedModel: UInt32 = 0
@@ -268,6 +272,15 @@ public class DiveLogRetriever {
         }
     }
 
+    /// A Suunto Nautic/Ocean entry the parser found isn't a dive (a run on an Ocean): its samples are UNSUPPORTED, which
+    /// that parser returns for nothing else. Another family's UNSUPPORTED, or one from creating the parser or reading the
+    /// date, is still a rejection.
+    static func isNonDiveActivity(_ error: Error, family: dc_family_t) -> Bool {
+        guard family == DC_FAMILY_SUUNTO_NAUTIC, let error = error as? GenericParser.ParserError,
+              case .sampleProcessingFailed(let status) = error else { return false }
+        return status == DC_STATUS_UNSUPPORTED
+    }
+
     /// CANCELLED whatever the driver said, so a cut-short download never advances the fingerprint past dives left on the device.
     static func downloadStatus(foreach status: dc_status_t, closedMidDownload: Bool,
                                stoppedByHost: Bool) -> dc_status_t {
@@ -292,6 +305,10 @@ public class DiveLogRetriever {
 
     /// Stable, human-stable name for a libdivecomputer status code, used for
     /// logging and for `DiveDataViewModel.lastDownloadStatus` (analytics).
+    /// `DiveDataViewModel.lastDownloadStatus` after a Suunto Nautic/Ocean download stepped aside for another app.
+    public static let otherAppActiveStatus = "otherAppActive"
+    static let otherAppActiveMessage = "The Suunto app started using the watch, so the download stepped aside. Try again once it's done; what arrived is kept."
+
     static func statusName(_ status: dc_status_t) -> String {
         switch status {
         case DC_STATUS_SUCCESS:     return "SUCCESS"
@@ -407,7 +424,8 @@ public class DiveLogRetriever {
         // Capture the FIRST dive's fingerprint (most recent dive on the device)
         // This is what we'll compare against on the next download
         // Not keyed on logCount: a rejected newest dive leaves it at 1.
-        if context.lastFingerprint == nil {
+        let newest = context.lastFingerprint == nil
+        if newest {
             context.lastFingerprint = fingerprintData
         }
         
@@ -423,6 +441,9 @@ public class DiveLogRetriever {
         
         // 4. Parse & Store Dive
         let diveData: DiveData
+        // The device's context, so the parser's ERROR and WARNING lines reach the host's log sink.
+        let parserContext = context.devicePtr?.pointee.context
+        var parseFamily = DC_FAMILY_NULL
         do {
             if context.policy == .session {
                 guard let target = context.sessionParseTarget() else {
@@ -432,6 +453,7 @@ public class DiveLogRetriever {
                     context.rejectedFingerprints.append(Data())
                     return 1
                 }
+                parseFamily = target.family
                 let parse = {
                     try GenericParser.parseDiveData(
                         dcFamily: target.family,
@@ -439,6 +461,7 @@ public class DiveLogRetriever {
                         diveNumber: context.logCount,
                         diveData: data,
                         dataSize: Int(size),
+                        context: parserContext,
                         fingerprint: fingerprintData.isEmpty ? nil : fingerprintData,
                         fallbackDate: nauticFallbackDate(family: target.family, fingerprint: fingerprintData),
                         clock: context.deviceClock
@@ -446,14 +469,21 @@ public class DiveLogRetriever {
                 }
                 diveData = try context.parseHook.map { try $0(fingerprintData, parse) } ?? parse()
             } else {
-                guard let parsed = try parseLegacy(context, data: data, size: size, fingerprint: fingerprintData) else {
+                guard let parsed = try parseLegacy(context, data: data, size: size, fingerprint: fingerprintData,
+                                                   parserContext: parserContext, family: &parseFamily) else {
                     return 0
                 }
                 diveData = parsed
             }
+        } catch let error where isNonDiveActivity(error, family: parseFamily) {
+            // Not a dive: not delivered and not a rejection, so it never holds, and never becomes the fingerprint.
+            logInfo("Skipping \(entryName(fingerprintData, family: parseFamily)): not a dive")
+            if newest { context.lastFingerprint = nil }
+            context.nonDiveCount += 1
+            return 1
         } catch {
             // Go on to the older dives; settle decides whether this one holds the fingerprint.
-            logError("❌ Failed to parse dive #\(context.logCount): \(error)")
+            logError("❌ Failed to parse dive #\(context.logCount) (\(entryName(fingerprintData, family: parseFamily))): \(error)")
             if context.rejectedFingerprints.isEmpty { context.rejectionStatus = parseFailureStatus(error) }
             context.rejectedFingerprints.append(fingerprintData)
             return 1
@@ -485,7 +515,8 @@ public class DiveLogRetriever {
     }
 
     /// Model selection for the `CBPeripheral` download; nil stops the walk (no configuration or family).
-    private static func parseLegacy(_ context: CallbackContext, data: UnsafePointer<UInt8>, size: UInt32, fingerprint fingerprintData: Data) throws -> DiveData? {
+    private static func parseLegacy(_ context: CallbackContext, data: UnsafePointer<UInt8>, size: UInt32, fingerprint fingerprintData: Data,
+                                    parserContext: OpaquePointer?, family parseFamily: inout dc_family_t) throws -> DiveData? {
         var familyToUse: dc_family_t
         var modelToUse: UInt32
         
@@ -494,7 +525,8 @@ public class DiveLogRetriever {
         // 2. Stored/Forced Configuration (What the user selected)
         // 3. Name-based Detection (Fallback)
         
-        if context.detectedModel != 0 {
+        // Without a descriptor there's no family to read a reported model under, so it goes by the stored one.
+        if context.detectedModel != 0, context.detectedFamily != DC_FAMILY_NULL {
             familyToUse = context.detectedFamily
             modelToUse = context.detectedModel
         } else if let stored = context.deviceStorage.getStoredDevice(uuid: context.deviceUUID) {
@@ -513,12 +545,14 @@ public class DiveLogRetriever {
             return nil
         }
 
+        parseFamily = familyToUse
         return try GenericParser.parseDiveData(
             family: deviceFamily,
             model: modelToUse,
             diveNumber: context.logCount,
             diveData: data,
             dataSize: Int(size),
+            context: parserContext,
             fingerprint: fingerprintData,
             fallbackDate: nauticFallbackDate(family: familyToUse, fingerprint: fingerprintData)
         )
@@ -529,10 +563,20 @@ public class DiveLogRetriever {
     /// little-endian UNIX timestamp). Supply it as a fallback so the dive
     /// parses instead of throwing on the missing datetime.
     private static func nauticFallbackDate(family: dc_family_t, fingerprint fingerprintData: Data) -> Date? {
-        guard family == DC_FAMILY_SUUNTO_NAUTIC, fingerprintData.count == 4 else { return nil }
-        let b = [UInt8](fingerprintData)
-        let id = UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
-        return Date(timeIntervalSince1970: TimeInterval(id))
+        nauticID(family: family, fingerprint: fingerprintData).map { Date(timeIntervalSince1970: TimeInterval($0)) }
+    }
+
+    /// A Suunto Nautic/Ocean fingerprint is the dive's logbook id, little-endian.
+    private static func nauticID(family: dc_family_t, fingerprint: Data) -> UInt32? {
+        guard family == DC_FAMILY_SUUNTO_NAUTIC, fingerprint.count == 4 else { return nil }
+        let b = [UInt8](fingerprint)
+        return UInt32(b[0]) | (UInt32(b[1]) << 8) | (UInt32(b[2]) << 16) | (UInt32(b[3]) << 24)
+    }
+
+    /// How a log line names a dive: a Nautic's logbook id, as the driver's own lines do, or else its fingerprint.
+    static func entryName(_ fingerprint: Data, family: dc_family_t) -> String {
+        if let id = nauticID(family: family, fingerprint: fingerprint) { return "entry \(id)" }
+        return fingerprint.isEmpty ? "no fingerprint" : "fingerprint \(fingerprint.hexString)"
     }
     
     private static let fingerprintLookup: @convention(c) (
@@ -840,6 +884,11 @@ public class DiveLogRetriever {
                 }
                 
                 let foreachStatus = dc_device_foreach(dcDevice, diveCallbackClosure, contextPtr)
+                var driverNonDives: UInt32 = 0
+                if dc_device_get_type(dcDevice) == DC_FAMILY_SUUNTO_NAUTIC,
+                   suunto_nautic_device_get_nondives(dcDevice, &driverNonDives) == DC_STATUS_SUCCESS {
+                    context.nonDiveCount += Int(driverNonDives)
+                }
                 let closedMidDownload = closeCoordinator.isCloseDeferred(UnsafeMutableRawPointer(devicePtr))
                 if closedMidDownload {
                     logWarning("Download stopped because the device is being closed")
@@ -848,6 +897,11 @@ public class DiveLogRetriever {
                                                 stoppedByHost: context.stoppedByHost)
                 if policy == .session, useFingerprint, devicePtr.pointee.fingerprint != nil, devicePtr.pointee.fsize > 0 {
                     context.deviceHadStoredFingerprint = true
+                }
+                if enumStatus == DC_STATUS_IO, dc_device_get_type(dcDevice) == DC_FAMILY_SUUNTO_NAUTIC,
+                   suunto_nautic_device_taken_over(dcDevice) != 0 {
+                    context.otherAppActive = true
+                    logWarning("Another app (the Suunto app) started using \(deviceName); the download stepped aside. Try again once it is done.")
                 }
 
                 // Log errors for debugging
@@ -924,12 +978,18 @@ public class DiveLogRetriever {
                                                      divesRejected: context.rejectedCount)
             : nil
         viewModel.lastUnreadableDives = downloadSucceeded ? unreadable : []
+        viewModel.lastNonDivesSkipped = context.nonDiveCount
+        logNonDives(context.nonDiveCount)
 
         // Handle the outcome
         if !downloadSucceeded {
             if context.stoppedByHost {
                 logInfo("Download stopped by the app after \(context.logCount - 1) dive(s); fingerprint kept")
                 viewModel.updateProgress(.cancelled)
+            } else if context.otherAppActive {
+                logWarning("Download stepped aside for another app after \(context.logCount - 1) dive(s); fingerprint kept")
+                viewModel.lastDownloadStatus = otherAppActiveStatus
+                viewModel.setDetailedError(otherAppActiveMessage, status: enumStatus)
             } else if emptyReadOnly {
                 logWarning("⚠️ Download returned only empty reads (\(context.emptyReadCount)) — likely BLE contention (official app holding the link)")
                 viewModel.updateProgress(.emptyRead)
@@ -968,9 +1028,11 @@ public class DiveLogRetriever {
 
     /// `outcome`'s rule, with a commit in place of the save: a cancel, a failure or a first parse rejection never commits.
     static func sessionOutcome(_ outcome: DownloadOutcome, status: dc_status_t, heldCount: Int, rejectionStatus: dc_status_t,
-                               fingerprintMatched: Bool, hadStoredFingerprint: Bool, hasNewDives: Bool)
+                               fingerprintMatched: Bool, hadStoredFingerprint: Bool, hasNewDives: Bool,
+                               otherAppActive: Bool = false)
         -> (outcome: DiveDownloadResult.Outcome, commits: Bool) {
         if status == DC_STATUS_CANCELLED { return (.cancelled, false) }
+        if otherAppActive { return (.otherAppActive, false) }
         guard outcome.succeeded else {
             if outcome.emptyReadOnly { return (.emptyRead, false) }
             if outcome.parseRejected { return (.parseRejected(count: heldCount, status: rejectionStatus), false) }
@@ -990,7 +1052,8 @@ public class DiveLogRetriever {
                                                 rejectionStatus: context.rejectionStatus,
                                                 fingerprintMatched: context.fingerprintMatched,
                                                 hadStoredFingerprint: context.hadStoredFingerprint,
-                                                hasNewDives: context.hasNewDives)
+                                                hasNewDives: context.hasNewDives,
+                                                otherAppActive: context.otherAppActive)
         let divesDownloaded = context.logCount - 1 - context.emptyReadCount
         let skipped = settled.succeeded ? unreadable : []
 
@@ -1009,6 +1072,8 @@ public class DiveLogRetriever {
                                                      divesRejected: context.rejectedCount)
             : nil
         viewModel.lastUnreadableDives = skipped
+        viewModel.lastNonDivesSkipped = context.nonDiveCount
+        logNonDives(context.nonDiveCount)
         if context.hasNewDives {
             viewModel.applyDiveNumbering()  // Sort by date and renumber (oldest = #1) before completion reads them
         }
@@ -1041,6 +1106,10 @@ public class DiveLogRetriever {
             logWarning("Download interrupted after \(divesDownloaded) dive(s): DC_STATUS_\(statusName(status)); fingerprint kept")
             viewModel.lastDownloadStatus = statusName(status)
             viewModel.setDetailedError("Some dives couldn't be downloaded. Reconnect and sync again to fetch the rest.", status: status)
+        case .otherAppActive:
+            logWarning("Download stepped aside for another app after \(divesDownloaded) dive(s); fingerprint kept")
+            viewModel.lastDownloadStatus = otherAppActiveStatus
+            viewModel.setDetailedError(otherAppActiveMessage, status: enumStatus)
         case .failed(let status):
             viewModel.lastDownloadStatus = statusName(status)
             viewModel.setDetailedError("Download incomplete - DC_STATUS error code: \(status)", status: status)
@@ -1048,7 +1117,17 @@ public class DiveLogRetriever {
 
         return DiveDownloadResult(outcome: outcome, status: enumStatus, divesDownloaded: divesDownloaded,
                                   parseFailureCount: context.rejectedCount, unreadableDives: skipped,
-                                  fingerprintCommit: commit, identity: identity)
+                                  nonDivesSkipped: context.nonDiveCount, fingerprintCommit: commit, identity: identity)
+    }
+
+    private static func logNonDives(_ count: Int) {
+        guard count > 0 else { return }
+        logInfo("Skipped \(nonDivesSkippedText(count))")
+    }
+
+    /// "1 non-dive activity", "2 non-dive activities".
+    public static func nonDivesSkippedText(_ count: Int) -> String {
+        count == 1 ? "1 non-dive activity" : "\(count) non-dive activities"
     }
 
     /// The `CBPeripheral` download's words for a first rejection, plus what else arrived.

@@ -1,11 +1,12 @@
 #include "configuredc.h"
 #include "BLEBridge.h"
-#include "bridge_private.h"
 #include <libdivecomputer/device.h>
 #include <libdivecomputer/descriptor.h>
 #include <libdivecomputer/iostream.h>
 #include <libdivecomputer/parser.h>
 #include "iostream-private.h"
+#include "device-private.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -66,10 +67,11 @@ static void debug_hexdump(const char *prefix, const void *data, size_t size) {
 /*--------------------------------------------------------------------
  * Debug logging toggle
  *
- * Off by default. When enabled, the libdivecomputer context runs at
- * DC_LOGLEVEL_DEBUG (surfacing the protocol hexdumps) and the extra C-side
- * traces below print. Leave it off for normal use; the host app turns it on
- * with set_ble_debug_logging(1) when diagnosing a device.
+ * Off by default. When enabled, a context the bridge sets up runs at least at
+ * DC_LOGLEVEL_DEBUG (surfacing the protocol hexdumps on the console) and the
+ * extra C-side traces below print. Leave it off for normal use; the host app
+ * turns it on with set_ble_debug_logging(1) when diagnosing a device. For the
+ * hexdumps in the host sink as well, use set_libdc_log_level instead.
  *------------------------------------------------------------------*/
 static int g_ble_debug_logging = 0;
 
@@ -348,7 +350,38 @@ static void close_device_data(device_data_t *data) {
 // elsewhere in this file. Without this, a protocol-level validation failure
 // in e.g. shearwater_common.c only ever surfaces as a bare DC_STATUS_PROTOCOL,
 // with no indication of which specific check failed or why.
-static libdc_log_sink_t g_libdc_log_sink = NULL;
+static _Atomic(libdc_log_sink_t) g_libdc_log_sink = NULL;
+static _Atomic(int) g_libdc_log_level = DC_LOGLEVEL_WARNING;
+
+// A context's logfunc userdata: its DEBUG and ALL lines go to the host sink too.
+static char g_sink_all_lines;
+#define LIBDC_SINK_ALL_LINES ((void *) &g_sink_all_lines)
+
+static void send_to_sink(libdc_log_sink_t sink, const char *level, const char *file, unsigned int line,
+    const char *function, const char *message) {
+    const char *base = file ? strrchr(file, '/') : NULL;
+    const char *name = base ? base + 1 : (file ? file : "?");
+    const char *func = function ? function : "?";
+    const char *msg = message ? message : "";
+    char text[1024];
+    int length = snprintf(text, sizeof(text), "%s:%u %s(): %s", name, line, func, msg);
+    if (length < 0) {
+        return;
+    }
+    if ((size_t) length < sizeof(text)) {
+        sink(level, text);
+        return;
+    }
+    // A long packet's hexdump runs past the stack buffer; libdivecomputer caps a message at 16 KB.
+    char *heap = malloc((size_t) length + 1);
+    if (!heap) {
+        sink(level, text);
+        return;
+    }
+    snprintf(heap, (size_t) length + 1, "%s:%u %s(): %s", name, line, func, msg);
+    sink(level, heap);
+    free(heap);
+}
 
 static void dc_log_callback(dc_context_t *context, dc_loglevel_t loglevel, const char *file, unsigned int line, const char *function, const char *message, void *userdata) {
     const char *level = "?";
@@ -357,45 +390,54 @@ static void dc_log_callback(dc_context_t *context, dc_loglevel_t loglevel, const
         case DC_LOGLEVEL_WARNING: level = "WARN"; break;
         case DC_LOGLEVEL_INFO:    level = "INFO"; break;
         case DC_LOGLEVEL_DEBUG:   level = "DEBUG"; break;
+        case DC_LOGLEVEL_ALL:     level = "ALL"; break;
         default: break;
     }
     printf("[C][libdc:%s] %s:%d %s(): %s\n", level, file, line, function, message);
 
-    // DEBUG is the protocol hexdumps: console only, they would flood a host log.
-    libdc_log_sink_t sink = g_libdc_log_sink;
-    if (sink && loglevel != DC_LOGLEVEL_DEBUG) {
-        const char *base = file ? strrchr(file, '/') : NULL;
-        char text[1024];
-        snprintf(text, sizeof(text), "%s:%u %s(): %s",
-                 base ? base + 1 : (file ? file : "?"), line, function ? function : "?", message ? message : "");
-        sink(level, text);
+    // DEBUG and ALL go to the sink only from a context opened at that level; set_ble_debug_logging's stay on the console.
+    libdc_log_sink_t sink = atomic_load(&g_libdc_log_sink);
+    if (sink && (loglevel < DC_LOGLEVEL_DEBUG || userdata == LIBDC_SINK_ALL_LINES)) {
+        send_to_sink(sink, level, file, line, function, message);
     }
 }
 
 void set_libdc_log_sink(libdc_log_sink_t sink) {
-    g_libdc_log_sink = sink;
+    atomic_store(&g_libdc_log_sink, sink);
+}
+
+void set_libdc_log_level(dc_loglevel_t level) {
+    atomic_store(&g_libdc_log_level, (int) level);
+}
+
+dc_loglevel_t libdc_log_level(void) {
+    return (dc_loglevel_t) atomic_load(&g_libdc_log_level);
+}
+
+dc_loglevel_t libdc_stream_log_level(void) {
+    dc_loglevel_t level = libdc_log_level();
+    return level >= DC_LOGLEVEL_DEBUG ? level : DC_LOGLEVEL_WARNING;
+}
+
+static void *sink_userdata(dc_loglevel_t level) {
+    return level >= DC_LOGLEVEL_DEBUG ? LIBDC_SINK_ALL_LINES : NULL;
 }
 
 void attach_libdc_log(dc_context_t *context) {
     if (context)
-        dc_context_set_logfunc(context, dc_log_callback, NULL);
+        dc_context_set_logfunc(context, dc_log_callback, sink_userdata(libdc_log_level()));
 }
 
-static void configure_context_logging(dc_context_t *context) {
-    dc_context_set_logfunc(context, dc_log_callback, NULL);
-    // Default level is WARNING, which drops the DEBUG hexdumps (e.g. the
-    // Suunto Nautic handshake/protocol frames). Enable debug logging with
-    // set_ble_debug_logging(1) to surface them when diagnosing a device.
-    dc_context_set_loglevel(context,
-        g_ble_debug_logging ? DC_LOGLEVEL_DEBUG : DC_LOGLEVEL_WARNING);
-}
-
-#if TARGET_OS_OSX
-// A cable open logs the port's own failure (dc_serial_open's errno) before open_device_on_iostream sets this up.
 void libdc_configure_context_logging(dc_context_t *context) {
-    configure_context_logging(context);
+    if (!context)
+        return;
+    dc_loglevel_t level = libdc_log_level();
+    dc_context_set_logfunc(context, dc_log_callback, sink_userdata(level));
+    // set_ble_debug_logging(1) raises a lower level to DEBUG, for the console (e.g. the Suunto Nautic handshake frames).
+    if (g_ble_debug_logging && level < DC_LOGLEVEL_DEBUG)
+        level = DC_LOGLEVEL_DEBUG;
+    dc_context_set_loglevel(context, level);
 }
-#endif
 
 /*--------------------------------------------------------------------
  * Opens the device on data->iostream; releases everything on failure
@@ -426,6 +468,10 @@ static dc_status_t open_device_with_descriptor(device_data_t *data, dc_descripto
         data->device = NULL;
         // The link dropped (or a close is waiting): every retry would fail at once on it, 3 s apart.
         if (rc == DC_STATUS_NODEVICE || rc == DC_STATUS_CANCELLED) {
+            break;
+        }
+        // A Suunto Nautic/Ocean already waited about 20 s for another app (the Suunto app) to finish with the watch.
+        if (rc == DC_STATUS_TIMEOUT && dc_descriptor_get_type(descriptor) == DC_FAMILY_SUUNTO_NAUTIC) {
             break;
         }
     }
@@ -489,7 +535,7 @@ dc_status_t open_device_on_iostream(device_data_t *data, dc_iostream_t *iostream
         return DC_STATUS_INVALIDARGS;
     }
 
-    configure_context_logging(context);
+    libdc_configure_context_logging(context);
 
     rc = find_descriptor_by_model(&descriptor, family, model);
     if (rc != DC_STATUS_SUCCESS) {
@@ -518,7 +564,7 @@ dc_status_t open_ble_device(device_data_t *data, const char *devaddr, dc_family_
         printf("Failed to create context, rc=%d\n", rc);
         return rc;
     }
-    configure_context_logging(data->context);
+    libdc_configure_context_logging(data->context);
 
     // Resolved before connecting so an unknown model never brings up a BLE link.
     rc = find_descriptor_by_model(&descriptor, family, model);
@@ -553,6 +599,10 @@ dc_status_t libdc_set_cancel(device_data_t *data, dc_cancel_callback_t callback,
         return DC_STATUS_INVALIDARGS;
     }
     return dc_device_set_cancel(data->device, callback, userdata);
+}
+
+int libdc_device_is_cancelled(dc_device_t *device) {
+    return device_is_cancelled(device);
 }
 
 /*--------------------------------------------------------------------
@@ -906,12 +956,14 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     // Try stored configuration first if provided. Model 0 is legitimate for
     // families without sub-models (e.g. Suunto Nautic is forced as
     // (suuntoNautic, 0)); guarding on stored_model != 0 here would skip them.
+    dc_status_t stored_rc = DC_STATUS_IO;
     if (stored_family != DC_FAMILY_NULL) {
         rc = open_ble_device(data, address, stored_family, stored_model);
         if (rc == DC_STATUS_SUCCESS) {
             *out_data = data;
             return DC_STATUS_SUCCESS;
         }
+        stored_rc = rc;
     }
     
     // Fall back to identification if stored config failed or wasn't provided
@@ -924,10 +976,10 @@ dc_status_t open_ble_device_with_identification(device_data_t **out_data,
     // Skip if name-based detection resolves to the same device family we
     // already tried -- retrying the same protocol family with a slightly
     // different model number can't help (same wire protocol, same
-    // handshake) and creates BLE races.
+    // handshake) and creates BLE races. The stored open's status says why it failed.
     if (stored_family != DC_FAMILY_NULL && family == stored_family) {
         free(data);
-        return DC_STATUS_IO;
+        return stored_rc;
     }
 
     rc = open_ble_device(data, address, family, model);

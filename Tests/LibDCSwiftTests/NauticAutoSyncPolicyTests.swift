@@ -127,9 +127,24 @@ final class NauticAutoSyncPolicyTests: XCTestCase {
         XCTAssertFalse(subscription.matches([0xF0, 0x24, 0x0D]))
     }
 
+    func testAStepAsideIsTakenBackFromADivesAttempts() {
+        var plan = DiveSyncPlan(synced: [], retriesPerDive: 1)
+        plan.recordAttempt(7)
+        plan.recordAttempt(7)
+        XCTAssertFalse(plan.canRetry(7))
+        plan.forgetAttempt(7)
+        XCTAssertTrue(plan.canRetry(7), "the attempt the Suunto app cut short isn't one of the retries")
+        plan.forgetAttempt(7)
+        XCTAssertNil(plan.attempts[7])
+        plan.forgetAttempt(7)
+        XCTAssertNil(plan.attempts[7], "nothing to take back")
+    }
+
     func testConnectAttemptsAndTriggerRetriesAreBounded() {
         let config = NauticAutoSync.Configuration()
-        XCTAssertEqual(config.connectTimeout, 25, "a pending connect to a sleeping watch can otherwise sit for minutes")
+        // A pending connect to a sleeping watch can't sit for minutes; a link that is up gets the open's wait on top.
+        XCTAssertEqual(config.connectTimeout, 25)
+        XCTAssertEqual(config.openTimeout, 30)
         XCTAssertEqual(config.triggerSubscribeRetries, 3)
         XCTAssertEqual(config.triggerSubscribeRetryDelay, 2)
         XCTAssertEqual(config.triggerResubscribeInterval, 5 * 60)
